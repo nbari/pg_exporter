@@ -13,12 +13,10 @@ keywords = [
     "exporter",
     "observability"
 ]
-
 categories = [
     "command-line-utilities",
     "network-programming",
     "database",
-    "monitoring"
 ]
 license = "BSD-3-Clause"
 
