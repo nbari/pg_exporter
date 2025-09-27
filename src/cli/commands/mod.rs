@@ -55,6 +55,39 @@ mod tests {
     fn test_defaults() {
         let matches = new().try_get_matches_from(["pg_exporter"]);
 
-        assert!(matches.is_err());
+        assert!(matches.is_ok());
+    }
+
+    #[test]
+    fn test_new() {
+        let command = new();
+
+        assert_eq!(command.get_name(), "pg_exporter");
+        assert_eq!(
+            command.get_about().unwrap().to_string(),
+            env!("CARGO_PKG_DESCRIPTION")
+        );
+        assert_eq!(
+            command.get_version().unwrap().to_string(),
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+
+    #[test]
+    fn test_check_port_and_dsn() {
+        let command = new();
+        let matches = command.get_matches_from(vec![
+            "pg_exporter",
+            "--port",
+            "8080",
+            "--dsn",
+            "postgres://user:password@localhost:5432/genesis",
+        ]);
+
+        assert_eq!(matches.get_one::<u16>("port").map(|s| *s), Some(8080));
+        assert_eq!(
+            matches.get_one::<String>("dsn").map(|s| s.to_string()),
+            Some("postgres://user:password@localhost:5432/genesis".to_string())
+        );
     }
 }

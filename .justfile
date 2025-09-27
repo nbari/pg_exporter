@@ -19,17 +19,11 @@ update:
 clean:
   cargo clean
 
-check-main:
-  @if [ "$(git branch --show-current)" != "main" ]; then echo "Error: Not on main branch"; exit 1; fi
-
-bump: check-main
+bump: update clean test
   cargo set-version --bump patch
   git add .
   git commit -m "bump version to $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
-  gbump -t
-  git push
-  git push --tags
 
-release: update clean test bump
+release: bump
   # podman pull clux/muslrust:stable
   podman run -v $PWD:/volume --rm -t clux/muslrust:stable cargo build --release
