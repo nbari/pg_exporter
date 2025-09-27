@@ -11,9 +11,6 @@ keywords = [
     "prometheus",
     "metrics",
     "exporter",
-    "monitoring",
-    "rust",
-    "database",
     "observability"
 ]
 
