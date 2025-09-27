@@ -4,5 +4,5 @@ use secrecy::SecretString;
 
 #[derive(Debug)]
 pub enum Action {
-    Run { dsn: SecretString },
+    Run { port: u16, dsn: SecretString },
 }

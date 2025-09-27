@@ -21,10 +21,20 @@ pub fn new() -> Command {
         .color(ColorChoice::Auto)
         .styles(styles)
         .arg(
+            Arg::new("port")
+                .short('p')
+                .long("port")
+                .help("Port to listen on")
+                .default_value("9432")
+                .env("PG_EXPORTER_PORT")
+                .value_parser(clap::value_parser!(u16)),
+        )
+        .arg(
             Arg::new("dsn")
                 .long("dsn")
                 .help("Database connection string")
-                .env("DSN")
+                .default_value("postgresql://postgresd@localhost:5432/postgres")
+                .env("PG_EXPORTER_DSN")
                 .value_name("DSN")
                 .required(true),
         )
