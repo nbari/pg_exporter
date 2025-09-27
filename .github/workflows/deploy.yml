@@ -51,7 +51,7 @@ jobs:
 
       - name: Build Linux
         run: |
-          cargo build --release --locked --target ${{ matrix.target }} --features "openssl/vendored"
+          cargo build --release --target ${{ matrix.target }} --features "openssl/vendored"
         if: matrix.build == 'linux'
 
       - name: Generate RPM
@@ -67,7 +67,7 @@ jobs:
 
       - name: Build
         run: |
-          cargo build --release --locked --target ${{ matrix.target }}
+          cargo build --release --target ${{ matrix.target }}
         if: matrix.build != 'linux'
 
       - name: Build archive
