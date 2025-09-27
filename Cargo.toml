@@ -41,5 +41,10 @@ tracing = "0.1.41"
 tracing-opentelemetry = "0.31.0"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "json"] }
 
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/pg_exporter", dest = "/usr/bin/pg_exporter", mode = "0755" },
+]
+
 [build-dependencies]
 built = { version = "0.8.0", features = ["git2"] }

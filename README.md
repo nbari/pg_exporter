@@ -11,9 +11,8 @@ A PostgreSQL metric exporter for Prometheus written in Rust
 
 * `Modular collectors` Expose only the metrics you actually need instead of collecting everything by default.
 * Prevent Prometheus from being overloaded with unnecessary data.
-* Allow dynamic enabling/disabling of metric modules for flexibility and efficiency.
+* Customizable collectors to allow users to tailor the metrics to their specific requirements.
 
-This approach helps maintain performance, observability clarity, and operational simplicity.
 
 ## Download or build
 
