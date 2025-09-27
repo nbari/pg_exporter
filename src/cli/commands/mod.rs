@@ -84,7 +84,7 @@ mod tests {
             "postgres://user:password@localhost:5432/genesis",
         ]);
 
-        assert_eq!(matches.get_one::<u16>("port").map(|s| *s), Some(8080));
+        assert_eq!(matches.get_one::<u16>("port").copied(), Some(8080));
         assert_eq!(
             matches.get_one::<String>("dsn").map(|s| s.to_string()),
             Some("postgres://user:password@localhost:5432/genesis".to_string())
