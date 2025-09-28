@@ -9,13 +9,13 @@ mod register_macro;
 pub trait Collector {
     fn name(&self) -> &'static str;
 
-    fn enabled_by_default(&self) -> bool;
-
-    // New method: register metrics with the prometheus registry
+    // register metrics with the prometheus registry
     fn register_metrics(&self, registry: &Registry) -> Result<()>;
 
     // Modified: collect now updates the registered metrics instead of returning strings
     fn collect(&self, pool: &PgPool) -> impl std::future::Future<Output = Result<()>> + Send;
+
+    fn enabled_by_default(&self) -> bool;
 }
 
 // THIS IS THE ONLY PLACE YOU NEED TO ADD NEW COLLECTORS ✨

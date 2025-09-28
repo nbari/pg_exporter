@@ -33,7 +33,7 @@ impl Collector for VacuumCollector {
     }
 
     fn enabled_by_default(&self) -> bool {
-        true
+        false
     }
 
     fn register_metrics(&self, registry: &Registry) -> Result<()> {

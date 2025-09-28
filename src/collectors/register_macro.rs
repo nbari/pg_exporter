@@ -65,7 +65,7 @@ macro_rules! register_collectors {
             map
         }
 
-        // Generate array of collector names - this is what you need for clap!
+        // Generate array of collector names
         pub const COLLECTOR_NAMES: &[&'static str] = &[
             $(stringify!($module),)*
         ];

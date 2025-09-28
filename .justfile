@@ -134,3 +134,11 @@ deploy-minor: bump-minor _deploy-merge-and-tag
 
 # Deploy with major version bump
 deploy-major: bump-major _deploy-merge-and-tag
+
+# Watch for changes and run
+watch:
+  cargo watch -x 'run --'
+
+# get metrics curl
+curl:
+  curl -s 0:9432/metrics

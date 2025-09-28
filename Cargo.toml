@@ -43,6 +43,7 @@ ulid = "1.2.1"
 url = "2.5.7"
 temp-env = "0.3.6"
 prometheus = "0.14.0"
+regex = "1.11.3"
 
 [package.metadata.generate-rpm]
 assets = [
