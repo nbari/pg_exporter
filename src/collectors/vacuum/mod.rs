@@ -1,19 +1,29 @@
-use super::Collector;
+use crate::collectors::Collector;
 use anyhow::Result;
+use prometheus::{IntGauge, Registry};
 use sqlx::PgPool;
 
 #[derive(Clone)]
-pub struct VacuumCollector;
-
-impl Default for VacuumCollector {
-    fn default() -> Self {
-        Self::new()
-    }
+pub struct VacuumCollector {
+    // Store metric handles for updating during collection
+    connection_count: IntGauge,
 }
 
 impl VacuumCollector {
     pub fn new() -> Self {
-        Self
+        Self {
+            connection_count: IntGauge::new(
+                "pg_connections_total_2",
+                "Total number of connections",
+            )
+            .expect("Failed to create connection_count metric"),
+        }
+    }
+}
+
+impl Default for VacuumCollector {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -22,27 +32,23 @@ impl Collector for VacuumCollector {
         "vacuum"
     }
 
-    async fn collect(&self, pool: &PgPool) -> Result<String> {
-        // Example vacuum metrics query
-        let rows: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT schemaname||'.'||relname, n_tup_ins + n_tup_upd + n_tup_del as total_changes
-             FROM pg_stat_user_tables",
-        )
-        .fetch_all(pool)
-        .await?;
-
-        let mut output = String::new();
-        for (table, changes) in rows {
-            output.push_str(&format!(
-                "pg_table_changes{{table=\"{}\"}} {}\n",
-                table, changes
-            ));
-        }
-
-        Ok(output)
+    fn enabled_by_default(&self) -> bool {
+        true
     }
 
-    fn enabled_by_default(&self) -> bool {
-        false // Vacuum collector disabled by default
+    fn register_metrics(&self, registry: &Registry) -> Result<()> {
+        registry.register(Box::new(self.connection_count.clone()))?;
+        Ok(())
+    }
+
+    async fn collect(&self, pool: &PgPool) -> Result<()> {
+        // Query the database and update metrics
+        let row: (i64,) = sqlx::query_as("SELECT count(*) FROM pg_stat_activity")
+            .fetch_one(pool)
+            .await?;
+
+        self.connection_count.set(row.0);
+
+        Ok(())
     }
 }

@@ -1,21 +1,21 @@
 use anyhow::Result;
+use prometheus::Registry;
 use sqlx::PgPool;
 use std::collections::HashMap;
 
 #[macro_use]
 mod register_macro;
 
-// The trait defines the interface - this is idiomatic Rust
 pub trait Collector {
     fn name(&self) -> &'static str;
-    fn collect(&self, pool: &PgPool) -> impl std::future::Future<Output = Result<String>> + Send;
-    fn enabled_by_default(&self) -> bool {
-        true
-    }
-}
 
-pub struct CollectorSpec {
-    pub name: &'static str,
+    fn enabled_by_default(&self) -> bool;
+
+    // New method: register metrics with the prometheus registry
+    fn register_metrics(&self, registry: &Registry) -> Result<()>;
+
+    // Modified: collect now updates the registered metrics instead of returning strings
+    fn collect(&self, pool: &PgPool) -> impl std::future::Future<Output = Result<()>> + Send;
 }
 
 // THIS IS THE ONLY PLACE YOU NEED TO ADD NEW COLLECTORS ✨

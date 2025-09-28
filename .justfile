@@ -124,7 +124,7 @@ _deploy-merge-and-tag:
     echo "📋 Summary:"
     echo "   - develop branch: bumped and pushed"
     echo "   - main branch: merged and pushed"
-    echo "   - tag v$new_version: created and pushed"
+    echo "   - tag $new_version: created and pushed"
 
 # Deploy: merge to main, tag, and push everything
 deploy: bump _deploy-merge-and-tag

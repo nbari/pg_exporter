@@ -28,7 +28,15 @@ macro_rules! register_collectors {
                 }
             }
 
-            async fn collect(&self, pool: &PgPool) -> Result<String> {
+            fn register_metrics(&self, registry: &Registry) -> Result<()> {
+                match self {
+                    $(
+                        CollectorType::$collector_type(c) => c.register_metrics(registry),
+                    )*
+                }
+            }
+
+            async fn collect(&self, pool: &PgPool) -> Result<()> {
                 match self {
                     $(
                         CollectorType::$collector_type(c) => c.collect(pool).await,
