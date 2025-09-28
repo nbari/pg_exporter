@@ -3,6 +3,8 @@ use clap::{
     builder::styling::{AnsiColor, Effects, Styles},
 };
 
+mod collectors;
+
 pub mod built_info {
     include!(concat!(env!("OUT_DIR"), "/built.rs"));
 }
@@ -14,7 +16,7 @@ pub fn new() -> Command {
         .literal(AnsiColor::Blue.on_default() | Effects::BOLD)
         .placeholder(AnsiColor::Green.on_default());
 
-    Command::new("pg_exporter")
+    let cmd = Command::new("pg_exporter")
         .about("PostgreSQL metric exporter for Prometheus")
         .version(env!("CARGO_PKG_VERSION"))
         .long_version(built_info::GIT_COMMIT_HASH.to_owned())
@@ -35,8 +37,7 @@ pub fn new() -> Command {
                 .help("Database connection string")
                 .default_value("postgresql://postgresd@localhost:5432/postgres")
                 .env("PG_EXPORTER_DSN")
-                .value_name("DSN")
-                .required(true),
+                .value_name("DSN"),
         )
         .arg(
             Arg::new("verbose")
@@ -44,7 +45,9 @@ pub fn new() -> Command {
                 .long("verbose")
                 .help("Increase verbosity, -vv for debug")
                 .action(ArgAction::Count),
-        )
+        );
+
+    collectors::add_collectors_args(cmd)
 }
 
 #[cfg(test)]
@@ -53,9 +56,16 @@ mod tests {
 
     #[test]
     fn test_defaults() {
-        let matches = new().try_get_matches_from(["pg_exporter"]);
+        temp_env::with_var("PG_EXPORTER_DSN", None::<String>, || {
+            let command = new();
+            let matches = command.get_matches_from(vec!["pg_exporter"]);
 
-        assert!(matches.is_ok());
+            assert_eq!(matches.get_one::<u16>("port").copied(), Some(9432));
+            assert_eq!(
+                matches.get_one::<String>("dsn").map(|s| s.to_string()),
+                Some("postgresql://postgresd@localhost:5432/postgres".to_string())
+            );
+        });
     }
 
     #[test]
