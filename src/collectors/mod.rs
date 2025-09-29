@@ -1,4 +1,5 @@
 use anyhow::Result;
+use futures::future::BoxFuture;
 use prometheus::Registry;
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -12,8 +13,8 @@ pub trait Collector {
     // register metrics with the prometheus registry
     fn register_metrics(&self, registry: &Registry) -> Result<()>;
 
-    // Modified: collect now updates the registered metrics instead of returning strings
-    fn collect(&self, pool: &PgPool) -> impl std::future::Future<Output = Result<()>> + Send;
+    // lifetime 'a is needed to tie the future to the lifetime of self and pool
+    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>>;
 
     fn enabled_by_default(&self) -> bool;
 }
@@ -21,7 +22,7 @@ pub trait Collector {
 // THIS IS THE ONLY PLACE YOU NEED TO ADD NEW COLLECTORS ✨
 register_collectors! {
     default => DefaultCollector,
-    vacuum => VacuumCollector
+    vacuum => VacuumCollector,
     // Add more collectors here - just follow the same pattern!
 }
 

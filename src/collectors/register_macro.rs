@@ -36,10 +36,10 @@ macro_rules! register_collectors {
                 }
             }
 
-            async fn collect(&self, pool: &PgPool) -> Result<()> {
+            fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
                 match self {
                     $(
-                        CollectorType::$collector_type(c) => c.collect(pool).await,
+                        CollectorType::$collector_type(c) => c.collect(pool),
                     )*
                 }
             }

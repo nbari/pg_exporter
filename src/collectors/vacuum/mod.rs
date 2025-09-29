@@ -1,29 +1,27 @@
 use crate::collectors::Collector;
 use anyhow::Result;
-use prometheus::{IntGauge, Registry};
+use futures::future::BoxFuture;
+use prometheus::Registry;
 use sqlx::PgPool;
+use std::sync::Arc;
 
-#[derive(Clone)]
+pub mod progress;
+pub mod stats;
+
+/// Main Vacuum Collector (aggregates sub-collectors)
+#[derive(Clone, Default)]
 pub struct VacuumCollector {
-    // Store metric handles for updating during collection
-    connection_count: IntGauge,
+    subs: Vec<Arc<dyn Collector + Send + Sync>>,
 }
 
 impl VacuumCollector {
     pub fn new() -> Self {
         Self {
-            connection_count: IntGauge::new(
-                "pg_connections_total_2",
-                "Total number of connections",
-            )
-            .expect("Failed to create connection_count metric"),
+            subs: vec![
+                Arc::new(stats::VacuumStatsCollector::new()),
+                Arc::new(progress::VacuumProgressCollector::new()),
+            ],
         }
-    }
-}
-
-impl Default for VacuumCollector {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -32,23 +30,24 @@ impl Collector for VacuumCollector {
         "vacuum"
     }
 
-    fn enabled_by_default(&self) -> bool {
-        false
-    }
-
     fn register_metrics(&self, registry: &Registry) -> Result<()> {
-        registry.register(Box::new(self.connection_count.clone()))?;
+        for sub in &self.subs {
+            sub.register_metrics(registry)?;
+        }
         Ok(())
     }
 
-    async fn collect(&self, pool: &PgPool) -> Result<()> {
-        // Query the database and update metrics
-        let row: (i64,) = sqlx::query_as("SELECT count(*) FROM pg_stat_activity")
-            .fetch_one(pool)
-            .await?;
+    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+        let subs = &self.subs;
+        Box::pin(async move {
+            for sub in subs {
+                sub.collect(pool).await?;
+            }
+            Ok(())
+        })
+    }
 
-        self.connection_count.set(row.0);
-
-        Ok(())
+    fn enabled_by_default(&self) -> bool {
+        true
     }
 }
