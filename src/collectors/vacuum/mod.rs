@@ -48,6 +48,6 @@ impl Collector for VacuumCollector {
     }
 
     fn enabled_by_default(&self) -> bool {
-        true
+        false
     }
 }
