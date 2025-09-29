@@ -20,40 +20,45 @@ Install via Cargo:
 
     cargo install pg_exporter
 
-## project layout
+## Project layout
 
 The project is structured as follows:
 
 ```
-.
 ├── bin
-│   └── pg_exporter.rs
 ├── cli
-│   ├── actions
-│   ├── commands
-│   ├── dispatch
-│   ├── mod.rs
-│   ├── start.rs
-│   └── telemetry.rs
-├── collectors <-- Here are the individual collectors
-│   ├── config.rs
-│   ├── default
-│   ├── mod.rs <-- This file registers all collectors
-│   ├── register_macro.rs
-│   ├── registry.rs
-│   └── vacuum
+├── collectors
 ├── exporter
-│   ├── handlers
-│   └── mod.rs
 └── lib.rs
 ```
 
 All the collectors are located in the `collectors` directory. Each collector is
 in its own subdirectory, making it easy to manage and extend.
 
+```
+collectors
+├── config.rs
+├── default <-- default collector
+│   ├── mod.rs
+│   └── version.rs
+├── mod.rs <-- main file to register collectors
+├── register_macro.rs
+├── registry.rs
+└── vacuum <-- vacuum collector
+    ├── mod.rs
+    ├── progress.rs
+    └── stats.rs
+```
+
+
 In `mod.rs` file inside the `collectors` directory, you can see how each
 collector is registered. This modular approach allows for easy addition or
 removal of collectors as needed.
+
+Each collector can then be extended with more specific metrics. For example,
+the `vacuum` collector has two files: `progress.rs` and `stats.rs`, this allows
+for better organization and separation of concerns within the collector and
+better testability. (or that is the plan).
 
 
 ## Feedback
