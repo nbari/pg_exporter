@@ -8,6 +8,9 @@ use std::sync::Arc;
 mod version;
 use version::VersionCollector;
 
+mod settings;
+use settings::SettingsCollector;
+
 #[derive(Clone, Default)]
 pub struct DefaultCollector {
     subs: Vec<Arc<dyn Collector + Send + Sync>>,
@@ -16,7 +19,10 @@ pub struct DefaultCollector {
 impl DefaultCollector {
     pub fn new() -> Self {
         Self {
-            subs: vec![Arc::new(VersionCollector::new())],
+            subs: vec![
+                Arc::new(VersionCollector::new()),
+                Arc::new(SettingsCollector::new()),
+            ],
         }
     }
 }

@@ -1,3 +1,7 @@
+# Get the current user's UID and GID
+uid := `id -u`
+gid := `id -g`
+
 default: test
   @just --list
 
@@ -142,3 +146,22 @@ watch:
 # get metrics curl
 curl:
   curl -s 0:9432/metrics
+
+postgres version="latest":
+  mkdir -p db/log/postgres
+  podman run --rm -d --name pg_exporter_postgres \
+    -e POSTGRES_USER=postgres \
+    -e POSTGRES_HOST_AUTH_METHOD=trust \
+    -e PGDATA=/db/data/{{ version }} \
+    -p 5432:5432 \
+    -v $(pwd)/db:/db \
+    -v $(pwd)/db/config/postgres:/etc/postgresql/config \
+    --userns keep-id:uid={{ uid }},gid={{ gid }} \
+    --user {{ uid }}:{{ gid }} \
+    --userns keep-id:uid=999,gid=999 \
+    --user 999:999 \
+    postgres:{{ version }} \
+    postgres -c config_file=/etc/postgresql/config/postgresql.conf
+
+stop:
+  podman stop pg_exporter_postgres

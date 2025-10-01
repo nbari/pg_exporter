@@ -3,3 +3,5 @@ target
 **/*.rs.bk
 Cargo.lock
 .envrc
+db/data
+db/log

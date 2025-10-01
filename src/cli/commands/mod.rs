@@ -35,7 +35,7 @@ pub fn new() -> Command {
             Arg::new("dsn")
                 .long("dsn")
                 .help("Database connection string")
-                .default_value("postgresql://postgresd@localhost:5432/postgres")
+                .default_value("postgresql://postgres@localhost:5432/postgres")
                 .env("PG_EXPORTER_DSN")
                 .value_name("DSN"),
         )
@@ -63,7 +63,7 @@ mod tests {
             assert_eq!(matches.get_one::<u16>("port").copied(), Some(9432));
             assert_eq!(
                 matches.get_one::<String>("dsn").map(|s| s.to_string()),
-                Some("postgresql://postgresd@localhost:5432/postgres".to_string())
+                Some("postgresql://postgres@localhost:5432/postgres".to_string())
             );
         });
     }
