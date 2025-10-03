@@ -11,6 +11,9 @@ use connections::ConnectionsCollector;
 mod locks;
 use locks::LocksCollector;
 
+mod wait;
+use wait::WaitEventsCollector;
+
 /// Main Activity Collector (aggregates sub-collectors)
 #[derive(Clone, Default)]
 pub struct ActivityCollector {
@@ -23,6 +26,7 @@ impl ActivityCollector {
             subs: vec![
                 Arc::new(ConnectionsCollector::new()),
                 Arc::new(LocksCollector::new()),
+                Arc::new(WaitEventsCollector::new()),
             ],
         }
     }
