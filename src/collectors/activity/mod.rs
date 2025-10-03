@@ -5,30 +5,30 @@ use prometheus::Registry;
 use sqlx::PgPool;
 use std::sync::Arc;
 
-mod progress;
-use progress::VacuumProgressCollector;
+mod connections;
+use connections::ConnectionsCollector;
 
-mod stats;
-use stats::VacuumStatsCollector;
+mod locks;
+use locks::LocksCollector;
 
-/// Main Vacuum Collector (aggregates sub-collectors)
+/// Main Activity Collector (aggregates sub-collectors)
 #[derive(Clone, Default)]
-pub struct VacuumCollector {
+pub struct ActivityCollector {
     subs: Vec<Arc<dyn Collector + Send + Sync>>,
 }
 
-impl VacuumCollector {
+impl ActivityCollector {
     pub fn new() -> Self {
         Self {
             subs: vec![
-                Arc::new(VacuumStatsCollector::new()),
-                Arc::new(VacuumProgressCollector::new()),
+                Arc::new(ConnectionsCollector::new()),
+                Arc::new(LocksCollector::new()),
             ],
         }
     }
 }
 
-impl Collector for VacuumCollector {
+impl Collector for ActivityCollector {
     fn name(&self) -> &'static str {
         "vacuum"
     }

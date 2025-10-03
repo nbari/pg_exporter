@@ -23,6 +23,8 @@ pub trait Collector {
 register_collectors! {
     default => DefaultCollector,
     vacuum => VacuumCollector,
+    activity => ActivityCollector,
+
     // Add more collectors here - just follow the same pattern!
 }
 
