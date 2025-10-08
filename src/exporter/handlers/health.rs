@@ -7,7 +7,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{Connection, PgPool};
-use tracing::{debug, error};
+use tracing::{debug, error, info_span, instrument};
+use tracing_futures::Instrument as _;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Health {
@@ -18,20 +19,26 @@ pub struct Health {
 }
 
 // Check database health
+#[instrument(skip(pool), err, fields(db.system="postgresql", db.operation="ping", otel.kind="client"))]
 async fn check_database_health(pool: &PgPool) -> Result<(), StatusCode> {
-    match pool.acquire().await {
-        Ok(mut conn) => match conn.ping().await {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                error!("Failed to ping database: {}", error);
-                Err(StatusCode::SERVICE_UNAVAILABLE)
-            }
-        },
-        Err(error) => {
-            error!("Failed to acquire database connection: {}", error);
-            Err(StatusCode::SERVICE_UNAVAILABLE)
-        }
-    }
+    // Acquire connection
+    let acquire_span = info_span!("db.acquire");
+
+    let mut conn = pool
+        .acquire()
+        .instrument(acquire_span)
+        .await
+        .map_err(|error| {
+            error!(%error, "Failed to acquire database connection");
+            StatusCode::SERVICE_UNAVAILABLE
+        })?;
+
+    // Ping
+    let ping_span = info_span!("db.ping");
+    conn.ping().instrument(ping_span).await.map_err(|error| {
+        error!(%error, "Failed to ping database");
+        StatusCode::SERVICE_UNAVAILABLE
+    })
 }
 
 // Create health struct based on database status
@@ -82,6 +89,7 @@ fn create_app_headers(health: &Health) -> HeaderMap {
 }
 
 // Main axum handler for health
+#[instrument(skip(pool), fields(http.route="/health"))]
 pub async fn health(method: Method, pool: Extension<PgPool>) -> impl IntoResponse {
     let db_result = check_database_health(&pool.0).await;
     let health = create_health_response(&db_result);

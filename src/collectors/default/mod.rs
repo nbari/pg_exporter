@@ -4,6 +4,8 @@ use futures::future::BoxFuture;
 use prometheus::Registry;
 use sqlx::PgPool;
 use std::sync::Arc;
+use tracing::{debug, info_span, instrument, warn};
+use tracing_futures::Instrument as _;
 
 mod version;
 use version::VersionCollector;
@@ -32,17 +34,39 @@ impl Collector for DefaultCollector {
         "default"
     }
 
+    #[instrument(
+        skip(self, registry),
+        level = "info",
+        err,
+        fields(collector = "default")
+    )]
     fn register_metrics(&self, registry: &Registry) -> Result<()> {
         for sub in &self.subs {
-            sub.register_metrics(registry)?;
+            info_span!("collector.register_metrics", sub_collector = %sub.name());
+            let res = sub.register_metrics(registry);
+            match res {
+                Ok(_) => {
+                    // Attach a small event so you can see success in the span
+                    debug!(collector = sub.name(), "registered metrics");
+                }
+                Err(ref e) => {
+                    // Error will also be recorded on the span due to `err` on the #[instrument]
+                    warn!(collector = sub.name(), error = %e, "failed to register metrics");
+                }
+            }
+            // No need to .instrument() here as register_metrics is sync
+            res?;
         }
         Ok(())
     }
 
+    #[instrument(skip(self, pool), level = "info", err, fields(collector = "default", otel.kind = "internal"))]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            // Collect from each sub-collector within its own span
             for sub in &self.subs {
-                sub.collect(pool).await?;
+                let span = info_span!("collector.collect", sub_collector = %sub.name(), otel.kind = "internal");
+                sub.collect(pool).instrument(span).await?;
             }
             Ok(())
         })

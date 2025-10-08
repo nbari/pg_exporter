@@ -7,7 +7,7 @@ use axum::{
 use sqlx::PgPool;
 use tracing::{debug, error, instrument};
 
-#[instrument(skip(pool, registry))]
+#[instrument(skip(pool, registry), fields(http.route="/metrics"))]
 pub async fn metrics(
     Extension(pool): Extension<PgPool>,
     Extension(registry): Extension<CollectorRegistry>,

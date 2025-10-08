@@ -5,3 +5,4 @@ Cargo.lock
 .envrc
 db/data
 db/log
+.otel-collector-config.yml

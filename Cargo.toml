@@ -27,7 +27,7 @@ chrono = "0.4.42"
 clap = { version = "4.5.48", features = ["env"] }
 openssl = { version = "0.10", optional = true, features = ["vendored"] }
 opentelemetry = "0.31.0"
-opentelemetry-otlp = { version = "0.31.0", features = ["grpc-tonic"] }
+opentelemetry-otlp = { version = "0.31.0", features = ["grpc-tonic", "gzip-tonic", "http-proto", "reqwest-client", "tls", "tls-roots", "trace"] }
 opentelemetry_sdk = { version = "0.31.0", features = ["rt-tokio"] }
 secrecy = "0.10.3"
 serde = "1.0.227"
@@ -45,6 +45,10 @@ temp-env = "0.3.6"
 prometheus = "0.14.0"
 regex = "1.11.3"
 futures = "0.3.31"
+tonic = { version = "0.14.2", features = ["tls-native-roots"] }
+reqwest = { version = "0.12.23", features = ["rustls-tls", "rustls-tls-native-roots"] }
+base64 = "0.22.1"
+tracing-futures = "0.2.5"
 
 [package.metadata.generate-rpm]
 assets = [
