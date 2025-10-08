@@ -22,13 +22,13 @@ license = "BSD-3-Clause"
 
 [dependencies]
 anyhow = "1.0.100"
-axum = { version = "0.8.4", features = ["tracing"] }
+axum = { version = "0.8.6", features = ["tracing"] }
 chrono = "0.4.42"
 clap = { version = "4.5.48", features = ["env"] }
 openssl = { version = "0.10", optional = true, features = ["vendored"] }
-opentelemetry = "0.30.0"
-opentelemetry-otlp = { version = "0.30.0", features = ["grpc-tonic"] }
-opentelemetry_sdk = { version = "0.30.0", features = ["rt-tokio"] }
+opentelemetry = "0.31.0"
+opentelemetry-otlp = { version = "0.31.0", features = ["grpc-tonic"] }
+opentelemetry_sdk = { version = "0.31.0", features = ["rt-tokio"] }
 secrecy = "0.10.3"
 serde = "1.0.227"
 serde_json = "1.0.145"
@@ -37,7 +37,7 @@ tokio = { version = "1.47.1", features = ["full"] }
 tower = "0.5.2"
 tower-http = { version = "0.6.6", features = ["request-id", "set-header", "trace"] }
 tracing = "0.1.41"
-tracing-opentelemetry = "0.31.0"
+tracing-opentelemetry = "0.32.0"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "json"] }
 ulid = "1.2.1"
 url = "2.5.7"
