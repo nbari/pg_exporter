@@ -3,16 +3,20 @@ use base64::{Engine, engine::general_purpose};
 use opentelemetry::propagation::TextMapCompositePropagator;
 use opentelemetry::{KeyValue, global, trace::TracerProvider as _};
 use opentelemetry_otlp::{Compression, WithExportConfig, WithHttpConfig, WithTonicConfig};
-use opentelemetry_sdk::propagation::{BaggagePropagator, TraceContextPropagator};
 use opentelemetry_sdk::{
     Resource,
+    propagation::{BaggagePropagator, TraceContextPropagator},
     trace::{SdkTracerProvider, Tracer},
 };
 use std::{collections::HashMap, env::var, time::Duration};
 use tonic::{metadata::*, transport::ClientTlsConfig};
 use tracing::Level;
+use tracing::debug;
 use tracing_subscriber::{EnvFilter, Registry, fmt, layer::SubscriberExt};
 use ulid::Ulid;
+
+use once_cell::sync::OnceCell;
+static TRACER_PROVIDER: OnceCell<SdkTracerProvider> = OnceCell::new();
 
 fn parse_headers_env(headers_str: &str) -> HashMap<String, String> {
     headers_str
@@ -29,7 +33,7 @@ fn parse_headers_env(headers_str: &str) -> HashMap<String, String> {
 // Convert HashMap<String, String> into tonic::MetadataMap
 // - Supports ASCII metadata (normal keys)
 // - Supports binary metadata keys (ending with "-bin"), values must be base64-encoded
-fn headers_to_metadata(headers: &std::collections::HashMap<String, String>) -> Result<MetadataMap> {
+fn headers_to_metadata(headers: &HashMap<String, String>) -> Result<MetadataMap> {
     let mut meta = MetadataMap::with_capacity(headers.len());
 
     for (k, v) in headers {
@@ -57,7 +61,7 @@ fn headers_to_metadata(headers: &std::collections::HashMap<String, String>) -> R
                 .parse()
                 .map_err(|e| anyhow!("invalid ASCII metadata value for key {}: {}", key_str, e))?;
 
-            meta.insert(key, val); // uses owned key, no 'static
+            meta.insert(key, val);
         }
     }
 
@@ -92,7 +96,6 @@ fn init_tracer() -> Result<Tracer> {
 
     let exporter = match protocol.as_str() {
         "http/protobuf" => {
-            // Build a reqwest HTTP client (you can customize timeouts, TLS, proxies, etc.)
             let http_client = reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
                 .build()?;
@@ -100,29 +103,21 @@ fn init_tracer() -> Result<Tracer> {
             let mut builder = opentelemetry_otlp::SpanExporter::builder()
                 .with_http()
                 .with_compression(Compression::Gzip)
-                .with_http_client(http_client);
-
-            builder = builder.with_endpoint(endpoint);
+                .with_http_client(http_client)
+                .with_endpoint(endpoint);
 
             if !headers.is_empty() {
                 builder = builder.with_headers(headers);
             }
 
-            match builder.with_timeout(Duration::from_secs(3)).build() {
-                Ok(exporter) => exporter,
-                Err(e) => {
-                    eprintln!("Failed to create OTLP HTTP exporter: {}", e);
-                    return Err(e.into());
-                }
-            }
+            builder.with_timeout(Duration::from_secs(3)).build()?
         }
         _ => {
-            // gRPC mode (default) - headers not supported
+            // gRPC mode (default)
             let mut builder = opentelemetry_otlp::SpanExporter::builder()
                 .with_tonic()
                 .with_endpoint(&endpoint);
 
-            // Optional: explicit TLS config (SNI)
             if let Some(host) = &endpoint
                 .strip_prefix("https://")
                 .and_then(|s| s.split('/').next())
@@ -148,6 +143,7 @@ fn init_tracer() -> Result<Tracer> {
         }
     };
 
+    // Generate service.instance.id (override via env if you want stability).
     let instance_id = var("OTEL_SERVICE_INSTANCE_ID").unwrap_or_else(|_| Ulid::new().to_string());
 
     let trace_provider = SdkTracerProvider::builder()
@@ -163,6 +159,10 @@ fn init_tracer() -> Result<Tracer> {
         )
         .build();
 
+    let stored = trace_provider.clone();
+
+    let _ = TRACER_PROVIDER.set(stored);
+
     global::set_tracer_provider(trace_provider.clone());
 
     global::set_text_map_propagator(TextMapCompositePropagator::new(vec![
@@ -170,12 +170,14 @@ fn init_tracer() -> Result<Tracer> {
         Box::new(BaggagePropagator::new()),
     ]));
 
-    Ok(trace_provider.tracer(env!("CARGO_PKG_NAME")))
+    let tracer = trace_provider.tracer(env!("CARGO_PKG_NAME"));
+
+    Ok(tracer)
 }
 
 /// Start the telemetry layer
 /// # Errors
-/// Will return an error if the telemetry layer fails to start
+/// Public telemetry initialization
 pub fn init(verbosity_level: Option<Level>) -> Result<()> {
     let verbosity_level = verbosity_level.unwrap_or(Level::ERROR);
 
@@ -187,30 +189,33 @@ pub fn init(verbosity_level: Option<Level>) -> Result<()> {
         .with_target(false)
         .pretty();
 
-    // RUST_LOG=
     let filter = EnvFilter::builder()
         .with_default_directive(verbosity_level.into())
         .from_env_lossy()
         .add_directive("hyper=error".parse()?)
         .add_directive("tokio=error".parse()?)
-        // .add_directive("reqwest=error".parse()?)
         .add_directive("opentelemetry_sdk=warn".parse()?);
 
-    // Start the tracer if the endpoint is defined
     if var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
-        // Initialize OpenTelemetry only if endpoint is set
         let tracer = init_tracer()?;
-        let otel_tracer_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+        let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
         let subscriber = Registry::default()
             .with(fmt_layer)
-            .with(otel_tracer_layer)
+            .with(otel_layer)
             .with(filter);
         tracing::subscriber::set_global_default(subscriber)?;
     } else {
-        // Skip tracing setup if no endpoint is configured
         let subscriber = Registry::default().with(fmt_layer).with(filter);
         tracing::subscriber::set_global_default(subscriber)?;
     }
-
     Ok(())
+}
+
+/// Gracefully shut down tracer provider
+pub fn shutdown_tracer() {
+    if let Some(tp) = TRACER_PROVIDER.get() {
+        debug!("shutting down tracer provider");
+        let _ = tp.shutdown();
+        debug!("tracer provider shutdown complete");
+    }
 }

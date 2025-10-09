@@ -1,9 +1,14 @@
-use crate::collectors::{config::CollectorConfig, registry::CollectorRegistry};
+use crate::{
+    cli::telemetry::shutdown_tracer,
+    collectors::{config::CollectorConfig, registry::CollectorRegistry},
+};
 use anyhow::{Context, Result};
 use axum::{
     Extension, Router,
     body::Body,
     http::{HeaderName, HeaderValue, Request},
+    middleware::{Next, from_fn},
+    response::Response,
     routing::get,
 };
 use secrecy::{ExposeSecret, SecretString};
@@ -14,10 +19,16 @@ use tower::ServiceBuilder;
 use tower_http::{
     request_id::PropagateRequestIdLayer, set_header::SetRequestHeaderLayer, trace::TraceLayer,
 };
-use tracing::{Span, debug_span, info};
+use tracing::{Span, debug, error, info, info_span};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use ulid::Ulid;
 
+use opentelemetry::global;
+use opentelemetry::trace::TraceContextExt;
+use opentelemetry_http::HeaderExtractor;
+
 mod handlers;
+mod shutdown;
 
 pub mod built_info {
     include!(concat!(env!("OUT_DIR"), "/built.rs"));
@@ -29,13 +40,9 @@ pub const GIT_COMMIT_HASH: &str = if let Some(hash) = built_info::GIT_COMMIT_HAS
     ":-("
 };
 
-/// router
-/// # Errors
-/// Returns an error if the server fails to start
 pub async fn new(port: u16, dsn: SecretString, collectors: Vec<String>) -> Result<()> {
     let db_dsn = dsn.expose_secret().to_string();
 
-    // Connect to database
     let pool = PgPoolOptions::new()
         .min_connections(1)
         .max_connections(3)
@@ -47,10 +54,12 @@ pub async fn new(port: u16, dsn: SecretString, collectors: Vec<String>) -> Resul
 
     info!("Connected to database");
 
-    // Create config for the collectors (only enable those specified)
     let config = CollectorConfig::new().with_enabled(&collectors);
-
     let registry = CollectorRegistry::new(config);
+
+    let trace_layer = TraceLayer::new_for_http()
+        .make_span_with(make_span)
+        .on_response(on_response);
 
     let app = Router::new()
         .route("/metrics", get(handlers::metrics))
@@ -64,7 +73,8 @@ pub async fn new(port: u16, dsn: SecretString, collectors: Vec<String>) -> Resul
                 .layer(PropagateRequestIdLayer::new(HeaderName::from_static(
                     "x-request-id",
                 )))
-                .layer(TraceLayer::new_for_http().make_span_with(make_span))
+                .layer(trace_layer)
+                .layer(from_fn(add_trace_headers))
                 .layer(Extension(pool.clone()))
                 .layer(Extension(registry)),
         );
@@ -81,19 +91,91 @@ pub async fn new(port: u16, dsn: SecretString, collectors: Vec<String>) -> Resul
             .join("\n")
     );
 
-    axum::serve(listener, app.into_make_service()).await?;
+    if let Err(e) = axum::serve(listener, app.into_make_service())
+        .with_graceful_shutdown(shutdown::shutdown_signal())
+        .await
+    {
+        error!(error=%e, "server error");
+    }
+
+    shutdown_tracer();
 
     Ok(())
 }
 
-// span
 fn make_span(request: &Request<Body>) -> Span {
-    let headers = request.headers();
+    let parent_cx =
+        global::get_text_map_propagator(|prop| prop.extract(&HeaderExtractor(request.headers())));
+
+    let method = request.method().as_str();
+
     let path = request.uri().path();
-    let request_id = headers
+
+    let target = request.uri().to_string();
+
+    let scheme = request.uri().scheme_str().unwrap_or("http");
+
+    let request_id = request
+        .headers()
         .get("x-request-id")
-        .and_then(|val| val.to_str().ok())
+        .and_then(|v| v.to_str().ok())
         .unwrap_or("none");
 
-    debug_span!("http-request", path, ?headers, request_id)
+    let user_agent = request
+        .headers()
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown");
+
+    let span = info_span!(
+        "http.server.request",
+        otel.kind = "server",
+        http.method = method,
+        http.route = path,
+        http.target = target,
+        http.scheme = scheme,
+        http.user_agent = user_agent,
+        request_id = request_id,
+    );
+
+    let _ = span.set_parent(parent_cx);
+
+    span
+}
+
+fn on_response<B>(response: &axum::http::Response<B>, latency: std::time::Duration, span: &Span) {
+    span.record("otel.status_code", "OK");
+
+    info!(
+        parent: span,
+        status = response.status().as_u16(),
+        elapsed_ms = latency.as_millis() as u64,
+        "request completed"
+    );
+
+    let cx = span.context();
+
+    let trace_id = cx.span().span_context().trace_id().to_string();
+
+    debug!(parent: span, trace_id = %trace_id, "trace id for response");
+}
+
+async fn add_trace_headers(req: Request<Body>, next: Next) -> Response {
+    let mut res = next.run(req).await;
+
+    let span = Span::current();
+
+    let cx = span.context();
+
+    // CLONE the SpanContext to avoid borrowing a temporary
+    let span_context = cx.span().span_context().clone();
+
+    if span_context.is_valid()
+        && let Ok(val) = HeaderValue::from_str(&span_context.trace_id().to_string())
+    {
+        res.headers_mut()
+            .insert(HeaderName::from_static("x-trace-id"), val);
+    }
+
+    res
 }
