@@ -8,10 +8,11 @@ use opentelemetry_sdk::{
     Resource,
     trace::{SdkTracerProvider, Tracer},
 };
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, env::var, time::Duration};
 use tonic::{metadata::*, transport::ClientTlsConfig};
 use tracing::Level;
 use tracing_subscriber::{EnvFilter, Registry, fmt, layer::SubscriberExt};
+use ulid::Ulid;
 
 fn parse_headers_env(headers_str: &str) -> HashMap<String, String> {
     headers_str
@@ -73,8 +74,7 @@ fn normalize_endpoint(ep: String) -> String {
 
 fn init_tracer() -> Result<Tracer> {
     // Read protocol from environment (default to grpc if not set)
-    let protocol =
-        std::env::var("OTEL_EXPORTER_OTLP_PROTOCOL").unwrap_or_else(|_| "grpc".to_string());
+    let protocol = var("OTEL_EXPORTER_OTLP_PROTOCOL").unwrap_or_else(|_| "grpc".to_string());
 
     // Protocol-specific sensible default
     let default_ep = match protocol.as_str() {
@@ -82,11 +82,10 @@ fn init_tracer() -> Result<Tracer> {
         _ => "http://localhost:4317",
     };
 
-    let endpoint =
-        std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").unwrap_or_else(|_| default_ep.to_string());
+    let endpoint = var("OTEL_EXPORTER_OTLP_ENDPOINT").unwrap_or_else(|_| default_ep.to_string());
     let endpoint = normalize_endpoint(endpoint);
 
-    let headers = std::env::var("OTEL_EXPORTER_OTLP_HEADERS")
+    let headers = var("OTEL_EXPORTER_OTLP_HEADERS")
         .ok()
         .map(|s| parse_headers_env(&s))
         .unwrap_or_default();
@@ -149,6 +148,8 @@ fn init_tracer() -> Result<Tracer> {
         }
     };
 
+    let instance_id = var("OTEL_SERVICE_INSTANCE_ID").unwrap_or_else(|_| Ulid::new().to_string());
+
     let trace_provider = SdkTracerProvider::builder()
         .with_batch_exporter(exporter)
         .with_resource(
@@ -156,6 +157,7 @@ fn init_tracer() -> Result<Tracer> {
                 .with_attributes(vec![
                     KeyValue::new("service.name", env!("CARGO_PKG_NAME")),
                     KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
+                    KeyValue::new("service.instance.id", instance_id),
                 ])
                 .build(),
         )
@@ -195,7 +197,7 @@ pub fn init(verbosity_level: Option<Level>) -> Result<()> {
         .add_directive("opentelemetry_sdk=warn".parse()?);
 
     // Start the tracer if the endpoint is defined
-    if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
+    if var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
         // Initialize OpenTelemetry only if endpoint is set
         let tracer = init_tracer()?;
         let otel_tracer_layer = tracing_opentelemetry::layer().with_tracer(tracer);
