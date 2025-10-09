@@ -4,6 +4,8 @@ use futures::future::BoxFuture;
 use prometheus::Registry;
 use sqlx::PgPool;
 use std::sync::Arc;
+use tracing::{debug, info_span, instrument, warn};
+use tracing_futures::Instrument as _;
 
 mod connections;
 use connections::ConnectionsCollector;
@@ -34,21 +36,48 @@ impl ActivityCollector {
 
 impl Collector for ActivityCollector {
     fn name(&self) -> &'static str {
-        "vacuum"
+        "activity"
     }
 
+    #[instrument(
+        skip(self, registry),
+        level = "info",
+        err,
+        fields(collector = "activity")
+    )]
     fn register_metrics(&self, registry: &Registry) -> Result<()> {
         for sub in &self.subs {
-            sub.register_metrics(registry)?;
+            let span = info_span!("collector.register_metrics", sub_collector = %sub.name());
+            let res = sub.register_metrics(registry);
+            match res {
+                Ok(_) => {
+                    debug!(collector = sub.name(), "registered metrics");
+                }
+                Err(ref e) => {
+                    warn!(collector = sub.name(), error = %e, "failed to register metrics");
+                }
+            }
+            res?;
+            drop(span);
         }
         Ok(())
     }
 
+    #[instrument(
+        skip(self, pool),
+        level = "info",
+        err,
+        fields(collector = "activity", otel.kind = "internal")
+    )]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
-        let subs = &self.subs;
         Box::pin(async move {
-            for sub in subs {
-                sub.collect(pool).await?;
+            for sub in &self.subs {
+                let span = info_span!(
+                    "collector.collect",
+                    sub_collector = %sub.name(),
+                    otel.kind = "internal"
+                );
+                sub.collect(pool).instrument(span).await?;
             }
             Ok(())
         })

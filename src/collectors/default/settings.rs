@@ -6,7 +6,7 @@ use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 use std::sync::RwLock;
 use tracing::{debug, info_span, instrument};
-use tracing_futures::Instrument as _; // for .instrument(...) on async work
+use tracing_futures::Instrument as _;
 
 /// Handles selected PostgreSQL server settings metrics
 #[derive(Clone)]

@@ -3,7 +3,8 @@ use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, Opts, Registry};
 use sqlx::{PgPool, Row};
-use tracing::info;
+use tracing::{debug, info, info_span, instrument};
+use tracing_futures::Instrument as _;
 
 /// Tracks PostgreSQL wait events
 #[derive(Clone)]
@@ -27,13 +28,13 @@ impl WaitEventsCollector {
             ),
             &["type"],
         )
-        .expect("Failed to create wait_event_type metric");
+        .expect("Failed to create pg_wait_event_type metric");
 
         let wait_event = GaugeVec::new(
             Opts::new("pg_wait_event", "Number of active sessions per wait_event"),
             &["event"],
         )
-        .expect("Failed to create wait_event metric");
+        .expect("Failed to create pg_wait_event metric");
 
         Self {
             wait_event_type,
@@ -47,17 +48,43 @@ impl Collector for WaitEventsCollector {
         "wait_events"
     }
 
+    #[instrument(
+        skip(self, registry),
+        level = "info",
+        err,
+        fields(collector = "wait_events")
+    )]
     fn register_metrics(&self, registry: &Registry) -> Result<()> {
         registry.register(Box::new(self.wait_event_type.clone()))?;
         registry.register(Box::new(self.wait_event.clone()))?;
         Ok(())
     }
 
+    #[instrument(
+        skip(self, pool),
+        level = "info",
+        err,
+        fields(collector="wait_events", otel.kind="internal")
+    )]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            // Reset metrics first
-            self.wait_event_type.reset();
-            self.wait_event.reset();
+            // Reset existing label sets (span for reset + update phase)
+            let reset_span = info_span!("wait_events.reset_metrics");
+            {
+                let _g = reset_span.enter();
+                self.wait_event_type.reset();
+                self.wait_event.reset();
+            }
+
+            // DB query span (client)
+            let query_span = info_span!(
+                "db.query",
+                otel.kind = "client",
+                db.system = "postgresql",
+                db.operation = "SELECT",
+                db.statement = "SELECT wait_event_type, wait_event, count(*) FROM pg_stat_activity",
+                db.sql.table = "pg_stat_activity"
+            );
 
             let rows = sqlx::query(
                 r#"
@@ -72,12 +99,17 @@ impl Collector for WaitEventsCollector {
                 "#,
             )
             .fetch_all(pool)
+            .instrument(query_span)
             .await?;
 
+            // Apply metrics
+            let apply_span = info_span!("wait_events.apply_metrics", groups = rows.len());
+            let _g = apply_span.enter();
+
             if rows.is_empty() {
-                // No active waits: set a default "none" value
                 self.wait_event_type.with_label_values(&["none"]).set(0.0);
                 self.wait_event.with_label_values(&["none"]).set(0.0);
+                debug!("no active wait events");
             } else {
                 for row in &rows {
                     let event_type: String = row.try_get("wait_event_type")?;
@@ -90,11 +122,17 @@ impl Collector for WaitEventsCollector {
                     self.wait_event
                         .with_label_values(&[&event])
                         .set(count as f64);
+
+                    debug!(
+                        wait_event_type = %event_type,
+                        wait_event = %event,
+                        count,
+                        "updated wait event metrics"
+                    );
                 }
             }
 
             info!("Collected wait events: {}", rows.len());
-
             Ok(())
         })
     }

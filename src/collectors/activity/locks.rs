@@ -3,7 +3,8 @@ use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, Opts, Registry};
 use sqlx::{PgPool, Row};
-use tracing::info;
+use tracing::{debug, info, info_span, instrument};
+use tracing_futures::Instrument as _;
 
 /// Tracks PostgreSQL lock contention
 #[derive(Clone)]
@@ -44,14 +45,31 @@ impl Collector for LocksCollector {
         "locks"
     }
 
+    #[instrument(skip(self, registry), level = "info", err, fields(collector = "locks"))]
     fn register_metrics(&self, registry: &Registry) -> Result<()> {
         registry.register(Box::new(self.locks_waiting.clone()))?;
         registry.register(Box::new(self.locks_granted.clone()))?;
         Ok(())
     }
 
+    #[instrument(
+        skip(self, pool),
+        level = "info",
+        err,
+        fields(collector="locks", otel.kind="internal")
+    )]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            // Client span for querying lock statistics
+            let query_span = info_span!(
+                "db.query",
+                otel.kind = "client",
+                db.system = "postgresql",
+                db.operation = "SELECT",
+                db.statement = "SELECT relation, waiting, granted FROM pg_locks + pg_class join",
+                db.sql.table = "pg_locks"
+            );
+
             let rows = sqlx::query(
                 r#"
                 SELECT
@@ -65,7 +83,12 @@ impl Collector for LocksCollector {
                 "#,
             )
             .fetch_all(pool)
+            .instrument(query_span)
             .await?;
+
+            // Span for applying metrics
+            let apply_span = info_span!("locks.apply_metrics", relations = rows.len());
+            let _g = apply_span.enter();
 
             for row in &rows {
                 let relation: String = row.try_get("relation")?;
@@ -78,6 +101,13 @@ impl Collector for LocksCollector {
                 self.locks_granted
                     .with_label_values(&[&relation])
                     .set(granted as f64);
+
+                debug!(
+                    relation = %relation,
+                    waiting,
+                    granted,
+                    "updated lock metrics"
+                );
             }
 
             info!("Collected lock metrics for {} relations", rows.len());

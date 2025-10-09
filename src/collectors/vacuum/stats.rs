@@ -3,7 +3,8 @@ use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{IntGaugeVec, Opts, Registry};
 use sqlx::{PgPool, Row};
-use tracing::info;
+use tracing::{debug, info, info_span, instrument};
+use tracing_futures::Instrument as _;
 
 /// Collects summary statistics from pg_stat_all_tables
 #[derive(Clone)]
@@ -76,7 +77,7 @@ impl VacuumStatsCollector {
         let dead_ratio = IntGaugeVec::new(
             Opts::new(
                 "pg_table_dead_ratio",
-                "Dead tuples ratio: dead / (dead + live)",
+                "Dead tuples ratio: dead / (dead + live) (reported as percentage)",
             ),
             &["schema", "table"],
         )
@@ -99,6 +100,12 @@ impl Collector for VacuumStatsCollector {
         "vacuum_stats"
     }
 
+    #[instrument(
+        skip(self, registry),
+        level = "info",
+        err,
+        fields(collector = "vacuum_stats")
+    )]
     fn register_metrics(&self, registry: &Registry) -> Result<()> {
         registry.register(Box::new(self.tuples_dead.clone()))?;
         registry.register(Box::new(self.tuples_live.clone()))?;
@@ -110,8 +117,24 @@ impl Collector for VacuumStatsCollector {
         Ok(())
     }
 
+    #[instrument(
+        skip(self, pool),
+        level = "info",
+        err,
+        fields(collector="vacuum_stats", otel.kind="internal")
+    )]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            // Span specifically for the DB query (client span)
+            let query_span = info_span!(
+                "db.query",
+                otel.kind = "client",
+                db.system = "postgresql",
+                db.operation = "SELECT",
+                db.statement = "SELECT schemaname, relname, n_live_tup, n_dead_tup, age fields FROM pg_stat_all_tables",
+                db.sql.table = "pg_stat_all_tables"
+            );
+
             let rows = sqlx::query(
                 r#"
                 SELECT
@@ -124,12 +147,17 @@ impl Collector for VacuumStatsCollector {
                     COALESCE(EXTRACT(EPOCH FROM (now() - last_analyze))::bigint, -1) AS last_analyze_age,
                     COALESCE(EXTRACT(EPOCH FROM (now() - last_autoanalyze))::bigint, -1) AS last_autoanalyze_age
                 FROM pg_stat_all_tables
-                "#
+                "#,
             )
             .fetch_all(pool)
+            .instrument(query_span)
             .await?;
 
             info!("Collecting vacuum stats for {} tables", rows.len());
+
+            // Span for transforming rows into metrics
+            let apply_span = info_span!("vacuum_stats.apply_metrics", tables = rows.len());
+            let _g = apply_span.enter();
 
             for row in rows {
                 let schema: String = row.try_get("schemaname")?;
@@ -144,23 +172,18 @@ impl Collector for VacuumStatsCollector {
                 self.tuples_live
                     .with_label_values(&[&schema, &table])
                     .set(live);
-
                 self.tuples_dead
                     .with_label_values(&[&schema, &table])
                     .set(dead);
-
                 self.last_vacuum_age
                     .with_label_values(&[&schema, &table])
                     .set(last_vac);
-
                 self.last_autovacuum_age
                     .with_label_values(&[&schema, &table])
                     .set(last_autovac);
-
                 self.last_analyze_age
                     .with_label_values(&[&schema, &table])
                     .set(last_analyze);
-
                 self.last_autoanalyze_age
                     .with_label_values(&[&schema, &table])
                     .set(last_autoanalyze);
@@ -173,7 +196,21 @@ impl Collector for VacuumStatsCollector {
 
                 self.dead_ratio
                     .with_label_values(&[&schema, &table])
-                    .set((ratio * 100.0) as i64); // percentage
+                    .set((ratio * 100.0) as i64);
+
+                // Per-table debug event (enable with crate log level = debug)
+                debug!(
+                    schema = %schema,
+                    table = %table,
+                    live,
+                    dead,
+                    last_vac,
+                    last_autovac,
+                    last_analyze,
+                    last_autoanalyze,
+                    dead_ratio_pct = (ratio * 100.0),
+                    "updated vacuum stats metrics"
+                );
             }
 
             Ok(())
