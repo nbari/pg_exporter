@@ -11,6 +11,9 @@ use axum::{
     response::Response,
     routing::get,
 };
+use opentelemetry::global;
+use opentelemetry::trace::{TraceContextExt, TraceId};
+use opentelemetry_http::HeaderExtractor;
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::postgres::PgPoolOptions;
 use std::time::Duration;
@@ -19,13 +22,9 @@ use tower::ServiceBuilder;
 use tower_http::{
     request_id::PropagateRequestIdLayer, set_header::SetRequestHeaderLayer, trace::TraceLayer,
 };
-use tracing::{Span, debug, error, info, info_span};
+use tracing::{Span, error, info, info_span};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use ulid::Ulid;
-
-use opentelemetry::global;
-use opentelemetry::trace::TraceContextExt;
-use opentelemetry_http::HeaderExtractor;
 
 mod handlers;
 mod shutdown;
@@ -98,6 +97,8 @@ pub async fn new(port: u16, dsn: SecretString, collectors: Vec<String>) -> Resul
         error!(error=%e, "server error");
     }
 
+    info!("shutting down");
+
     shutdown_tracer();
 
     Ok(())
@@ -143,21 +144,32 @@ fn make_span(request: &Request<Body>) -> Span {
     span
 }
 
-fn on_response<B>(response: &axum::http::Response<B>, latency: std::time::Duration, span: &Span) {
-    span.record("otel.status_code", "OK");
-
-    info!(
-        parent: span,
-        status = response.status().as_u16(),
-        elapsed_ms = latency.as_millis() as u64,
-        "request completed"
-    );
+fn on_response<B>(response: &axum::http::Response<B>, latency: Duration, span: &Span) {
+    if response.status().is_server_error() {
+        span.record("otel.status_code", "ERROR");
+    } else {
+        span.record("otel.status_code", "OK");
+    }
 
     let cx = span.context();
+    let trace_id = cx.span().span_context().trace_id();
 
-    let trace_id = cx.span().span_context().trace_id().to_string();
-
-    debug!(parent: span, trace_id = %trace_id, "trace id for response");
+    if trace_id != TraceId::INVALID {
+        info!(
+            parent: span,
+            status = response.status().as_u16(),
+            elapsed_ms = latency.as_millis() as u64,
+            trace_id = %trace_id,
+            "request completed"
+        );
+    } else {
+        info!(
+            parent: span,
+            status = response.status().as_u16(),
+            elapsed_ms = latency.as_millis() as u64,
+            "request completed"
+        );
+    }
 }
 
 async fn add_trace_headers(req: Request<Body>, next: Next) -> Response {
