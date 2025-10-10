@@ -163,5 +163,15 @@ postgres version="latest":
     postgres:{{ version }} \
     postgres -c config_file=/etc/postgresql/config/postgresql.conf
 
-stop:
-  podman stop pg_exporter_postgres
+jaeger:
+  podman run --rm -d --name jaeger \
+    -e COLLECTOR_OTLP_ENABLED=true \
+    -p 16686:16686 \
+    -p 4317:4317 \
+    -p 4318:4318 \
+    jaegertracing/all-in-one:latest
+
+stop-containers:
+  @for c in pg_exporter_postgres jaeger; do \
+        podman stop $$c 2>/dev/null || true; \
+  done
