@@ -24,6 +24,8 @@ register_collectors! {
     default => DefaultCollector,
     vacuum => VacuumCollector,
     activity => ActivityCollector,
+    locks => LocksCollector,
+    database => DatabaseCollector,
 
     // Add more collectors here - just follow the same pattern!
 }

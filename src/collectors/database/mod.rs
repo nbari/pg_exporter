@@ -7,50 +7,51 @@ use std::sync::Arc;
 use tracing::{debug, info_span, instrument, warn};
 use tracing_futures::Instrument as _;
 
-mod connections;
-use connections::ConnectionsCollector;
+// Sub-collectors under the "database" umbrella.
+// pg_stat_database metrics:
+mod stats;
+use stats::DatabaseStatCollector;
 
-mod wait;
-use wait::WaitEventsCollector;
+// pg_database metrics (size, connection limit):
+mod catalog;
+use catalog::DatabaseSubCollector;
 
-/// Main Activity Collector (aggregates sub-collectors)
+/// Main Database Collector (aggregates pg_stat_database + pg_database)
 #[derive(Clone, Default)]
-pub struct ActivityCollector {
+pub struct DatabaseCollector {
     subs: Vec<Arc<dyn Collector + Send + Sync>>,
 }
 
-impl ActivityCollector {
+impl DatabaseCollector {
     pub fn new() -> Self {
         Self {
             subs: vec![
-                Arc::new(ConnectionsCollector::new()),
-                Arc::new(WaitEventsCollector::new()),
+                Arc::new(DatabaseStatCollector::new()),
+                Arc::new(DatabaseSubCollector::new()),
             ],
         }
     }
 }
 
-impl Collector for ActivityCollector {
+impl Collector for DatabaseCollector {
     fn name(&self) -> &'static str {
-        "activity"
+        "database"
     }
 
     #[instrument(
         skip(self, registry),
         level = "info",
         err,
-        fields(collector = "activity")
+        fields(collector = "database")
     )]
     fn register_metrics(&self, registry: &Registry) -> Result<()> {
         for sub in &self.subs {
             let span = info_span!("collector.register_metrics", sub_collector = %sub.name());
             let res = sub.register_metrics(registry);
             match res {
-                Ok(_) => {
-                    debug!(collector = sub.name(), "registered metrics");
-                }
+                Ok(_) => debug!(collector = sub.name(), "registered metrics"),
                 Err(ref e) => {
-                    warn!(collector = sub.name(), error = %e, "failed to register metrics");
+                    warn!(collector = sub.name(), error = %e, "failed to register metrics")
                 }
             }
             res?;
@@ -63,7 +64,7 @@ impl Collector for ActivityCollector {
         skip(self, pool),
         level = "info",
         err,
-        fields(collector = "activity", otel.kind = "internal")
+        fields(collector = "database", otel.kind = "internal")
     )]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {

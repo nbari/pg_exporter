@@ -8,18 +8,18 @@ use tracing_futures::Instrument as _;
 
 /// Tracks PostgreSQL lock contention
 #[derive(Clone)]
-pub struct LocksCollector {
+pub struct LocksSubCollector {
     locks_waiting: GaugeVec,
     locks_granted: GaugeVec,
 }
 
-impl Default for LocksCollector {
+impl Default for LocksSubCollector {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl LocksCollector {
+impl LocksSubCollector {
     pub fn new() -> Self {
         let locks_waiting = GaugeVec::new(
             Opts::new("pg_locks_waiting", "Number of locks waiting per relation"),
@@ -40,7 +40,7 @@ impl LocksCollector {
     }
 }
 
-impl Collector for LocksCollector {
+impl Collector for LocksSubCollector {
     fn name(&self) -> &'static str {
         "locks"
     }

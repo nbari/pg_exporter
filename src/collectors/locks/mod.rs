@@ -7,40 +7,29 @@ use std::sync::Arc;
 use tracing::{debug, info_span, instrument, warn};
 use tracing_futures::Instrument as _;
 
-mod connections;
-use connections::ConnectionsCollector;
+mod relations;
+use relations::LocksSubCollector;
 
-mod wait;
-use wait::WaitEventsCollector;
-
-/// Main Activity Collector (aggregates sub-collectors)
+/// Main Locks Collector (aggregates sub-collectors)
 #[derive(Clone, Default)]
-pub struct ActivityCollector {
+pub struct LocksCollector {
     subs: Vec<Arc<dyn Collector + Send + Sync>>,
 }
 
-impl ActivityCollector {
+impl LocksCollector {
     pub fn new() -> Self {
         Self {
-            subs: vec![
-                Arc::new(ConnectionsCollector::new()),
-                Arc::new(WaitEventsCollector::new()),
-            ],
+            subs: vec![Arc::new(LocksSubCollector::new())],
         }
     }
 }
 
-impl Collector for ActivityCollector {
+impl Collector for LocksCollector {
     fn name(&self) -> &'static str {
-        "activity"
+        "locks"
     }
 
-    #[instrument(
-        skip(self, registry),
-        level = "info",
-        err,
-        fields(collector = "activity")
-    )]
+    #[instrument(skip(self, registry), level = "info", err, fields(collector = "locks"))]
     fn register_metrics(&self, registry: &Registry) -> Result<()> {
         for sub in &self.subs {
             let span = info_span!("collector.register_metrics", sub_collector = %sub.name());
@@ -63,7 +52,7 @@ impl Collector for ActivityCollector {
         skip(self, pool),
         level = "info",
         err,
-        fields(collector = "activity", otel.kind = "internal")
+        fields(collector = "locks", otel.kind = "internal")
     )]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {

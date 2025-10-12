@@ -1,17 +1,28 @@
 use crate::collectors::Collector;
 use anyhow::Result;
 use futures::future::BoxFuture;
-use prometheus::{GaugeVec, Opts, Registry};
+use prometheus::{IntGaugeVec, Opts, Registry};
 use sqlx::{PgPool, Row};
-use tracing::{debug, info, info_span, instrument};
+use std::collections::{HashMap, HashSet};
+use tracing::{debug, info_span, instrument};
 use tracing_futures::Instrument as _;
 
-/// Tracks PostgreSQL active / waiting / blocked connections
+/// Tracks PostgreSQL connections
+/// - pg_stat_activity_count{datname, state}
+/// - pg_stat_activity_active_connections{datname}
+/// - pg_stat_activity_idle_connections{datname}
+/// - pg_stat_activity_waiting_connections{datname}
+/// - pg_stat_activity_blocked_connections{datname}
 #[derive(Clone)]
 pub struct ConnectionsCollector {
-    active_connections: GaugeVec,
-    waiting_connections: GaugeVec,
-    blocked_connections: GaugeVec,
+    // Compatibility metric: counts by database and state
+    count_by_state: IntGaugeVec, // pg_stat_activity_count{datname,state}
+
+    // Convenience per-database gauges
+    active_connections: IntGaugeVec, // pg_stat_activity_active_connections{datname}
+    idle_connections: IntGaugeVec,   // pg_stat_activity_idle_connections{datname}
+    waiting_connections: IntGaugeVec, // pg_stat_activity_waiting_connections{datname}
+    blocked_connections: IntGaugeVec, // pg_stat_activity_blocked_connections{datname}
 }
 
 impl Default for ConnectionsCollector {
@@ -22,35 +33,55 @@ impl Default for ConnectionsCollector {
 
 impl ConnectionsCollector {
     pub fn new() -> Self {
-        let active_connections = GaugeVec::new(
+        let count_by_state = IntGaugeVec::new(
             Opts::new(
-                "pg_activity_active_connections",
-                "Number of active connections per database",
+                "pg_stat_activity_count",
+                "Number of client backends by database and state (from pg_stat_activity)",
             ),
-            &["database"],
+            &["datname", "state"],
         )
-        .expect("Failed to create active_connections metric");
+        .expect("Failed to create pg_stat_activity_count");
 
-        let waiting_connections = GaugeVec::new(
+        let active_connections = IntGaugeVec::new(
             Opts::new(
-                "pg_activity_waiting_connections",
-                "Number of connections currently waiting for a lock per database",
+                "pg_stat_activity_active_connections",
+                "Number of active client connections per database",
             ),
-            &["database"],
+            &["datname"],
         )
-        .expect("Failed to create waiting_connections metric");
+        .expect("Failed to create pg_stat_activity_active_connections");
 
-        let blocked_connections = GaugeVec::new(
+        let idle_connections = IntGaugeVec::new(
             Opts::new(
-                "pg_activity_blocked_connections",
-                "Number of blocked connections per database",
+                "pg_stat_activity_idle_connections",
+                "Number of idle client connections per database",
             ),
-            &["database"],
+            &["datname"],
         )
-        .expect("Failed to create blocked_connections metric");
+        .expect("Failed to create pg_stat_activity_idle_connections");
+
+        let waiting_connections = IntGaugeVec::new(
+            Opts::new(
+                "pg_stat_activity_waiting_connections",
+                "Number of client connections currently waiting (wait_event IS NOT NULL) per database",
+            ),
+            &["datname"],
+        )
+        .expect("Failed to create pg_stat_activity_waiting_connections");
+
+        let blocked_connections = IntGaugeVec::new(
+            Opts::new(
+                "pg_stat_activity_blocked_connections",
+                "Number of client connections blocked by locks per database",
+            ),
+            &["datname"],
+        )
+        .expect("Failed to create pg_stat_activity_blocked_connections");
 
         Self {
+            count_by_state,
             active_connections,
+            idle_connections,
             waiting_connections,
             blocked_connections,
         }
@@ -69,7 +100,10 @@ impl Collector for ConnectionsCollector {
         fields(collector = "connections")
     )]
     fn register_metrics(&self, registry: &Registry) -> Result<()> {
+        // Register all metrics in the provided registry
+        registry.register(Box::new(self.count_by_state.clone()))?;
         registry.register(Box::new(self.active_connections.clone()))?;
+        registry.register(Box::new(self.idle_connections.clone()))?;
         registry.register(Box::new(self.waiting_connections.clone()))?;
         registry.register(Box::new(self.blocked_connections.clone()))?;
         Ok(())
@@ -83,79 +117,146 @@ impl Collector for ConnectionsCollector {
     )]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            // Client span for the SQL query
-            let query_span = info_span!(
+            // 1) Compatibility metric: count by state
+            //    Only count client backends to avoid background processes.
+            let q_state = info_span!(
                 "db.query",
                 otel.kind = "client",
                 db.system = "postgresql",
                 db.operation = "SELECT",
-                db.statement = "SELECT counts from pg_stat_activity + pg_locks join",
+                db.statement =
+                    "SELECT datname, state, COUNT(*) FROM pg_stat_activity GROUP BY datname,state",
                 db.sql.table = "pg_stat_activity"
             );
 
-            let rows = sqlx::query(
+            let state_rows = sqlx::query(
                 r#"
                 SELECT
-                    COALESCE(datname, '[background]') AS datname,
-                    COUNT(*) FILTER (WHERE state = 'active') AS active,
-                    COUNT(*) FILTER (WHERE wait_event IS NOT NULL) AS waiting,
-                    COUNT(*) FILTER (WHERE pid IN (
-                        SELECT blocked_locks.pid
-                        FROM pg_locks blocked_locks
-                        JOIN pg_locks blocking_locks
-                          ON blocked_locks.locktype = blocking_locks.locktype
-                         AND blocked_locks.database IS NOT DISTINCT FROM blocking_locks.database
-                         AND blocked_locks.relation IS NOT DISTINCT FROM blocking_locks.relation
-                         AND blocked_locks.page IS NOT DISTINCT FROM blocking_locks.page
-                         AND blocked_locks.tuple IS NOT DISTINCT FROM blocking_locks.tuple
-                         AND blocked_locks.virtualxid IS NOT DISTINCT FROM blocking_locks.virtualxid
-                         AND blocked_locks.transactionid IS NOT DISTINCT FROM blocking_locks.transactionid
-                         AND blocked_locks.classid IS NOT DISTINCT FROM blocking_locks.classid
-                         AND blocked_locks.objid IS NOT DISTINCT FROM blocking_locks.objid
-                         AND blocked_locks.objsubid IS NOT DISTINCT FROM blocking_locks.objsubid
-                         AND blocked_locks.pid != blocking_locks.pid
-                        WHERE NOT blocked_locks.granted AND blocking_locks.granted
-                    )) AS blocked,
-                    COUNT(*) AS total
+                    datname,
+                    COALESCE(state, 'unknown') AS state,
+                    COUNT(*)::bigint AS cnt
                 FROM pg_stat_activity
-                WHERE pid != pg_backend_pid()  -- Exclude the monitoring query itself
-                GROUP BY datname
-                ORDER BY datname;
+                WHERE backend_type = 'client backend'
+                  AND pid != pg_backend_pid()
+                GROUP BY datname, COALESCE(state, 'unknown')
+                ORDER BY datname, COALESCE(state, 'unknown')
                 "#,
             )
             .fetch_all(pool)
-            .instrument(query_span)
+            .instrument(q_state)
             .await?;
 
-            info!("Collected activity metrics for {} databases", rows.len());
+            let mut dbs_seen: HashSet<String> = HashSet::new();
+            let mut active_map: HashMap<String, i64> = HashMap::new();
+            let mut idle_map: HashMap<String, i64> = HashMap::new();
 
-            // Internal span for applying metrics
-            let apply_span = info_span!("connections.apply_metrics", databases = rows.len());
-            let _g = apply_span.enter();
+            for row in &state_rows {
+                let db: String = row
+                    .try_get::<Option<String>, _>("datname")?
+                    .unwrap_or_else(|| "[unknown]".to_string());
+                let state: String = row.try_get::<String, _>("state")?;
+                let cnt: i64 = row.try_get::<i64, _>("cnt").unwrap_or(0);
 
-            for row in rows {
-                let db: String = row.try_get("datname")?;
-                let active: i64 = row.try_get("active").unwrap_or(0);
-                let waiting: i64 = row.try_get("waiting").unwrap_or(0);
-                let blocked: i64 = row.try_get("blocked").unwrap_or(0);
+                dbs_seen.insert(db.clone());
 
-                self.active_connections
-                    .with_label_values(&[&db])
-                    .set(active as f64);
+                // Emit pg_stat_activity_count
+                self.count_by_state
+                    .with_label_values(&[&db, &state])
+                    .set(cnt);
+
+                // Track active/idle for convenience gauges later
+                if state.eq_ignore_ascii_case("active") {
+                    active_map.insert(db.clone(), cnt);
+                } else if state.eq_ignore_ascii_case("idle") {
+                    idle_map.insert(db.clone(), cnt);
+                }
+            }
+
+            // After processing all states, set per-db active/idle (default 0 if missing)
+            for db in &dbs_seen {
+                let a = *active_map.get(db).unwrap_or(&0);
+                let i = *idle_map.get(db).unwrap_or(&0);
+                self.active_connections.with_label_values(&[db]).set(a);
+                self.idle_connections.with_label_values(&[db]).set(i);
+                debug!(database=%db, active=a, idle=i, "set active/idle gauges");
+            }
+
+            // 2) Waiting and blocked connections per database
+            let q_wait_block = info_span!(
+                "db.query",
+                otel.kind = "client",
+                db.system = "postgresql",
+                db.operation = "SELECT",
+                db.statement = "SELECT wait/blocked per db from pg_stat_activity + pg_locks",
+                db.sql.table = "pg_stat_activity"
+            );
+
+            let wait_block_rows = sqlx::query(
+                r#"
+                WITH blocked_pids AS (
+                    SELECT bl.pid
+                    FROM pg_locks bl
+                    JOIN pg_locks wl
+                      ON bl.locktype = wl.locktype
+                     AND bl.database IS NOT DISTINCT FROM wl.database
+                     AND bl.relation IS NOT DISTINCT FROM wl.relation
+                     AND bl.page IS NOT DISTINCT FROM wl.page
+                     AND bl.tuple IS NOT DISTINCT FROM wl.tuple
+                     AND bl.virtualxid IS NOT DISTINCT FROM wl.virtualxid
+                     AND bl.transactionid IS NOT DISTINCT FROM wl.transactionid
+                     AND bl.classid IS NOT DISTINCT FROM wl.classid
+                     AND bl.objid IS NOT DISTINCT FROM wl.objid
+                     AND bl.objsubid IS NOT DISTINCT FROM wl.objsubid
+                     AND bl.pid <> wl.pid
+                    WHERE NOT bl.granted AND wl.granted
+                )
+                SELECT
+                    a.datname,
+                    COUNT(*) FILTER (WHERE a.wait_event IS NOT NULL)::bigint AS waiting,
+                    COUNT(*) FILTER (WHERE a.pid IN (SELECT pid FROM blocked_pids))::bigint AS blocked
+                FROM pg_stat_activity a
+                WHERE a.backend_type = 'client backend'
+                  AND a.pid != pg_backend_pid()
+                GROUP BY a.datname
+                ORDER BY a.datname
+                "#,
+            )
+            .fetch_all(pool)
+            .instrument(q_wait_block)
+            .await?;
+
+            let mut waiting_map: HashMap<String, i64> = HashMap::new();
+            let mut blocked_map: HashMap<String, i64> = HashMap::new();
+
+            for row in &wait_block_rows {
+                let db: String = row
+                    .try_get::<Option<String>, _>("datname")?
+                    .unwrap_or_else(|| "[unknown]".to_string());
+                let waiting: i64 = row.try_get::<i64, _>("waiting").unwrap_or(0);
+                let blocked: i64 = row.try_get::<i64, _>("blocked").unwrap_or(0);
+
+                dbs_seen.insert(db.clone());
+                waiting_map.insert(db.clone(), waiting);
+                blocked_map.insert(db.clone(), blocked);
+
                 self.waiting_connections
                     .with_label_values(&[&db])
-                    .set(waiting as f64);
+                    .set(waiting);
                 self.blocked_connections
                     .with_label_values(&[&db])
-                    .set(blocked as f64);
+                    .set(blocked);
 
-                debug!(
-                    database = %db,
-                    active,
-                    waiting,
-                    blocked,
-                    "updated connection metrics"
-                );
+                debug!(database=%db, waiting, blocked, "set waiting/blocked gauges");
+            }
+
+            // Ensure zeroes for databases seen in state query but not in wait/blocked
+            for db in &dbs_seen {
+                if !waiting_map.contains_key(db) {
+                    self.waiting_connections.with_label_values(&[db]).set(0);
+                }
+                if !blocked_map.contains_key(db) {
+                    self.blocked_connections.with_label_values(&[db]).set(0);
+                }
             }
 
             Ok(())
