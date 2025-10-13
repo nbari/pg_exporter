@@ -1,10 +1,8 @@
-use crate::collectors::Collector;
+use crate::collectors::{Collector, util::get_excluded_databases};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, Opts, Registry};
 use sqlx::{PgPool, Row};
-use std::collections::HashSet;
-use std::env;
 use tracing::{debug, info_span, instrument};
 use tracing_futures::Instrument as _;
 
@@ -31,7 +29,7 @@ use tracing_futures::Instrument as _;
 ///
 /// Notes:
 /// - We export absolute values as Gauges; use rate()/increase() in PromQL for cumulative series.
-/// - PG_EXPORTER_EXCLUDE_DATABASES is applied server-side to both stats and catalog collectors.
+/// - Database exclusions are applied server-side using the global list set via CLI/env.
 #[derive(Clone)]
 pub struct DatabaseStatCollector {
     numbackends: GaugeVec,
@@ -56,9 +54,6 @@ pub struct DatabaseStatCollector {
     stats_reset: GaugeVec,
 
     active_time_seconds_total: GaugeVec, // PG >= 14
-
-    // Exclusions: read once at init
-    excluded: HashSet<String>,
 }
 
 impl Default for DatabaseStatCollector {
@@ -215,22 +210,6 @@ impl DatabaseStatCollector {
         )
         .expect("register pg_stat_database_active_time_seconds_total");
 
-        let excluded = env::var("PG_EXPORTER_EXCLUDE_DATABASES")
-            .ok()
-            .map(|s| {
-                s.split(',')
-                    .filter_map(|v| {
-                        let t = v.trim();
-                        if t.is_empty() {
-                            None
-                        } else {
-                            Some(t.to_string())
-                        }
-                    })
-                    .collect::<HashSet<_>>()
-            })
-            .unwrap_or_default();
-
         Self {
             numbackends,
             xact_commit,
@@ -250,7 +229,6 @@ impl DatabaseStatCollector {
             blk_write_time,
             stats_reset,
             active_time_seconds_total,
-            excluded,
         }
     }
 }
@@ -324,10 +302,9 @@ impl Collector for DatabaseStatCollector {
                 cols.push("(active_time / 1000.0)::double precision AS active_time_seconds");
             }
 
-            let excluded_list: Vec<String> = self.excluded.iter().cloned().collect();
+            // Apply exclusions server-side. If the list is empty, this is a no-op.
+            let excluded_list: Vec<String> = get_excluded_databases().to_vec();
 
-            // IMPORTANT: apply exclusions server-side. If excluded_list is empty,
-            // datname = ANY('{}') is false for all rows; NOT false => true (keeps all).
             let sql = format!(
                 "SELECT {} FROM pg_stat_database WHERE NOT (datname = ANY($1)) ORDER BY datname",
                 cols.join(", ")

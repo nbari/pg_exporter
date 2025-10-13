@@ -1,4 +1,4 @@
-use crate::collectors::Collector;
+use crate::collectors::{Collector, util::get_excluded_databases};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{IntGauge, IntGaugeVec, Opts, Registry};
@@ -98,27 +98,35 @@ impl Collector for VacuumProgressCollector {
     )]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            // Exclusions (set globally via CLI/env)
+            let excluded: Vec<String> = get_excluded_databases().to_vec();
+
             // Query span
             let query_span = info_span!(
                 "db.query",
                 otel.kind = "client",
                 db.system = "postgresql",
                 db.operation = "SELECT",
-                db.statement = "SELECT relid, heap_blks_total, heap_blks_scanned, heap_blks_vacuumed, index_vacuum_count FROM pg_stat_progress_vacuum",
+                db.statement = "SELECT progress from pg_stat_progress_vacuum joined with pg_database (filtered)",
                 db.sql.table = "pg_stat_progress_vacuum"
             );
 
+            // Filter by excluded databases via LEFT JOIN on datid.
+            // Keep rows with no database match (shouldn't happen) by allowing d.datname IS NULL.
             let rows = sqlx::query(
                 r#"
                 SELECT
-                    relid::regclass::text AS table_name,
-                    heap_blks_total,
-                    heap_blks_scanned,
-                    heap_blks_vacuumed,
-                    index_vacuum_count
-                FROM pg_stat_progress_vacuum
+                    p.relid::regclass::text AS table_name,
+                    p.heap_blks_total,
+                    p.heap_blks_scanned,
+                    p.heap_blks_vacuumed,
+                    p.index_vacuum_count
+                FROM pg_stat_progress_vacuum p
+                LEFT JOIN pg_database d ON d.oid = p.datid
+                WHERE (d.datname IS NULL OR NOT (d.datname = ANY($1)))
                 "#,
             )
+            .bind(&excluded)
             .fetch_all(pool)
             .instrument(query_span)
             .await?;
@@ -145,16 +153,17 @@ impl Collector for VacuumProgressCollector {
                     let heap_vac: i64 = row.try_get("heap_blks_vacuumed").unwrap_or(0);
                     let idx_count: i64 = row.try_get("index_vacuum_count").unwrap_or(0);
 
-                    let progress_pct = if heap_total > 0 {
-                        (heap_scanned as f64 / heap_total as f64) * 100.0
+                    let progress_pct_i64 = if heap_total > 0 {
+                        // Round to nearest integer percent for IntGauge
+                        ((heap_scanned as f64 / heap_total as f64) * 100.0).round() as i64
                     } else {
-                        0.0
+                        0
                     };
 
                     self.in_progress.with_label_values(&[&table]).set(1);
                     self.heap_progress
                         .with_label_values(&[&table])
-                        .set(progress_pct as i64);
+                        .set(progress_pct_i64);
                     self.heap_vacuumed
                         .with_label_values(&[&table])
                         .set(heap_vac);
@@ -168,7 +177,7 @@ impl Collector for VacuumProgressCollector {
                         heap_scanned,
                         heap_vacuumed = heap_vac,
                         index_vacuum_count = idx_count,
-                        progress_pct,
+                        progress_pct = progress_pct_i64,
                         "updated vacuum progress metrics"
                     );
                 }

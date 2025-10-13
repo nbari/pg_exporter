@@ -1,12 +1,21 @@
 use crate::{
     cli::actions::Action,
-    collectors::{COLLECTOR_NAMES, Collector, all_factories},
+    collectors::{
+        COLLECTOR_NAMES, Collector, all_factories,
+        util::{get_excluded_databases, set_excluded_databases},
+    },
 };
 use anyhow::Result;
 use clap::ArgMatches;
 use secrecy::SecretString;
+use tracing::info;
 
 pub fn handler(matches: &clap::ArgMatches) -> Result<Action> {
+    // Initialize global excluded database list once from CLI/env
+    init_excluded_databases(matches);
+
+    info!("Excluded databases: {:?}", get_excluded_databases());
+
     Ok(Action::Run {
         port: matches.get_one::<u16>("port").copied().unwrap_or(9432),
         dsn: SecretString::from(
@@ -19,6 +28,21 @@ pub fn handler(matches: &clap::ArgMatches) -> Result<Action> {
         ),
         collectors: get_enabled_collectors(matches),
     })
+}
+
+fn init_excluded_databases(matches: &ArgMatches) {
+    // Collect values from Clap (supports --exclude-databases a,b and env)
+    let excludes: Vec<String> = matches
+        .get_many::<String>("exclude-databases")
+        .map(|vals| {
+            vals.map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Set once globally for all collectors
+    set_excluded_databases(excludes);
 }
 
 pub fn get_enabled_collectors(matches: &ArgMatches) -> Vec<String> {

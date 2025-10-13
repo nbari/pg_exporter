@@ -1,21 +1,27 @@
-use crate::collectors::Collector;
+use crate::collectors::{Collector, util::get_excluded_databases};
 use anyhow::Result;
 use futures::future::BoxFuture;
-use prometheus::{IntGaugeVec, Opts, Registry};
+use prometheus::{IntGauge, IntGaugeVec, Opts, Registry};
 use sqlx::{PgPool, Row};
-use tracing::{debug, info, info_span, instrument};
+use std::collections::{HashMap, HashSet};
+use tracing::{debug, info_span, instrument};
 use tracing_futures::Instrument as _;
 
-/// Collects summary statistics from pg_stat_all_tables
+/// Minimal vacuum stats (lightweight, single-connection):
+/// - pg_vacuum_database_freeze_age_xids{datname}
+/// - pg_vacuum_freeze_max_age_xids
+/// - pg_vacuum_database_freeze_age_pct_of_max{datname}
+/// - pg_vacuum_autovacuum_workers{datname}
 #[derive(Clone)]
 pub struct VacuumStatsCollector {
-    tuples_dead: IntGaugeVec,
-    tuples_live: IntGaugeVec,
-    last_vacuum_age: IntGaugeVec,
-    last_autovacuum_age: IntGaugeVec,
-    last_analyze_age: IntGaugeVec,
-    last_autoanalyze_age: IntGaugeVec,
-    dead_ratio: IntGaugeVec,
+    // Per-database freeze age (age(datfrozenxid) in xids)
+    db_freeze_age_xids: IntGaugeVec, // pg_vacuum_database_freeze_age_xids{datname}
+    // Global autovacuum_freeze_max_age (xids)
+    freeze_max_age_xids: IntGauge, // pg_vacuum_freeze_max_age_xids
+    // Per-database % of max (rounded integer 0..100+, capped to 100 for display)
+    db_freeze_age_pct_of_max: IntGaugeVec, // pg_vacuum_database_freeze_age_pct_of_max{datname}
+    // Per-database autovacuum workers currently running
+    autovac_workers: IntGaugeVec, // pg_vacuum_autovacuum_workers{datname}
 }
 
 impl Default for VacuumStatsCollector {
@@ -26,71 +32,44 @@ impl Default for VacuumStatsCollector {
 
 impl VacuumStatsCollector {
     pub fn new() -> Self {
-        let tuples_dead = IntGaugeVec::new(
-            Opts::new("pg_table_tuples_dead", "Dead tuples per table"),
-            &["schema", "table"],
-        )
-        .expect("failed to create tuples_dead metric");
-
-        let tuples_live = IntGaugeVec::new(
-            Opts::new("pg_table_tuples_live", "Live tuples per table"),
-            &["schema", "table"],
-        )
-        .expect("failed to create tuples_live metric");
-
-        let last_vacuum_age = IntGaugeVec::new(
+        let db_freeze_age_xids = IntGaugeVec::new(
             Opts::new(
-                "pg_table_last_vacuum_age_seconds",
-                "Age in seconds since last vacuum per table",
+                "pg_vacuum_database_freeze_age_xids",
+                "Age in transactions (xids) since database freeze (age(datfrozenxid)).",
             ),
-            &["schema", "table"],
+            &["datname"],
         )
-        .expect("failed to create last_vacuum_age metric");
+        .expect("create pg_vacuum_database_freeze_age_xids");
 
-        let last_autovacuum_age = IntGaugeVec::new(
-            Opts::new(
-                "pg_table_last_autovacuum_age_seconds",
-                "Age in seconds since last autovacuum per table",
-            ),
-            &["schema", "table"],
-        )
-        .expect("failed to create last_autovacuum_age metric");
+        let freeze_max_age_xids = IntGauge::with_opts(Opts::new(
+            "pg_vacuum_freeze_max_age_xids",
+            "Configured autovacuum_freeze_max_age (xids).",
+        ))
+        .expect("create pg_vacuum_freeze_max_age_xids");
 
-        let last_analyze_age = IntGaugeVec::new(
+        let db_freeze_age_pct_of_max = IntGaugeVec::new(
             Opts::new(
-                "pg_table_last_analyze_age_seconds",
-                "Age in seconds since last analyze per table",
+                "pg_vacuum_database_freeze_age_pct_of_max",
+                "Freeze age as percent of autovacuum_freeze_max_age (0..100).",
             ),
-            &["schema", "table"],
+            &["datname"],
         )
-        .expect("failed to create last_analyze_age metric");
+        .expect("create pg_vacuum_database_freeze_age_pct_of_max");
 
-        let last_autoanalyze_age = IntGaugeVec::new(
+        let autovac_workers = IntGaugeVec::new(
             Opts::new(
-                "pg_table_last_autoanalyze_age_seconds",
-                "Age in seconds since last autoanalyze per table",
+                "pg_vacuum_autovacuum_workers",
+                "Number of autovacuum workers currently running per database.",
             ),
-            &["schema", "table"],
+            &["datname"],
         )
-        .expect("failed to create last_autoanalyze_age metric");
-
-        let dead_ratio = IntGaugeVec::new(
-            Opts::new(
-                "pg_table_dead_ratio",
-                "Dead tuples ratio: dead / (dead + live) (reported as percentage)",
-            ),
-            &["schema", "table"],
-        )
-        .expect("failed to create dead_ratio metric");
+        .expect("create pg_vacuum_autovacuum_workers");
 
         Self {
-            tuples_dead,
-            tuples_live,
-            last_vacuum_age,
-            last_autovacuum_age,
-            last_analyze_age,
-            last_autoanalyze_age,
-            dead_ratio,
+            db_freeze_age_xids,
+            freeze_max_age_xids,
+            db_freeze_age_pct_of_max,
+            autovac_workers,
         }
     }
 }
@@ -107,13 +86,10 @@ impl Collector for VacuumStatsCollector {
         fields(collector = "vacuum_stats")
     )]
     fn register_metrics(&self, registry: &Registry) -> Result<()> {
-        registry.register(Box::new(self.tuples_dead.clone()))?;
-        registry.register(Box::new(self.tuples_live.clone()))?;
-        registry.register(Box::new(self.last_vacuum_age.clone()))?;
-        registry.register(Box::new(self.last_autovacuum_age.clone()))?;
-        registry.register(Box::new(self.last_analyze_age.clone()))?;
-        registry.register(Box::new(self.last_autoanalyze_age.clone()))?;
-        registry.register(Box::new(self.dead_ratio.clone()))?;
+        registry.register(Box::new(self.db_freeze_age_xids.clone()))?;
+        registry.register(Box::new(self.freeze_max_age_xids.clone()))?;
+        registry.register(Box::new(self.db_freeze_age_pct_of_max.clone()))?;
+        registry.register(Box::new(self.autovac_workers.clone()))?;
         Ok(())
     }
 
@@ -125,92 +101,131 @@ impl Collector for VacuumStatsCollector {
     )]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            // Span specifically for the DB query (client span)
-            let query_span = info_span!(
+            let excluded: Vec<String> = get_excluded_databases().to_vec();
+
+            // Query 1: global autovacuum_freeze_max_age (xids)
+            let q_freeze_max = info_span!(
                 "db.query",
                 otel.kind = "client",
                 db.system = "postgresql",
                 db.operation = "SELECT",
-                db.statement = "SELECT schemaname, relname, n_live_tup, n_dead_tup, age fields FROM pg_stat_all_tables",
-                db.sql.table = "pg_stat_all_tables"
+                db.statement = "SELECT current_setting('autovacuum_freeze_max_age')",
             );
+            let freeze_max_age_xids: i64 = sqlx::query_scalar(
+                r#"SELECT current_setting('autovacuum_freeze_max_age')::bigint"#,
+            )
+            .fetch_one(pool)
+            .instrument(q_freeze_max)
+            .await
+            .unwrap_or(200_000_000); // default if missing, very unlikely
+            self.freeze_max_age_xids.set(freeze_max_age_xids);
 
+            // Query 2: per-database freeze age (xids) from pg_database
+            let q_db_freeze_age = info_span!(
+                "db.query",
+                otel.kind = "client",
+                db.system = "postgresql",
+                db.operation = "SELECT",
+                db.statement = "SELECT datname, age(datfrozenxid) FROM pg_database",
+                db.sql.table = "pg_database"
+            );
             let rows = sqlx::query(
                 r#"
                 SELECT
-                    schemaname,
-                    relname,
-                    n_live_tup,
-                    n_dead_tup,
-                    COALESCE(EXTRACT(EPOCH FROM (now() - last_vacuum))::bigint, -1) AS last_vacuum_age,
-                    COALESCE(EXTRACT(EPOCH FROM (now() - last_autovacuum))::bigint, -1) AS last_autovacuum_age,
-                    COALESCE(EXTRACT(EPOCH FROM (now() - last_analyze))::bigint, -1) AS last_analyze_age,
-                    COALESCE(EXTRACT(EPOCH FROM (now() - last_autoanalyze))::bigint, -1) AS last_autoanalyze_age
-                FROM pg_stat_all_tables
+                    datname,
+                    age(datfrozenxid)::bigint AS freeze_age
+                FROM pg_database
+                WHERE datallowconn
+                  AND NOT datistemplate
+                  AND NOT (datname = ANY($1))
+                ORDER BY datname
                 "#,
             )
+            .bind(&excluded)
             .fetch_all(pool)
-            .instrument(query_span)
+            .instrument(q_db_freeze_age)
             .await?;
 
-            info!("Collecting vacuum stats for {} tables", rows.len());
+            let mut seen_dbs: HashSet<String> = HashSet::new();
 
-            // Span for transforming rows into metrics
-            let apply_span = info_span!("vacuum_stats.apply_metrics", tables = rows.len());
-            let _g = apply_span.enter();
+            for row in &rows {
+                let datname: String = row
+                    .try_get::<Option<String>, _>("datname")?
+                    .unwrap_or_else(|| "[unknown]".to_string());
+                let age_xids: i64 = row.try_get::<i64, _>("freeze_age").unwrap_or(0);
 
-            for row in rows {
-                let schema: String = row.try_get("schemaname")?;
-                let table: String = row.try_get("relname")?;
-                let live: i64 = row.try_get("n_live_tup").unwrap_or(0);
-                let dead: i64 = row.try_get("n_dead_tup").unwrap_or(0);
-                let last_vac: i64 = row.try_get("last_vacuum_age").unwrap_or(-1);
-                let last_autovac: i64 = row.try_get("last_autovacuum_age").unwrap_or(-1);
-                let last_analyze: i64 = row.try_get("last_analyze_age").unwrap_or(-1);
-                let last_autoanalyze: i64 = row.try_get("last_autoanalyze_age").unwrap_or(-1);
+                seen_dbs.insert(datname.clone());
 
-                self.tuples_live
-                    .with_label_values(&[&schema, &table])
-                    .set(live);
-                self.tuples_dead
-                    .with_label_values(&[&schema, &table])
-                    .set(dead);
-                self.last_vacuum_age
-                    .with_label_values(&[&schema, &table])
-                    .set(last_vac);
-                self.last_autovacuum_age
-                    .with_label_values(&[&schema, &table])
-                    .set(last_autovac);
-                self.last_analyze_age
-                    .with_label_values(&[&schema, &table])
-                    .set(last_analyze);
-                self.last_autoanalyze_age
-                    .with_label_values(&[&schema, &table])
-                    .set(last_autoanalyze);
+                self.db_freeze_age_xids
+                    .with_label_values(&[&datname])
+                    .set(age_xids);
 
-                let ratio = if live + dead > 0 {
-                    dead as f64 / (live + dead) as f64
+                // integer percent; cap to 100 (can exceed in theory; cap keeps dashboards sane)
+                let pct = if freeze_max_age_xids > 0 {
+                    let p =
+                        ((age_xids as f64) / (freeze_max_age_xids as f64) * 100.0).round() as i64;
+                    p.clamp(0, 100)
                 } else {
-                    0.0
+                    0
                 };
+                self.db_freeze_age_pct_of_max
+                    .with_label_values(&[&datname])
+                    .set(pct);
 
-                self.dead_ratio
-                    .with_label_values(&[&schema, &table])
-                    .set((ratio * 100.0) as i64);
-
-                // Per-table debug event (enable with crate log level = debug)
                 debug!(
-                    schema = %schema,
-                    table = %table,
-                    live,
-                    dead,
-                    last_vac,
-                    last_autovac,
-                    last_analyze,
-                    last_autoanalyze,
-                    dead_ratio_pct = (ratio * 100.0),
-                    "updated vacuum stats metrics"
+                    datname = %datname,
+                    age_xids,
+                    freeze_max_age_xids,
+                    pct_of_max = pct,
+                    "updated freeze age metrics"
                 );
+            }
+
+            // Query 3: autovacuum workers per database (from pg_stat_activity)
+            let q_workers = info_span!(
+                "db.query",
+                otel.kind = "client",
+                db.system = "postgresql",
+                db.operation = "SELECT",
+                db.statement =
+                    "SELECT count(*) FROM pg_stat_activity WHERE backend_type='autovacuum worker'",
+                db.sql.table = "pg_stat_activity"
+            );
+            let worker_rows = sqlx::query(
+                r#"
+                SELECT
+                    datname,
+                    COUNT(*)::bigint AS workers
+                FROM pg_stat_activity
+                WHERE backend_type = 'autovacuum worker'
+                  AND NOT (COALESCE(datname,'') = ANY($1))
+                GROUP BY datname
+                ORDER BY datname
+                "#,
+            )
+            .bind(&excluded)
+            .fetch_all(pool)
+            .instrument(q_workers)
+            .await?;
+
+            let mut worker_map: HashMap<String, i64> = HashMap::new();
+            for row in &worker_rows {
+                let datname: String = row
+                    .try_get::<Option<String>, _>("datname")?
+                    .unwrap_or_else(|| "[unknown]".to_string());
+                let workers: i64 = row.try_get::<i64, _>("workers").unwrap_or(0);
+                worker_map.insert(datname.clone(), workers);
+
+                self.autovac_workers
+                    .with_label_values(&[&datname])
+                    .set(workers);
+            }
+
+            // Ensure we emit zeros for DBs with no workers visible this scrape
+            for db in seen_dbs {
+                if !worker_map.contains_key(&db) {
+                    self.autovac_workers.with_label_values(&[&db]).set(0);
+                }
             }
 
             Ok(())

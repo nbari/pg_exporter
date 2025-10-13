@@ -19,6 +19,9 @@ pub trait Collector {
     fn enabled_by_default(&self) -> bool;
 }
 
+// Make utils available to all collectors (exclusions, etc.)
+pub mod util;
+
 // THIS IS THE ONLY PLACE YOU NEED TO ADD NEW COLLECTORS ✨
 register_collectors! {
     default => DefaultCollector,

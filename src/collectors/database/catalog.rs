@@ -1,10 +1,8 @@
-use crate::collectors::Collector;
+use crate::collectors::{Collector, util::get_excluded_databases};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, Opts, Registry};
 use sqlx::{PgPool, Row};
-use std::collections::HashSet;
-use std::env;
 use tracing::{debug, info_span, instrument};
 use tracing_futures::Instrument as _;
 
@@ -13,12 +11,12 @@ use tracing_futures::Instrument as _;
 /// - pg_database_connection_limit{datname}
 ///
 /// Exclusions:
-/// - Set PG_EXPORTER_EXCLUDE_DATABASES="db1,db2" to skip those databases.
+/// - Set via CLI flag `--exclude-databases a,b,c` or env `PG_EXPORTER_EXCLUDE_DATABASES`.
+/// - Exclusions are applied server-side using a single query.
 #[derive(Clone)]
 pub struct DatabaseSubCollector {
     size_bytes: GaugeVec,       // pg_database_size_bytes{datname}
     connection_limit: GaugeVec, // pg_database_connection_limit{datname}
-    excluded: HashSet<String>,
 }
 
 impl Default for DatabaseSubCollector {
@@ -44,26 +42,9 @@ impl DatabaseSubCollector {
         )
         .expect("register pg_database_connection_limit");
 
-        let excluded = env::var("PG_EXPORTER_EXCLUDE_DATABASES")
-            .ok()
-            .map(|s| {
-                s.split(',')
-                    .filter_map(|v| {
-                        let t = v.trim();
-                        if t.is_empty() {
-                            None
-                        } else {
-                            Some(t.to_string())
-                        }
-                    })
-                    .collect::<HashSet<_>>()
-            })
-            .unwrap_or_default();
-
         Self {
             size_bytes,
             connection_limit,
-            excluded,
         }
     }
 }
@@ -87,13 +68,16 @@ impl Collector for DatabaseSubCollector {
     )]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            // 1) List databases and their connection limits
-            let list_span = info_span!(
+            // Build exclusion list from global OnceCell (set at startup via Clap/env).
+            let excluded_list: Vec<String> = get_excluded_databases().to_vec();
+
+            // Single round-trip: size + connection limit per database, with server-side exclusion.
+            let q_span = info_span!(
                 "db.query",
                 otel.kind = "client",
                 db.system = "postgresql",
                 db.operation = "SELECT",
-                db.statement = "SELECT datname, datconnlimit FROM pg_database",
+                db.statement = "SELECT datname, datconnlimit, pg_database_size(datname) FROM pg_database WHERE NOT (datname = ANY($1))",
                 db.sql.table = "pg_database"
             );
 
@@ -101,64 +85,45 @@ impl Collector for DatabaseSubCollector {
                 r#"
                 SELECT
                     datname,
-                    datconnlimit
+                    datconnlimit,
+                    pg_database_size(datname)::bigint AS size
                 FROM pg_database
+                WHERE NOT (datname = ANY($1))
+                ORDER BY datname
                 "#,
             )
+            .bind(&excluded_list)
             .fetch_all(pool)
-            .instrument(list_span)
+            .instrument(q_span)
             .await?;
 
-            let mut databases: Vec<String> = Vec::new();
+            let apply_span = info_span!("pg_database.apply_metrics", databases = rows.len());
+            let _g = apply_span.enter();
 
             for row in &rows {
                 let datname: Option<String> = row.try_get::<Option<String>, _>("datname")?;
-                let conn_limit: Option<i32> = row.try_get::<Option<i32>, _>("datconnlimit")?;
-
-                let dat = match datname {
-                    Some(d) if !d.is_empty() => d,
-                    _ => continue,
+                let Some(dat) = datname.filter(|d| !d.is_empty()) else {
+                    continue;
                 };
 
-                // Exclude if configured
-                if self.excluded.contains(&dat) {
-                    debug!(datname = %dat, "excluded datname");
-                    continue;
-                }
-
-                // Emit connection limit (may be -1 for unlimited)
+                // Connection limit (may be -1 for unlimited)
+                let conn_limit: Option<i32> = row.try_get::<Option<i32>, _>("datconnlimit")?;
                 let limit_val = conn_limit.unwrap_or(0) as f64;
                 self.connection_limit
                     .with_label_values(&[&dat])
                     .set(limit_val);
 
-                databases.push(dat);
-            }
-
-            // 2) For each database, query size individually
-            for dat in databases {
-                let size_span = info_span!(
-                    "db.query",
-                    otel.kind = "client",
-                    db.system = "postgresql",
-                    db.operation = "SELECT",
-                    db.statement = "SELECT pg_database_size($1)",
-                    db.sql.table = "pg_database",
-                    datname = %dat
-                );
-
-                let size_row = sqlx::query(r#"SELECT pg_database_size($1) AS size"#)
-                    .bind(&dat)
-                    .fetch_one(pool)
-                    .instrument(size_span)
-                    .await?;
-
-                let size: Option<i64> = size_row.try_get::<Option<i64>, _>("size")?;
+                // Size
+                let size: Option<i64> = row.try_get::<Option<i64>, _>("size")?;
                 let size_val = size.unwrap_or(0) as f64;
-
                 self.size_bytes.with_label_values(&[&dat]).set(size_val);
 
-                debug!(datname = %dat, size_bytes = size_val, "updated pg_database_size_bytes");
+                debug!(
+                    datname = %dat,
+                    connection_limit = limit_val,
+                    size_bytes = size_val,
+                    "updated pg_database metrics"
+                );
             }
 
             Ok(())

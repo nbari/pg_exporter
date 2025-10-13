@@ -1,4 +1,4 @@
-use crate::collectors::Collector;
+use crate::collectors::{Collector, util::get_excluded_databases};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, Opts, Registry};
@@ -24,14 +24,17 @@ impl WaitEventsCollector {
         let wait_event_type = GaugeVec::new(
             Opts::new(
                 "pg_wait_event_type",
-                "Number of active sessions per wait_event_type",
+                "Number of active client sessions per wait_event_type",
             ),
             &["type"],
         )
         .expect("Failed to create pg_wait_event_type metric");
 
         let wait_event = GaugeVec::new(
-            Opts::new("pg_wait_event", "Number of active sessions per wait_event"),
+            Opts::new(
+                "pg_wait_event",
+                "Number of active client sessions per wait_event",
+            ),
             &["event"],
         )
         .expect("Failed to create pg_wait_event metric");
@@ -76,28 +79,41 @@ impl Collector for WaitEventsCollector {
                 self.wait_event.reset();
             }
 
+            // Exclusions (set globally via CLI/env)
+            let excluded: Vec<String> = get_excluded_databases().to_vec();
+
             // DB query span (client)
             let query_span = info_span!(
                 "db.query",
                 otel.kind = "client",
                 db.system = "postgresql",
                 db.operation = "SELECT",
-                db.statement = "SELECT wait_event_type, wait_event, count(*) FROM pg_stat_activity",
+                db.statement =
+                    "SELECT wait_event_type,event,count FROM pg_stat_activity (filtered)",
                 db.sql.table = "pg_stat_activity"
             );
 
+            // Note:
+            // - Filter to client backends and exclude own backend PID.
+            // - Exclude databases server-side with NOT (COALESCE(datname,'') = ANY($1)).
+            // - COALESCE wait_event_type/event to 'none' to represent runnable sessions (no wait).
             let rows = sqlx::query(
                 r#"
                 SELECT
-                    wait_event_type,
-                    wait_event,
-                    count(*) AS count
+                    COALESCE(wait_event_type, 'none') AS wait_event_type,
+                    COALESCE(wait_event, 'none')      AS wait_event,
+                    COUNT(*)::bigint                  AS count
                 FROM pg_stat_activity
                 WHERE state = 'active'
+                  AND backend_type = 'client backend'
                   AND pid != pg_backend_pid()
-                GROUP BY wait_event_type, wait_event
+                  AND NOT (COALESCE(datname, '') = ANY($1))
+                GROUP BY COALESCE(wait_event_type, 'none'),
+                         COALESCE(wait_event, 'none')
+                ORDER BY wait_event_type, wait_event
                 "#,
             )
+            .bind(&excluded)
             .fetch_all(pool)
             .instrument(query_span)
             .await?;
@@ -114,7 +130,7 @@ impl Collector for WaitEventsCollector {
                 for row in &rows {
                     let event_type: String = row.try_get("wait_event_type")?;
                     let event: String = row.try_get("wait_event")?;
-                    let count: i64 = row.try_get("count").unwrap_or(0);
+                    let count: i64 = row.try_get::<i64, _>("count").unwrap_or(0);
 
                     self.wait_event_type
                         .with_label_values(&[&event_type])

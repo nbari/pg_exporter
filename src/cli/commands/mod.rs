@@ -40,6 +40,15 @@ pub fn new() -> Command {
                 .value_name("DSN"),
         )
         .arg(
+            Arg::new("exclude-databases")
+                .long("exclude-databases")
+                .help("Comma-separated list of databases to exclude (exact/case-sensitive)")
+                .env("PG_EXPORTER_EXCLUDE_DATABASES")
+                .value_name("template0,template1,...")
+                .value_delimiter(',') // split CLI and env values by comma
+                .action(ArgAction::Append), // allow repeated flags if desired
+        )
+        .arg(
             Arg::new("verbose")
                 .short('v')
                 .long("verbose")
@@ -92,6 +101,10 @@ mod tests {
             "8080",
             "--dsn",
             "postgres://user:password@localhost:5432/genesis",
+            "--exclude-databases",
+            "template0,template1",
+            "--exclude-databases",
+            "postgres",
         ]);
 
         assert_eq!(matches.get_one::<u16>("port").copied(), Some(8080));
@@ -99,5 +112,27 @@ mod tests {
             matches.get_one::<String>("dsn").map(|s| s.to_string()),
             Some("postgres://user:password@localhost:5432/genesis".to_string())
         );
+
+        let excludes: Vec<String> = matches
+            .get_many::<String>("exclude-databases")
+            .unwrap()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(excludes, vec!["template0", "template1", "postgres"]);
+    }
+
+    #[test]
+    fn test_check_exclude_databases_env() {
+        temp_env::with_var("PG_EXPORTER_EXCLUDE_DATABASES", Some("db1,db2,db3"), || {
+            let command = new();
+            let matches = command.get_matches_from(vec!["pg_exporter"]);
+
+            let excludes: Vec<String> = matches
+                .get_many::<String>("exclude-databases")
+                .unwrap()
+                .map(|s| s.to_string())
+                .collect();
+            assert_eq!(excludes, vec!["db1", "db2", "db3"]);
+        });
     }
 }

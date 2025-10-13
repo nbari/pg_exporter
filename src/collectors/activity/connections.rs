@@ -1,4 +1,4 @@
-use crate::collectors::Collector;
+use crate::collectors::{Collector, util::get_excluded_databases};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{IntGaugeVec, Opts, Registry};
@@ -117,6 +117,9 @@ impl Collector for ConnectionsCollector {
     )]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            // Build exclusion list from global OnceCell (set at startup via Clap/env).
+            let excluded: Vec<String> = get_excluded_databases().to_vec();
+
             // 1) Compatibility metric: count by state
             //    Only count client backends to avoid background processes.
             let q_state = info_span!(
@@ -124,8 +127,7 @@ impl Collector for ConnectionsCollector {
                 otel.kind = "client",
                 db.system = "postgresql",
                 db.operation = "SELECT",
-                db.statement =
-                    "SELECT datname, state, COUNT(*) FROM pg_stat_activity GROUP BY datname,state",
+                db.statement = "SELECT datname, state, COUNT(*) FROM pg_stat_activity (filtered)",
                 db.sql.table = "pg_stat_activity"
             );
 
@@ -138,10 +140,12 @@ impl Collector for ConnectionsCollector {
                 FROM pg_stat_activity
                 WHERE backend_type = 'client backend'
                   AND pid != pg_backend_pid()
+                  AND NOT (COALESCE(datname, '') = ANY($1))
                 GROUP BY datname, COALESCE(state, 'unknown')
                 ORDER BY datname, COALESCE(state, 'unknown')
                 "#,
             )
+            .bind(&excluded)
             .fetch_all(pool)
             .instrument(q_state)
             .await?;
@@ -187,7 +191,8 @@ impl Collector for ConnectionsCollector {
                 otel.kind = "client",
                 db.system = "postgresql",
                 db.operation = "SELECT",
-                db.statement = "SELECT wait/blocked per db from pg_stat_activity + pg_locks",
+                db.statement =
+                    "SELECT wait/blocked per db from pg_stat_activity + pg_locks (filtered)",
                 db.sql.table = "pg_stat_activity"
             );
 
@@ -217,10 +222,12 @@ impl Collector for ConnectionsCollector {
                 FROM pg_stat_activity a
                 WHERE a.backend_type = 'client backend'
                   AND a.pid != pg_backend_pid()
+                  AND NOT (COALESCE(a.datname, '') = ANY($1))
                 GROUP BY a.datname
                 ORDER BY a.datname
                 "#,
             )
+            .bind(&excluded)
             .fetch_all(pool)
             .instrument(q_wait_block)
             .await?;
