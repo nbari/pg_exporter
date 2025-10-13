@@ -1,6 +1,8 @@
 use crate::{
     cli::telemetry::shutdown_tracer,
-    collectors::{config::CollectorConfig, registry::CollectorRegistry},
+    collectors::{
+        config::CollectorConfig, registry::CollectorRegistry, util::get_excluded_databases,
+    },
 };
 use anyhow::{Context, Result};
 use axum::{
@@ -81,14 +83,16 @@ pub async fn new(port: u16, dsn: SecretString, collectors: Vec<String>) -> Resul
     let listener = TcpListener::bind(format!("::0:{port}")).await?;
 
     println!(
-        "pg_version: {} - Listening on [::]:{port}\nEnabled collectors:\n{}",
+        "pg_version: {} - Listening on [::]:{port}\n\nEnabled collectors:\n{}",
         env!("CARGO_PKG_VERSION"),
-        collectors
-            .iter()
-            .map(|c| format!("  - {}", c))
-            .collect::<Vec<_>>()
-            .join("\n")
+        format_list(&collectors),
     );
+
+    let excluded = get_excluded_databases();
+
+    if !excluded.is_empty() {
+        println!("\nExcluded databases:\n{}", format_list(excluded));
+    }
 
     if let Err(e) = axum::serve(listener, app.into_make_service())
         .with_graceful_shutdown(shutdown::shutdown_signal())
@@ -102,6 +106,16 @@ pub async fn new(port: u16, dsn: SecretString, collectors: Vec<String>) -> Resul
     shutdown_tracer();
 
     Ok(())
+}
+
+// Helper to format a list of items with a leading dash and indentation for the
+// start up message
+fn format_list<T: std::fmt::Display>(items: &[T]) -> String {
+    items
+        .iter()
+        .map(|i| format!("  - {i}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn make_span(request: &Request<Body>) -> Span {
