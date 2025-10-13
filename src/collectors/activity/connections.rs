@@ -169,9 +169,9 @@ impl Collector for ConnectionsCollector {
                     .set(cnt);
 
                 // Track active/idle for convenience gauges later
-                if state.eq_ignore_ascii_case("active") {
+                if state == "active" {
                     active_map.insert(db.clone(), cnt);
-                } else if state.eq_ignore_ascii_case("idle") {
+                } else if state == "idle" {
                     idle_map.insert(db.clone(), cnt);
                 }
             }
@@ -186,39 +186,22 @@ impl Collector for ConnectionsCollector {
             }
 
             // 2) Waiting and blocked connections per database
+            // Use pg_blocking_pids(pid) to avoid the heavier pg_locks self-join.
             let q_wait_block = info_span!(
                 "db.query",
                 otel.kind = "client",
                 db.system = "postgresql",
                 db.operation = "SELECT",
-                db.statement =
-                    "SELECT wait/blocked per db from pg_stat_activity + pg_locks (filtered)",
+                db.statement = "SELECT wait/blocked per db from pg_stat_activity (filtered + pg_blocking_pids)",
                 db.sql.table = "pg_stat_activity"
             );
 
             let wait_block_rows = sqlx::query(
                 r#"
-                WITH blocked_pids AS (
-                    SELECT bl.pid
-                    FROM pg_locks bl
-                    JOIN pg_locks wl
-                      ON bl.locktype = wl.locktype
-                     AND bl.database IS NOT DISTINCT FROM wl.database
-                     AND bl.relation IS NOT DISTINCT FROM wl.relation
-                     AND bl.page IS NOT DISTINCT FROM wl.page
-                     AND bl.tuple IS NOT DISTINCT FROM wl.tuple
-                     AND bl.virtualxid IS NOT DISTINCT FROM wl.virtualxid
-                     AND bl.transactionid IS NOT DISTINCT FROM wl.transactionid
-                     AND bl.classid IS NOT DISTINCT FROM wl.classid
-                     AND bl.objid IS NOT DISTINCT FROM wl.objid
-                     AND bl.objsubid IS NOT DISTINCT FROM wl.objsubid
-                     AND bl.pid <> wl.pid
-                    WHERE NOT bl.granted AND wl.granted
-                )
                 SELECT
                     a.datname,
                     COUNT(*) FILTER (WHERE a.wait_event IS NOT NULL)::bigint AS waiting,
-                    COUNT(*) FILTER (WHERE a.pid IN (SELECT pid FROM blocked_pids))::bigint AS blocked
+                    COUNT(*) FILTER (WHERE cardinality(pg_blocking_pids(a.pid)) > 0)::bigint AS blocked
                 FROM pg_stat_activity a
                 WHERE a.backend_type = 'client backend'
                   AND a.pid != pg_backend_pid()

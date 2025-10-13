@@ -13,6 +13,9 @@ use version::VersionCollector;
 mod settings;
 use settings::SettingsCollector;
 
+mod postmaster;
+use postmaster::PostmasterCollector;
+
 #[derive(Clone, Default)]
 pub struct DefaultCollector {
     subs: Vec<Arc<dyn Collector + Send + Sync>>,
@@ -24,6 +27,7 @@ impl DefaultCollector {
             subs: vec![
                 Arc::new(VersionCollector::new()),
                 Arc::new(SettingsCollector::new()),
+                Arc::new(PostmasterCollector::new()),
             ],
         }
     }
