@@ -18,7 +18,6 @@ mod postmaster;
 use postmaster::PostmasterCollector;
 
 /// DefaultCollector is an umbrella for cheap, always-on signals.
-/// Improvement: collect sub-collectors concurrently to reduce tail latency.
 #[derive(Clone, Default)]
 pub struct DefaultCollector {
     subs: Vec<Arc<dyn Collector + Send + Sync>>,
@@ -66,16 +65,19 @@ impl Collector for DefaultCollector {
     #[instrument(skip(self, pool), level = "info", err, fields(collector = "default", otel.kind = "internal"))]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            // Collect sub-collectors concurrently (they're independent)
+            // Collect sub-collectors concurrently (they're independent).
             let mut tasks = FuturesUnordered::new();
+
             for sub in &self.subs {
                 let span = info_span!("collector.collect", sub_collector = %sub.name(), otel.kind = "internal");
-                let fut = sub.collect(pool).instrument(span);
-                tasks.push(fut);
+
+                tasks.push(sub.collect(pool).instrument(span));
             }
+
             while let Some(res) = tasks.next().await {
                 res?;
             }
+
             Ok(())
         })
     }

@@ -8,16 +8,15 @@ use std::sync::Arc;
 use tracing::{debug, info_span, instrument, warn};
 use tracing_futures::Instrument as _;
 
-// pg_stat_database metrics:
+// Sub-collectors under the "database" umbrella.
 mod stats;
 use stats::DatabaseStatCollector;
 
-// pg_database metrics (size, connection limit):
 mod catalog;
 use catalog::DatabaseSubCollector;
 
 /// DatabaseCollector aggregates db-level metrics from multiple sources.
-/// Improvement: collect sub-collectors concurrently to reduce tail latency.
+/// Collect sub-collectors concurrently to reduce tail latency.
 #[derive(Clone, Default)]
 pub struct DatabaseCollector {
     subs: Vec<Arc<dyn Collector + Send + Sync>>,
@@ -69,13 +68,14 @@ impl Collector for DatabaseCollector {
     )]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            // Collect sub-collectors concurrently (they're independent)
+            // Collect sub-collectors concurrently (they're independent).
             let mut tasks = FuturesUnordered::new();
+
             for sub in &self.subs {
                 let span = info_span!("collector.collect", sub_collector = %sub.name(), otel.kind="internal");
-                let fut = sub.collect(pool).instrument(span);
-                tasks.push(fut);
+                tasks.push(sub.collect(pool).instrument(span));
             }
+
             while let Some(res) = tasks.next().await {
                 res?;
             }

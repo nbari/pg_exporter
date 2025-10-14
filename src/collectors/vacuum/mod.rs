@@ -14,7 +14,8 @@ use progress::VacuumProgressCollector;
 mod stats;
 use stats::VacuumStatsCollector;
 
-/// Main Vacuum Collector (aggregates sub-collectors)
+/// Main Vacuum Collector (aggregates sub-collectors).
+/// Collect sub-collectors concurrently to reduce tail latency.
 #[derive(Clone, Default)]
 pub struct VacuumCollector {
     subs: Vec<Arc<dyn Collector + Send + Sync>>,
@@ -45,16 +46,19 @@ impl Collector for VacuumCollector {
     fn register_metrics(&self, registry: &Registry) -> Result<()> {
         for sub in &self.subs {
             let span = info_span!("collector.register_metrics", sub_collector = %sub.name());
+
             let res = sub.register_metrics(registry);
+
             match res {
-                Ok(_) => {
-                    debug!(collector = sub.name(), "registered metrics");
-                }
+                Ok(_) => debug!(collector = sub.name(), "registered metrics"),
+
                 Err(ref e) => {
-                    warn!(collector = sub.name(), error = %e, "failed to register metrics");
+                    warn!(collector = sub.name(), error = %e, "failed to register metrics")
                 }
             }
+
             res?;
+
             drop(span);
         }
         Ok(())
@@ -71,17 +75,12 @@ impl Collector for VacuumCollector {
             let mut tasks = FuturesUnordered::new();
 
             for sub in &self.subs {
-                let span = info_span!(
-                    "collector.collect",
-                    sub_collector = %sub.name(),
-                    otel.kind = "internal"
-                );
-                let fut = sub.collect(pool).instrument(span);
-                tasks.push(fut);
+                let span = info_span!("collector.collect", sub_collector = %sub.name(), otel.kind = "internal");
+
+                tasks.push(sub.collect(pool).instrument(span));
             }
 
             while let Some(res) = tasks.next().await {
-                // Propagate first error (if any) to caller; other tasks will have completed or be polled.
                 res?;
             }
 

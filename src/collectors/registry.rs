@@ -91,6 +91,7 @@ impl CollectorRegistry {
 
         for collector in &self.collectors {
             let name = collector.name();
+
             // Create a span per collector execution to visualize overlap in traces.
             let span = info_span!("collector.collect", collector = %name, otel.kind = "internal");
 
@@ -100,11 +101,14 @@ impl CollectorRegistry {
             // Push an instrumented future that logs start/finish.
             tasks.push(async move {
                 debug!("collector '{}' start", name);
+
                 let res = fut.instrument(span).await;
+
                 match &res {
                     Ok(_) => debug!("collector '{}' done: ok", name),
                     Err(e) => error!("collector '{}' done: error: {}", name, e),
                 }
+
                 (name, res)
             });
         }
@@ -116,6 +120,7 @@ impl CollectorRegistry {
                     debug!("Collected metrics from '{}'", name);
                     any_success = true;
                 }
+
                 Err(e) => {
                     error!("Collector '{}' failed: {}", name, e);
                 }
@@ -131,11 +136,17 @@ impl CollectorRegistry {
 
         // Encode current registry into Prometheus exposition format.
         let encode_span = debug_span!("prometheus.encode");
+
         let _g = encode_span.enter();
+
         let encoder = TextEncoder::new();
+
         let metric_families = self.registry.gather();
+
         let mut buffer = Vec::new();
+
         encoder.encode(&metric_families, &mut buffer)?;
+
         drop(_g);
 
         Ok(String::from_utf8(buffer)?)

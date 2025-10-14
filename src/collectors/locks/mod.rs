@@ -1,6 +1,7 @@
 use crate::collectors::Collector;
 use anyhow::Result;
 use futures::future::BoxFuture;
+use futures::stream::{FuturesUnordered, StreamExt};
 use prometheus::Registry;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -10,7 +11,6 @@ use tracing_futures::Instrument as _;
 mod relations;
 use relations::LocksSubCollector;
 
-/// Main Locks Collector (aggregates sub-collectors)
 #[derive(Clone, Default)]
 pub struct LocksCollector {
     subs: Vec<Arc<dyn Collector + Send + Sync>>,
@@ -56,14 +56,23 @@ impl Collector for LocksCollector {
     )]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            // Collect sub-collectors concurrently (unordered join).
+            let mut tasks = FuturesUnordered::new();
+
             for sub in &self.subs {
                 let span = info_span!(
                     "collector.collect",
                     sub_collector = %sub.name(),
                     otel.kind = "internal"
                 );
-                sub.collect(pool).instrument(span).await?;
+
+                tasks.push(sub.collect(pool).instrument(span));
             }
+
+            while let Some(res) = tasks.next().await {
+                res?;
+            }
+
             Ok(())
         })
     }
