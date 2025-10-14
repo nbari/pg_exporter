@@ -1,7 +1,8 @@
 use crate::collectors::{Collector, CollectorType, all_factories, config::CollectorConfig};
+use futures::stream::{FuturesUnordered, StreamExt};
 use prometheus::{Encoder, Gauge, Registry, TextEncoder};
 use std::sync::Arc;
-use tracing::{debug, debug_span, error, info_span, instrument, warn};
+use tracing::{debug, debug_span, error, info, info_span, instrument, warn};
 use tracing_futures::Instrument as _;
 
 #[derive(Clone)]
@@ -24,6 +25,7 @@ impl CollectorRegistry {
 
         let factories = all_factories();
 
+        // Build all requested collectors and register their metrics.
         let collectors = config
             .enabled_collectors
             .iter()
@@ -31,7 +33,7 @@ impl CollectorRegistry {
                 factories.get(name.as_str()).map(|f| {
                     let collector = f();
 
-                    // Span around metrics registration to surface any failures
+                    // Register metrics per collector under a span so failures surface in traces.
                     let reg_span = debug_span!("collector.register_metrics", collector = %name);
                     let _g = reg_span.enter();
                     if let Err(e) = collector.register_metrics(&registry) {
@@ -51,11 +53,12 @@ impl CollectorRegistry {
         }
     }
 
+    /// Collect from all enabled collectors.
     #[instrument(skip(self, pool), level = "info", err, fields(otel.kind = "internal"))]
     pub async fn collect_all(&self, pool: &sqlx::PgPool) -> anyhow::Result<String> {
         let mut any_success = false;
 
-        // Connectivity test as a client span (captures duration and errors)
+        // Quick connectivity check (does not guarantee every collector will succeed).
         let connect_span = info_span!(
             "db.connectivity_check",
             otel.kind = "client",
@@ -75,16 +78,41 @@ impl CollectorRegistry {
             Err(e) => {
                 error!("Failed to connect to PostgreSQL: {}", e);
                 self.pg_up_gauge.set(0.0);
-                // Still try to collect from individual collectors in case some can work
+                // We still try individual collectors; some may succeed (e.g., cached metrics).
             }
         }
 
-        // Collect metrics from all collectors (each within its own span)
+        // Launch all collectors concurrently.
+        let mut tasks = FuturesUnordered::new();
+
+        // Emit a summary log of which collectors are being launched in parallel.
+        let names: Vec<&'static str> = self.collectors.iter().map(|c| c.name()).collect();
+        info!("Launching collectors concurrently: {:?}", names);
+
         for collector in &self.collectors {
             let name = collector.name();
+            // Create a span per collector execution to visualize overlap in traces.
             let span = info_span!("collector.collect", collector = %name, otel.kind = "internal");
-            match collector.collect(pool).instrument(span).await {
-                Ok(_) => {
+
+            // Prepare the future now (do not await here).
+            let fut = collector.collect(pool);
+
+            // Push an instrumented future that logs start/finish.
+            tasks.push(async move {
+                debug!("collector '{}' start", name);
+                let res = fut.instrument(span).await;
+                match &res {
+                    Ok(_) => debug!("collector '{}' done: ok", name),
+                    Err(e) => error!("collector '{}' done: error: {}", name, e),
+                }
+                (name, res)
+            });
+        }
+
+        // Drain completions as they finish (unordered).
+        while let Some((name, res)) = tasks.next().await {
+            match res {
+                Ok(()) => {
                     debug!("Collected metrics from '{}'", name);
                     any_success = true;
                 }
@@ -94,14 +122,14 @@ impl CollectorRegistry {
             }
         }
 
-        // If we had no successful connection test but some collectors worked, still consider it up
+        // If nothing worked, mark down; otherwise ensure up=1.
         if !any_success {
             self.pg_up_gauge.set(0.0);
         } else if (self.pg_up_gauge.get() - 1.0).abs() > f64::EPSILON {
             self.pg_up_gauge.set(1.0);
         }
 
-        // Encode the registry to prometheus format within a span
+        // Encode current registry into Prometheus exposition format.
         let encode_span = debug_span!("prometheus.encode");
         let _g = encode_span.enter();
         let encoder = TextEncoder::new();

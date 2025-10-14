@@ -1,6 +1,7 @@
 use crate::collectors::Collector;
 use anyhow::Result;
 use futures::future::BoxFuture;
+use futures::stream::{FuturesUnordered, StreamExt};
 use prometheus::Registry;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -16,6 +17,8 @@ use settings::SettingsCollector;
 mod postmaster;
 use postmaster::PostmasterCollector;
 
+/// DefaultCollector is an umbrella for cheap, always-on signals.
+/// Improvement: collect sub-collectors concurrently to reduce tail latency.
 #[derive(Clone, Default)]
 pub struct DefaultCollector {
     subs: Vec<Arc<dyn Collector + Send + Sync>>,
@@ -46,20 +49,16 @@ impl Collector for DefaultCollector {
     )]
     fn register_metrics(&self, registry: &Registry) -> Result<()> {
         for sub in &self.subs {
-            info_span!("collector.register_metrics", sub_collector = %sub.name());
+            let span = info_span!("collector.register_metrics", sub_collector = %sub.name());
             let res = sub.register_metrics(registry);
             match res {
-                Ok(_) => {
-                    // Attach a small event so you can see success in the span
-                    debug!(collector = sub.name(), "registered metrics");
-                }
+                Ok(_) => debug!(collector = sub.name(), "registered metrics"),
                 Err(ref e) => {
-                    // Error will also be recorded on the span due to `err` on the #[instrument]
-                    warn!(collector = sub.name(), error = %e, "failed to register metrics");
+                    warn!(collector = sub.name(), error = %e, "failed to register metrics")
                 }
             }
-            // No need to .instrument() here as register_metrics is sync
             res?;
+            drop(span);
         }
         Ok(())
     }
@@ -67,10 +66,15 @@ impl Collector for DefaultCollector {
     #[instrument(skip(self, pool), level = "info", err, fields(collector = "default", otel.kind = "internal"))]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            // Collect from each sub-collector within its own span
+            // Collect sub-collectors concurrently (they're independent)
+            let mut tasks = FuturesUnordered::new();
             for sub in &self.subs {
                 let span = info_span!("collector.collect", sub_collector = %sub.name(), otel.kind = "internal");
-                sub.collect(pool).instrument(span).await?;
+                let fut = sub.collect(pool).instrument(span);
+                tasks.push(fut);
+            }
+            while let Some(res) = tasks.next().await {
+                res?;
             }
             Ok(())
         })

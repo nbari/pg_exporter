@@ -1,13 +1,13 @@
 use crate::collectors::Collector;
 use anyhow::Result;
 use futures::future::BoxFuture;
+use futures::stream::{FuturesUnordered, StreamExt};
 use prometheus::Registry;
 use sqlx::PgPool;
 use std::sync::Arc;
 use tracing::{debug, info_span, instrument, warn};
 use tracing_futures::Instrument as _;
 
-// Sub-collectors under the "database" umbrella.
 // pg_stat_database metrics:
 mod stats;
 use stats::DatabaseStatCollector;
@@ -16,7 +16,8 @@ use stats::DatabaseStatCollector;
 mod catalog;
 use catalog::DatabaseSubCollector;
 
-/// Main Database Collector (aggregates pg_stat_database + pg_database)
+/// DatabaseCollector aggregates db-level metrics from multiple sources.
+/// Improvement: collect sub-collectors concurrently to reduce tail latency.
 #[derive(Clone, Default)]
 pub struct DatabaseCollector {
     subs: Vec<Arc<dyn Collector + Send + Sync>>,
@@ -68,13 +69,15 @@ impl Collector for DatabaseCollector {
     )]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            // Collect sub-collectors concurrently (they're independent)
+            let mut tasks = FuturesUnordered::new();
             for sub in &self.subs {
-                let span = info_span!(
-                    "collector.collect",
-                    sub_collector = %sub.name(),
-                    otel.kind = "internal"
-                );
-                sub.collect(pool).instrument(span).await?;
+                let span = info_span!("collector.collect", sub_collector = %sub.name(), otel.kind="internal");
+                let fut = sub.collect(pool).instrument(span);
+                tasks.push(fut);
+            }
+            while let Some(res) = tasks.next().await {
+                res?;
             }
             Ok(())
         })

@@ -1,6 +1,7 @@
 use crate::collectors::Collector;
 use anyhow::Result;
 use futures::future::BoxFuture;
+use futures::stream::{FuturesUnordered, StreamExt};
 use prometheus::Registry;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -67,14 +68,23 @@ impl Collector for VacuumCollector {
     )]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            let mut tasks = FuturesUnordered::new();
+
             for sub in &self.subs {
                 let span = info_span!(
                     "collector.collect",
                     sub_collector = %sub.name(),
                     otel.kind = "internal"
                 );
-                sub.collect(pool).instrument(span).await?;
+                let fut = sub.collect(pool).instrument(span);
+                tasks.push(fut);
             }
+
+            while let Some(res) = tasks.next().await {
+                // Propagate first error (if any) to caller; other tasks will have completed or be polled.
+                res?;
+            }
+
             Ok(())
         })
     }
