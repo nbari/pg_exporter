@@ -1,0 +1,70 @@
+use crate::collectors::Collector;
+use anyhow::Result;
+use futures::future::BoxFuture;
+use prometheus::Registry;
+use sqlx::PgPool;
+use std::sync::Arc;
+use tracing::{debug, info_span, instrument, warn};
+use tracing_futures::Instrument as _;
+
+// Sub-collectors under the "stat" umbrella.
+mod user_tables;
+use user_tables::StatUserTablesCollector;
+
+/// Main Stat Collector (aggregates sub-collectors like pg_stat_user_tables)
+#[derive(Clone, Default)]
+pub struct StatCollector {
+    subs: Vec<Arc<dyn Collector + Send + Sync>>,
+}
+
+impl StatCollector {
+    pub fn new() -> Self {
+        Self {
+            subs: vec![Arc::new(StatUserTablesCollector::new())],
+        }
+    }
+}
+
+impl Collector for StatCollector {
+    fn name(&self) -> &'static str {
+        "stat"
+    }
+
+    #[instrument(skip(self, registry), level = "info", err, fields(collector = "stat"))]
+    fn register_metrics(&self, registry: &Registry) -> Result<()> {
+        for sub in &self.subs {
+            let span = info_span!("collector.register_metrics", sub_collector = %sub.name());
+            let res = sub.register_metrics(registry);
+            match res {
+                Ok(_) => debug!(collector = sub.name(), "registered metrics"),
+                Err(ref e) => {
+                    warn!(collector = sub.name(), error = %e, "failed to register metrics")
+                }
+            }
+            res?;
+            drop(span);
+        }
+        Ok(())
+    }
+
+    #[instrument(
+        skip(self, pool),
+        level = "info",
+        err,
+        fields(collector = "stat", otel.kind = "internal")
+    )]
+    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            for sub in &self.subs {
+                let span = info_span!("collector.collect", sub_collector = %sub.name(), otel.kind="internal");
+                sub.collect(pool).instrument(span).await?;
+            }
+            Ok(())
+        })
+    }
+
+    fn enabled_by_default(&self) -> bool {
+        // Disabled by default because pg_stat_user_tables can create high cardinality.
+        false
+    }
+}

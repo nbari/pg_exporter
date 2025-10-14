@@ -1,7 +1,9 @@
 use crate::{
     cli::telemetry::shutdown_tracer,
     collectors::{
-        config::CollectorConfig, registry::CollectorRegistry, util::get_excluded_databases,
+        config::CollectorConfig,
+        registry::CollectorRegistry,
+        util::{get_excluded_databases, set_base_connect_options_from_dsn},
     },
 };
 use anyhow::{Context, Result};
@@ -54,6 +56,9 @@ pub async fn new(port: u16, dsn: SecretString, collectors: Vec<String>) -> Resul
         .context("Failed to connect to database")?;
 
     info!("Connected to database");
+
+    // Initialize base connect options for cross-DB collectors (idempotent).
+    let _ = set_base_connect_options_from_dsn(&dsn);
 
     let config = CollectorConfig::new().with_enabled(&collectors);
     let registry = CollectorRegistry::new(config);

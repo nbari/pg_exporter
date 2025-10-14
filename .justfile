@@ -141,7 +141,7 @@ deploy-major: bump-major _deploy-merge-and-tag
 
 # Watch for changes and run
 watch:
-  cargo watch -x 'run -- --collector.vacuum --collector.activity --collector.locks --collector.database -v'
+  cargo watch -x 'run -- --collector.vacuum --collector.activity --collector.locks --collector.database --collector.stat -v'
 
 # get metrics curl
 curl:

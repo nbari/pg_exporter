@@ -22,14 +22,14 @@ pub trait Collector {
 // Make utils available to all collectors (exclusions, etc.)
 pub mod util;
 
-// THIS IS THE ONLY PLACE YOU NEED TO ADD NEW COLLECTORS ✨
+// THIS IS THE ONLY PLACE YOU NEED TO ADD NEW COLLECTORS
 register_collectors! {
     default => DefaultCollector,
     vacuum => VacuumCollector,
     activity => ActivityCollector,
     locks => LocksCollector,
     database => DatabaseCollector,
-
+    stat => StatCollector,
     // Add more collectors here - just follow the same pattern!
 }
 
