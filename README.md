@@ -20,6 +20,22 @@ Install via Cargo:
 
     cargo install pg_exporter
 
+## Usage
+
+Run the exporter and use the socket directory:
+
+    pg_exporter --dsn postgresql:///postgres?user=pg_exporter
+
+> in pg_hba.conf you need to allow the user `pg_exporter` to connect, for example:
+
+    local   all             pg_exporter                            trust
+
+
+You can also specify a custom port, for example `9187`:
+
+    pg_exporter --dsn postgresql://postgres_exporter@localhost:5432/postgres --port 9187
+
+
 ## Project layout
 
 The project is structured as follows:
