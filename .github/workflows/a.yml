@@ -1,19 +1,4 @@
----
-name: Deploy
-
-on:
-  push:
-    tags:
-      - '*'
-  workflow_dispatch:
-
-permissions:
-  contents: write
-
 jobs:
-  test:
-    uses: ./.github/workflows/test.yml
-
   build:
     name: Build and release
     runs-on: ${{ matrix.os }}
@@ -25,7 +10,6 @@ jobs:
           - build: linux
             os: ubuntu-latest
             target: x86_64-unknown-linux-musl
-
           - build: macos
             os: macos-latest
             target: x86_64-apple-darwin
@@ -45,9 +29,7 @@ jobs:
       # Linux-only prerequisites
       - name: Install system deps (musl)
         if: matrix.build == 'linux'
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y musl-dev musl-tools
+        run: sudo apt -y update && sudo apt -y install musl-dev musl-tools
 
       - name: Install packaging tools (RPM/DEB)
         if: matrix.build == 'linux'
@@ -102,32 +84,3 @@ jobs:
           mv "target/${{ matrix.target }}/release/$binary_name" "$dirname"
           tar -czf "$dirname.tar.gz" "$dirname"
           echo "ASSET=$dirname.tar.gz" >> $GITHUB_ENV
-
-      # Skip release if the tag starts with 't'
-      - name: Release
-        if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref_name, 't')
-        uses: softprops/action-gh-release@v1
-        with:
-          files: |-
-            ${{ env.ASSET }}
-            ${{ env.RPM_ASSET }}
-            ${{ env.DEB_ASSET }}
-
-  publish:
-    name: Publish
-    runs-on: ubuntu-latest
-    needs:
-      - build
-    # Only publish to crates.io on tag pushes that DON'T start with 't'
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref_name,
-      't')
-    steps:
-      - name: Checkout sources
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - run: cargo publish --token ${CRATES_TOKEN}
-        env:
-          CRATES_TOKEN: ${{ secrets.CRATES_TOKEN }}
