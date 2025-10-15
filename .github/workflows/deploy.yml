@@ -49,6 +49,10 @@ jobs:
         if: matrix.build == 'linux'
         run: cargo install cargo-generate-rpm
 
+      - name: Install `cargo-deb`
+        if: matrix.build == 'linux'
+        run: cargo install cargo-deb
+
       - name: Build Linux
         run: |
           cargo build --release --target ${{ matrix.target }} --features musl
@@ -64,6 +68,14 @@ jobs:
           ls -alR target/generate-rpm  # Check where the RPM is generated
           RPM_PATH=$(find target/generate-rpm/ -name "*.rpm" -print -quit)
           echo "RPM_ASSET=$RPM_PATH" >> $GITHUB_ENV
+
+      - name: Generate DEB (musl static)
+        if: matrix.build == 'linux'
+        run: |
+          strip -s target/${{ matrix.target }}/release/pg_exporter || true
+          cargo deb --target ${{ matrix.target }} --no-build
+          DEB_PATH="$(find target/debian -maxdepth 1 -type f -name '*.deb' -print -quit)"
+          echo "DEB_ASSET=$DEB_PATH" >> $GITHUB_ENV
 
       - name: Build
         run: |
@@ -88,6 +100,7 @@ jobs:
           files: |-
             ${{ env.ASSET }}
             ${{ env.RPM_ASSET }}
+            ${{ env.DEB_ASSET }}
 
   publish:
     name: Publish

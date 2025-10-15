@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+
+# Stop the service on remove/upgrade (ignore failures if not running)
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl stop pg_exporter.service || true
+fi
+exit 0

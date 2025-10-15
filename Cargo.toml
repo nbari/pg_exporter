@@ -60,6 +60,14 @@ assets = [
     { source = "target/release/pg_exporter", dest = "/usr/bin/pg_exporter", mode = "0755" },
 ]
 
+[package.metadata.deb]
+assets = [
+  ["contrib/systemd/pg_exporter.service", "/etc/systemd/system/pg_exporter.service", "644"],
+  ["contrib/systemd/pg_exporter.env.example", "/etc/pg_exporter/pg_exporter.env", "640"],
+]
+depends = ""
+maintainer-scripts = "contrib/debian"
+
 [build-dependencies]
 built = { version = "0.8.0", features = ["git2"] }
 
