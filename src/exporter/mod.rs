@@ -218,3 +218,160 @@ async fn add_trace_headers(req: Request<Body>, next: Next) -> Response {
 
     res
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_git_commit_hash_exists() {
+        // GIT_COMMIT_HASH is a compile-time constant, either a git hash or ":-("
+        // We can verify it's one of the expected patterns
+        assert!(
+            GIT_COMMIT_HASH.len() >= 3,
+            "Git commit hash should be at least 3 chars (even ':-(' is 3 chars)"
+        );
+
+        // It should be either a hex string (git hash) or the fallback
+        let is_hex = GIT_COMMIT_HASH.chars().all(|c| c.is_ascii_hexdigit());
+        let is_fallback = GIT_COMMIT_HASH == ":-(";
+
+        assert!(
+            is_hex || is_fallback,
+            "Git commit hash should be hex digits or the fallback ':-(' pattern"
+        );
+    }
+
+    #[test]
+    fn test_format_list_empty() {
+        let items: Vec<String> = vec![];
+        let result = format_list(&items);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_format_list_single_item() {
+        let items = vec!["item1"];
+        let result = format_list(&items);
+        assert_eq!(result, "  - item1");
+    }
+
+    #[test]
+    fn test_format_list_multiple_items() {
+        let items = vec!["item1", "item2", "item3"];
+        let result = format_list(&items);
+        assert_eq!(result, "  - item1\n  - item2\n  - item3");
+    }
+
+    #[test]
+    fn test_format_list_with_numbers() {
+        let items = vec![1, 2, 3];
+        let result = format_list(&items);
+        assert_eq!(result, "  - 1\n  - 2\n  - 3");
+    }
+
+    #[test]
+    fn test_format_list_formatting() {
+        let items = vec!["collector1", "collector2"];
+        let result = format_list(&items);
+
+        // Should start with two spaces and a dash
+        assert!(result.starts_with("  - "));
+
+        // Should contain both items
+        assert!(result.contains("collector1"));
+        assert!(result.contains("collector2"));
+
+        // Should have newline between items
+        assert!(result.contains("\n"));
+    }
+
+    // Test the on_response function behavior
+    #[test]
+    fn test_on_response_status_codes() {
+        use axum::http::{Response, StatusCode};
+        use std::time::Duration;
+        use tracing::info_span;
+
+        let span = info_span!("test");
+
+        // Test with 200 OK
+        let response_ok = Response::builder().status(StatusCode::OK).body(()).unwrap();
+
+        let latency = Duration::from_millis(100);
+
+        // This should not panic
+        on_response(&response_ok, latency, &span);
+
+        // Test with 500 error
+        let response_err = Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(())
+            .unwrap();
+
+        on_response(&response_err, latency, &span);
+    }
+
+    #[test]
+    fn test_make_span_creates_span() {
+        use axum::body::Body;
+        use axum::http::Request;
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/metrics")
+            .header("user-agent", "test-client")
+            .body(Body::empty())
+            .unwrap();
+
+        let span = make_span(&request);
+
+        // Verify span was created with correct metadata
+        assert_eq!(
+            span.metadata().map(|m| m.name()),
+            Some("http.server.request")
+        );
+    }
+
+    #[test]
+    fn test_make_span_with_request_id() {
+        use axum::body::Body;
+        use axum::http::Request;
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/health")
+            .header("x-request-id", "test-id-12345")
+            .header("user-agent", "Mozilla/5.0")
+            .body(Body::empty())
+            .unwrap();
+
+        let span = make_span(&request);
+
+        // Just verify it doesn't panic and the span has the correct name
+        assert_eq!(
+            span.metadata().map(|m| m.name()),
+            Some("http.server.request")
+        );
+    }
+
+    #[test]
+    fn test_make_span_without_optional_headers() {
+        use axum::body::Body;
+        use axum::http::Request;
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/")
+            .body(Body::empty())
+            .unwrap();
+
+        let span = make_span(&request);
+
+        // Should still create a valid span even without optional headers
+        assert_eq!(
+            span.metadata().map(|m| m.name()),
+            Some("http.server.request")
+        );
+    }
+}

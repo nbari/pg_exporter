@@ -43,22 +43,54 @@ jobs:
         run: cargo check
 
   test:
-    name: Test
-    strategy:
-      matrix:
-        os:
-          - ubuntu-latest
-          - macOS-latest
-        rust:
-          - stable
-    runs-on: ${{ matrix.os }}
+    name: Test (PostgreSQL ${{ matrix.postgres }})
+    runs-on: ubuntu-latest
     needs:
       - format
       - lint
       - check
+
+    strategy:
+      fail-fast: false  # Continue other jobs if one fails
+      matrix:
+        postgres:
+          - 16
+          - 17
+          - 18
+
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: test
+      - name: Wait for PostgreSQL
+        run: |
+          until pg_isready -h localhost -p 5432 -U postgres; do
+            echo "Waiting for PostgreSQL..."
+            sleep 1
+          done
+          echo "PostgreSQL ${{ matrix.postgres }} is ready!"
+
+      - name: Show PostgreSQL version
+        run: |
+          psql -h localhost -U postgres -d postgres -c "SELECT version();"
+
+      - name: Run tests
+        env:
+          PG_EXPORTER_DSN: postgresql://postgres:postgres@localhost:5432/postgres
         run: cargo test

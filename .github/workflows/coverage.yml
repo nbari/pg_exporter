@@ -11,15 +11,41 @@ jobs:
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
 
+      - name: Wait for PostgreSQL
+        run: |
+          until pg_isready -h localhost -p 5432 -U postgres; do
+            echo "Waiting for PostgreSQL..."
+            sleep 1
+          done
+          echo "PostgreSQL is ready!"
+
       - name: Run tests
         run: cargo test --verbose -- --nocapture
         env:
+          PG_EXPORTER_DSN: postgresql://postgres:postgres@localhost:5432/postgres
           RUST_BACKTRACE: full
           CARGO_INCREMENTAL: 0
           LLVM_PROFILE_FILE: coverage-%p-%m.profraw

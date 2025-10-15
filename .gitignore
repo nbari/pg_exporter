@@ -6,3 +6,7 @@ Cargo.lock
 db/data
 db/log
 .otel-collector-config.yml
+
+# test artifacts
+/tests/tmp/
+*.db
