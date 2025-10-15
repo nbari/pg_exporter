@@ -16,7 +16,9 @@ pub trait Collector {
     // lifetime 'a is needed to tie the future to the lifetime of self and pool
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>>;
 
-    fn enabled_by_default(&self) -> bool;
+    fn enabled_by_default(&self) -> bool {
+        false
+    }
 }
 
 // Make utils available to all collectors (exclusions, etc.)

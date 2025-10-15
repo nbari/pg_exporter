@@ -129,8 +129,4 @@ impl Collector for DatabaseSubCollector {
             Ok(())
         })
     }
-
-    fn enabled_by_default(&self) -> bool {
-        false
-    }
 }

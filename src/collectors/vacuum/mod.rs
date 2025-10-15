@@ -14,8 +14,6 @@ use progress::VacuumProgressCollector;
 mod stats;
 use stats::VacuumStatsCollector;
 
-/// Main Vacuum Collector (aggregates sub-collectors).
-/// Collect sub-collectors concurrently to reduce tail latency.
 #[derive(Clone, Default)]
 pub struct VacuumCollector {
     subs: Vec<Arc<dyn Collector + Send + Sync>>,
@@ -89,6 +87,6 @@ impl Collector for VacuumCollector {
     }
 
     fn enabled_by_default(&self) -> bool {
-        false
+        true
     }
 }

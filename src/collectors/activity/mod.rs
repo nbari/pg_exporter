@@ -89,6 +89,6 @@ impl Collector for ActivityCollector {
     }
 
     fn enabled_by_default(&self) -> bool {
-        false
+        true
     }
 }

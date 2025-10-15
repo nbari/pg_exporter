@@ -186,8 +186,4 @@ impl Collector for VacuumProgressCollector {
             Ok(())
         })
     }
-
-    fn enabled_by_default(&self) -> bool {
-        true
-    }
 }

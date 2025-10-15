@@ -9,16 +9,19 @@ A PostgreSQL metric exporter for Prometheus written in Rust
 
 `pg_exporter` is designed with a selective metrics approach:
 
-* `Modular collectors` Expose only the metrics you actually need instead of collecting everything by default.
-* Prevent Prometheus from being overloaded with unnecessary data.
-* Customizable collectors to allow users to tailor the metrics to their specific requirements.
-
+* **Modular collectors** – Expose only the metrics you actually need instead of collecting everything by default.
+* **Avoid unnecessary metrics** – Prevent exposing large numbers of unused metrics to Prometheus, reducing load and keeping monitoring efficient.
+* **Customizable collectors** – Tailor the metrics to your specific requirements while maintaining compatibility with the official [postgres_exporter](https://github.com/prometheus-community/postgres_exporter).
+* **Low memory footprint** – Designed to minimize memory usage and maximize efficiency while scraping metrics.
 
 ## Download or build
 
 Install via Cargo:
 
     cargo install pg_exporter
+
+Or download the latest release from the [releases page](https://github.com/nbari/pg_exporter/releases/latest).
+
 
 ## Usage
 
@@ -34,6 +37,31 @@ Run the exporter and use the socket directory:
 You can also specify a custom port, for example `9187`:
 
     pg_exporter --dsn postgresql://postgres_exporter@localhost:5432/postgres --port 9187
+
+
+## Available collectors
+
+The following collectors are available:
+
+* `--collector.default` [default](src/collectors/default/mod.rs)
+* `--collector.activity` [activity](src/collectors/activity/mod.rs)
+* `--collector.databases` [databases](src/collectors/databases/mod.rs)
+* `--collector.vacuum` [vacuum](src/collectors/vacuum/mod.rs)
+* `--collector.locks` [locks](src/collectors/locks/mod.rs)
+* `--collector.stat` [stat](src/collectors/stat/mod.rs)
+
+You can enable `--colector.<name>` or disable `--no-collector.<name>` For example,
+to disable the `vacuum` collector:
+
+    pg_exporter --dsn postgresql:///postgres?user=pg_exporter --no-collector.vacuum
+
+### Enabled by default
+
+This collectors are enabled by default:
+
+* `default`
+* `activity`
+* `vacuum`
 
 
 ## Project layout
@@ -53,14 +81,32 @@ in its own subdirectory, making it easy to manage and extend.
 
 ```
 collectors
-├── config.rs
-├── default <-- default collector
+├── activity
+│   ├── connections.rs
 │   ├── mod.rs
+│   └── wait.rs
+├── config.rs
+├── database
+│   ├── catalog.rs
+│   ├── mod.rs
+│   ├── README.md
+│   └── stats.rs
+├── default
+│   ├── mod.rs
+│   ├── postmaster.rs
+│   ├── settings.rs
 │   └── version.rs
+├── locks
+│   ├── mod.rs
+│   └── relations.rs
 ├── mod.rs <-- main file to register collectors
 ├── register_macro.rs
 ├── registry.rs
-└── vacuum <-- vacuum collector
+├── stat
+│   ├── mod.rs
+│   └── user_tables.rs
+├── util.rs
+└── vacuum
     ├── mod.rs
     ├── progress.rs
     └── stats.rs

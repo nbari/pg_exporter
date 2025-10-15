@@ -152,8 +152,4 @@ impl Collector for WaitEventsCollector {
             Ok(())
         })
     }
-
-    fn enabled_by_default(&self) -> bool {
-        false
-    }
 }

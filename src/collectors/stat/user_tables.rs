@@ -60,109 +60,184 @@ impl StatUserTablesCollector {
         let labels = &["datname", "schemaname", "relname"];
 
         let seq_scan = IntGaugeVec::new(
-            Opts::new("pg_stat_user_tables_seq_scan", "Number of sequential scans initiated on this table"),
+            Opts::new(
+                "pg_stat_user_tables_seq_scan",
+                "Number of sequential scans initiated on this table",
+            ),
             labels,
-        ).expect("pg_stat_user_tables_seq_scan");
+        )
+        .expect("pg_stat_user_tables_seq_scan");
 
         let seq_tup_read = IntGaugeVec::new(
-            Opts::new("pg_stat_user_tables_seq_tup_read", "Number of live rows fetched by sequential scans"),
+            Opts::new(
+                "pg_stat_user_tables_seq_tup_read",
+                "Number of live rows fetched by sequential scans",
+            ),
             labels,
-        ).expect("pg_stat_user_tables_seq_tup_read");
+        )
+        .expect("pg_stat_user_tables_seq_tup_read");
 
         let idx_scan = IntGaugeVec::new(
-            Opts::new("pg_stat_user_tables_idx_scan", "Number of index scans initiated on this table"),
+            Opts::new(
+                "pg_stat_user_tables_idx_scan",
+                "Number of index scans initiated on this table",
+            ),
             labels,
-        ).expect("pg_stat_user_tables_idx_scan");
+        )
+        .expect("pg_stat_user_tables_idx_scan");
 
         let idx_tup_fetch = IntGaugeVec::new(
-            Opts::new("pg_stat_user_tables_idx_tup_fetch", "Number of live rows fetched by index scans"),
+            Opts::new(
+                "pg_stat_user_tables_idx_tup_fetch",
+                "Number of live rows fetched by index scans",
+            ),
             labels,
-        ).expect("pg_stat_user_tables_idx_tup_fetch");
+        )
+        .expect("pg_stat_user_tables_idx_tup_fetch");
 
         let n_tup_ins = IntGaugeVec::new(
             Opts::new("pg_stat_user_tables_n_tup_ins", "Number of rows inserted"),
             labels,
-        ).expect("pg_stat_user_tables_n_tup_ins");
+        )
+        .expect("pg_stat_user_tables_n_tup_ins");
 
         let n_tup_upd = IntGaugeVec::new(
             Opts::new("pg_stat_user_tables_n_tup_upd", "Number of rows updated"),
             labels,
-        ).expect("pg_stat_user_tables_n_tup_upd");
+        )
+        .expect("pg_stat_user_tables_n_tup_upd");
 
         let n_tup_del = IntGaugeVec::new(
             Opts::new("pg_stat_user_tables_n_tup_del", "Number of rows deleted"),
             labels,
-        ).expect("pg_stat_user_tables_n_tup_del");
+        )
+        .expect("pg_stat_user_tables_n_tup_del");
 
         let n_tup_hot_upd = IntGaugeVec::new(
-            Opts::new("pg_stat_user_tables_n_tup_hot_upd", "Number of rows HOT updated"),
+            Opts::new(
+                "pg_stat_user_tables_n_tup_hot_upd",
+                "Number of rows HOT updated",
+            ),
             labels,
-        ).expect("pg_stat_user_tables_n_tup_hot_upd");
+        )
+        .expect("pg_stat_user_tables_n_tup_hot_upd");
 
         let n_live_tup = IntGaugeVec::new(
-            Opts::new("pg_stat_user_tables_n_live_tup", "Estimated number of live rows"),
+            Opts::new(
+                "pg_stat_user_tables_n_live_tup",
+                "Estimated number of live rows",
+            ),
             labels,
-        ).expect("pg_stat_user_tables_n_live_tup");
+        )
+        .expect("pg_stat_user_tables_n_live_tup");
 
         let n_dead_tup = IntGaugeVec::new(
-            Opts::new("pg_stat_user_tables_n_dead_tup", "Estimated number of dead rows"),
+            Opts::new(
+                "pg_stat_user_tables_n_dead_tup",
+                "Estimated number of dead rows",
+            ),
             labels,
-        ).expect("pg_stat_user_tables_n_dead_tup");
+        )
+        .expect("pg_stat_user_tables_n_dead_tup");
 
         let n_mod_since_analyze = IntGaugeVec::new(
-            Opts::new("pg_stat_user_tables_n_mod_since_analyze", "Estimated number of rows changed since last analyze"),
+            Opts::new(
+                "pg_stat_user_tables_n_mod_since_analyze",
+                "Estimated number of rows changed since last analyze",
+            ),
             labels,
-        ).expect("pg_stat_user_tables_n_mod_since_analyze");
+        )
+        .expect("pg_stat_user_tables_n_mod_since_analyze");
 
         let last_vacuum = IntGaugeVec::new(
-            Opts::new("pg_stat_user_tables_last_vacuum", "Last manual vacuum time (epoch seconds)"),
+            Opts::new(
+                "pg_stat_user_tables_last_vacuum",
+                "Last manual vacuum time (epoch seconds)",
+            ),
             labels,
-        ).expect("pg_stat_user_tables_last_vacuum");
+        )
+        .expect("pg_stat_user_tables_last_vacuum");
 
         let last_autovacuum = IntGaugeVec::new(
-            Opts::new("pg_stat_user_tables_last_autovacuum", "Last autovacuum time (epoch seconds)"),
+            Opts::new(
+                "pg_stat_user_tables_last_autovacuum",
+                "Last autovacuum time (epoch seconds)",
+            ),
             labels,
-        ).expect("pg_stat_user_tables_last_autovacuum");
+        )
+        .expect("pg_stat_user_tables_last_autovacuum");
 
         let last_analyze = IntGaugeVec::new(
-            Opts::new("pg_stat_user_tables_last_analyze", "Last manual analyze time (epoch seconds)"),
+            Opts::new(
+                "pg_stat_user_tables_last_analyze",
+                "Last manual analyze time (epoch seconds)",
+            ),
             labels,
-        ).expect("pg_stat_user_tables_last_analyze");
+        )
+        .expect("pg_stat_user_tables_last_analyze");
 
         let last_autoanalyze = IntGaugeVec::new(
-            Opts::new("pg_stat_user_tables_last_autoanalyze", "Last autoanalyze time (epoch seconds)"),
+            Opts::new(
+                "pg_stat_user_tables_last_autoanalyze",
+                "Last autoanalyze time (epoch seconds)",
+            ),
             labels,
-        ).expect("pg_stat_user_tables_last_autoanalyze");
+        )
+        .expect("pg_stat_user_tables_last_autoanalyze");
 
         let vacuum_count = IntGaugeVec::new(
-            Opts::new("pg_stat_user_tables_vacuum_count", "Number of times manually vacuumed"),
+            Opts::new(
+                "pg_stat_user_tables_vacuum_count",
+                "Number of times manually vacuumed",
+            ),
             labels,
-        ).expect("pg_stat_user_tables_vacuum_count");
+        )
+        .expect("pg_stat_user_tables_vacuum_count");
 
         let autovacuum_count = IntGaugeVec::new(
-            Opts::new("pg_stat_user_tables_autovacuum_count", "Number of times vacuumed by autovacuum"),
+            Opts::new(
+                "pg_stat_user_tables_autovacuum_count",
+                "Number of times vacuumed by autovacuum",
+            ),
             labels,
-        ).expect("pg_stat_user_tables_autovacuum_count");
+        )
+        .expect("pg_stat_user_tables_autovacuum_count");
 
         let analyze_count = IntGaugeVec::new(
-            Opts::new("pg_stat_user_tables_analyze_count", "Number of times manually analyzed"),
+            Opts::new(
+                "pg_stat_user_tables_analyze_count",
+                "Number of times manually analyzed",
+            ),
             labels,
-        ).expect("pg_stat_user_tables_analyze_count");
+        )
+        .expect("pg_stat_user_tables_analyze_count");
 
         let autoanalyze_count = IntGaugeVec::new(
-            Opts::new("pg_stat_user_tables_autoanalyze_count", "Number of times analyzed by autovacuum"),
+            Opts::new(
+                "pg_stat_user_tables_autoanalyze_count",
+                "Number of times analyzed by autovacuum",
+            ),
             labels,
-        ).expect("pg_stat_user_tables_autoanalyze_count");
+        )
+        .expect("pg_stat_user_tables_autoanalyze_count");
 
         let index_size_bytes = IntGaugeVec::new(
-            Opts::new("pg_stat_user_tables_index_size_bytes", "Total disk space used by indexes on this table, in bytes"),
+            Opts::new(
+                "pg_stat_user_tables_index_size_bytes",
+                "Total disk space used by indexes on this table, in bytes",
+            ),
             labels,
-        ).expect("pg_stat_user_tables_index_size_bytes");
+        )
+        .expect("pg_stat_user_tables_index_size_bytes");
 
         let table_size_bytes = IntGaugeVec::new(
-            Opts::new("pg_stat_user_tables_table_size_bytes", "Total disk space used by this table, in bytes"),
+            Opts::new(
+                "pg_stat_user_tables_table_size_bytes",
+                "Total disk space used by this table, in bytes",
+            ),
             labels,
-        ).expect("pg_stat_user_tables_table_size_bytes");
+        )
+        .expect("pg_stat_user_tables_table_size_bytes");
 
         Self {
             seq_scan,
@@ -411,10 +486,5 @@ impl Collector for StatUserTablesCollector {
 
             Ok(())
         })
-    }
-
-    fn enabled_by_default(&self) -> bool {
-        // High cardinality; keep off by default.
-        false
     }
 }

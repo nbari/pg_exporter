@@ -4,7 +4,7 @@ version = "0.4.6"
 edition = "2024"
 authors = ["Nicolas Embriz <nbari@tequila.io>"]
 description = "PostgreSQL metric exporter for Prometheus"
-documentation = "https://docs.rs/postgres_rexporter/latest/postgres_rexporter/"
+documentation = "https://docs.rs/pg_exporter/latest/pg_exporter/"
 readme = "README.md"
 keywords = [
     "postgresql",
