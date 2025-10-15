@@ -1,0 +1,26 @@
+[Unit]
+Description=pg_exporter (PostgreSQL Prometheus exporter)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Run as the postgres user
+User=postgres
+Group=postgres
+
+# Load environment variables from file
+EnvironmentFile=/etc/pg_exporter/pg_exporter.env
+
+# Enable specific collectors while reading DSN/PORT from env
+ExecStart=/usr/local/bin/pg_exporter \
+    --collector.locks \
+    --collector.database \
+    --collector.stat
+
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target

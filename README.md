@@ -27,11 +27,11 @@ Or download the latest release from the [releases page](https://github.com/nbari
 
 Run the exporter and use the socket directory:
 
-    pg_exporter --dsn postgresql:///postgres?user=pg_exporter
+    pg_exporter --dsn postgresql:///postgres?user=postgres_exporter
 
-> in pg_hba.conf you need to allow the user `pg_exporter` to connect, for example:
+> in pg_hba.conf you need to allow the user `postgres_exporter` to connect, for example:
 
-    local   all             pg_exporter                            trust
+    local  all  postgres_exporter  trust
 
 
 You can also specify a custom port, for example `9187`:
@@ -53,7 +53,7 @@ The following collectors are available:
 You can enable `--colector.<name>` or disable `--no-collector.<name>` For example,
 to disable the `vacuum` collector:
 
-    pg_exporter --dsn postgresql:///postgres?user=pg_exporter --no-collector.vacuum
+    pg_exporter --dsn postgresql:///postgres?user=postgres_exporter --no-collector.vacuum
 
 ### Enabled by default
 
