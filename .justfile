@@ -139,6 +139,30 @@ deploy-minor: bump-minor _deploy-merge-and-tag
 # Deploy with major version bump
 deploy-major: bump-major _deploy-merge-and-tag
 
+# Create & push a test tag like t-YYYYMMDD-HHMMSS (skips publish/release in CI)
+# Usage:
+#   just t-deploy
+#   just t-deploy "optional tag message"
+t-deploy message="CI test": check-develop check-clean test
+    #!/usr/bin/env bash
+    ts="$(date -u +%Y%m%d-%H%M%S)"
+    tag="t-${ts}"
+
+    echo "🏷️  Creating annotated test tag: ${tag}"
+    git fetch --tags --quiet
+
+    if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+        echo "❌ Tag ${tag} already exists. Aborting." >&2
+        exit 1
+    fi
+
+    git tag -a "${tag}" -m "${message}"
+    git push origin "${tag}"
+
+    echo "✅ Pushed ${tag}"
+    echo "🧹 To remove it:"
+    echo "   git push origin :refs/tags/${tag} && git tag -d ${tag}"
+
 # Watch for changes and run
 watch:
   cargo watch -x 'run -- --collector.vacuum --collector.activity --collector.locks --collector.database --collector.stat -v'
