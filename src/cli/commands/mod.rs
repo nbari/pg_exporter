@@ -16,10 +16,14 @@ pub fn new() -> Command {
         .literal(AnsiColor::Blue.on_default() | Effects::BOLD)
         .placeholder(AnsiColor::Green.on_default());
 
+    let git_hash = built_info::GIT_COMMIT_HASH.unwrap_or("unknown");
+    let long_version: &'static str =
+        Box::leak(format!("{} - {}", env!("CARGO_PKG_VERSION"), git_hash).into_boxed_str());
+
     let cmd = Command::new("pg_exporter")
         .about("PostgreSQL metric exporter for Prometheus")
         .version(env!("CARGO_PKG_VERSION"))
-        .long_version(built_info::GIT_COMMIT_HASH.to_owned())
+        .long_version(long_version)
         .color(ColorChoice::Auto)
         .styles(styles)
         .arg(
