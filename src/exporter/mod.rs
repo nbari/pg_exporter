@@ -6,7 +6,7 @@ use crate::{
         util::{get_excluded_databases, set_base_connect_options_from_dsn},
     },
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use axum::{
     Extension, Router,
     body::Body,
@@ -21,7 +21,7 @@ use opentelemetry_http::HeaderExtractor;
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::postgres::PgPoolOptions;
 use std::time::Duration;
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, time::timeout};
 use tower::ServiceBuilder;
 use tower_http::{
     request_id::PropagateRequestIdLayer, set_header::SetRequestHeaderLayer, trace::TraceLayer,
@@ -46,14 +46,21 @@ pub const GIT_COMMIT_HASH: &str = if let Some(hash) = built_info::GIT_COMMIT_HAS
 pub async fn new(port: u16, dsn: SecretString, collectors: Vec<String>) -> Result<()> {
     let db_dsn = dsn.expose_secret().to_string();
 
-    let pool = PgPoolOptions::new()
-        .min_connections(1)
-        .max_connections(3)
-        .max_lifetime(Duration::from_secs(60 * 2))
-        .test_before_acquire(true)
-        .connect(&db_dsn)
-        .await
-        .context("Failed to connect to database")?;
+    let pool = match timeout(
+        Duration::from_secs(2),
+        PgPoolOptions::new()
+            .min_connections(1)
+            .max_connections(3)
+            .max_lifetime(Duration::from_secs(60 * 2))
+            .test_before_acquire(true)
+            .connect(&db_dsn),
+    )
+    .await
+    {
+        Ok(Ok(pool)) => pool,
+        Ok(Err(err)) => return Err(err).context("Failed to connect to database"),
+        Err(_) => return Err(anyhow!("Failed to connect to database: timed out after 2s")),
+    };
 
     info!("Connected to database");
 
@@ -88,7 +95,8 @@ pub async fn new(port: u16, dsn: SecretString, collectors: Vec<String>) -> Resul
     let listener = TcpListener::bind(format!("::0:{port}")).await?;
 
     println!(
-        "pg_version: {} - Listening on [::]:{port}\n\nEnabled collectors:\n{}",
+        "{} {} - Listening on [::]:{port}\n\nEnabled collectors:\n{}",
+        env!("CARGO_PKG_NAME"),
         env!("CARGO_PKG_VERSION"),
         format_list(&collectors),
     );

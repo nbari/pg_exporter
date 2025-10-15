@@ -5,7 +5,7 @@ use crate::{
         util::{get_excluded_databases, set_excluded_databases},
     },
 };
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use clap::ArgMatches;
 use secrecy::SecretString;
 use tracing::info;
@@ -16,16 +16,23 @@ pub fn handler(matches: &clap::ArgMatches) -> Result<Action> {
 
     info!("Excluded databases: {:?}", get_excluded_databases());
 
+    // Get the port or return an error
+    let port = matches
+        .get_one::<u16>("port")
+        .copied()
+        .ok_or_else(|| anyhow!("Port is required. Please provide it using the --port flag."))?;
+
+    // Get the DSN or return an error
+    let dsn = SecretString::from(
+        matches
+            .get_one::<String>("dsn")
+            .map(|s: &String| s.to_string())
+            .ok_or_else(|| anyhow!("DSN is required. Please provide it using the --dsn flag."))?,
+    );
+
     Ok(Action::Run {
-        port: matches.get_one::<u16>("port").copied().unwrap_or(9432),
-        dsn: SecretString::from(
-            matches
-                .get_one::<String>("dsn")
-                .map(|s: &String| s.to_string())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("DSN is required. Please provide it using the --dsn flag.")
-                })?,
-        ),
+        port,
+        dsn,
         collectors: get_enabled_collectors(matches),
     })
 }
@@ -74,4 +81,60 @@ pub fn get_enabled_collectors(matches: &ArgMatches) -> Vec<String> {
         })
         .map(|&name| name.to_string())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::commands;
+
+    #[test]
+    fn test_get_enabled_collectors_defaults() {
+        let command = commands::new();
+        let matches = command.get_matches_from(vec!["pg_exporter"]);
+        let enabled = get_enabled_collectors(&matches);
+
+        assert!(enabled.contains(&"default".to_string()));
+        assert!(enabled.contains(&"activity".to_string()));
+        assert!(enabled.contains(&"vacuum".to_string()));
+    }
+
+    #[test]
+    fn test_get_enabled_collectors_explicit_enable() {
+        let command = commands::new();
+        let matches =
+            command.get_matches_from(vec!["pg_exporter", "--collector.locks", "--collector.stat"]);
+        let enabled = get_enabled_collectors(&matches);
+
+        assert!(enabled.contains(&"locks".to_string()));
+        assert!(enabled.contains(&"stat".to_string()));
+        assert!(enabled.contains(&"default".to_string()));
+    }
+
+    #[test]
+    fn test_get_enabled_collectors_explicit_disable() {
+        let command = commands::new();
+        let matches = command.get_matches_from(vec!["pg_exporter", "--no-collector.vacuum"]);
+        let enabled = get_enabled_collectors(&matches);
+
+        assert!(!enabled.contains(&"vacuum".to_string()));
+        assert!(enabled.contains(&"default".to_string()));
+        assert!(enabled.contains(&"activity".to_string()));
+    }
+
+    #[test]
+    fn test_get_enabled_collectors_disable_all_defaults() {
+        let command = commands::new();
+        let matches = command.get_matches_from(vec![
+            "pg_exporter",
+            "--no-collector.default",
+            "--no-collector.activity",
+            "--no-collector.vacuum",
+        ]);
+        let enabled = get_enabled_collectors(&matches);
+
+        assert!(!enabled.contains(&"default".to_string()));
+        assert!(!enabled.contains(&"activity".to_string()));
+        assert!(!enabled.contains(&"vacuum".to_string()));
+    }
 }

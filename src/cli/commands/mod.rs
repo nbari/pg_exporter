@@ -139,4 +139,222 @@ mod tests {
             assert_eq!(excludes, vec!["db1", "db2", "db3"]);
         });
     }
+
+    #[test]
+    fn test_verbose_flag_single() {
+        let command = new();
+        let matches = command.get_matches_from(vec!["pg_exporter", "-v"]);
+        assert_eq!(matches.get_count("verbose"), 1);
+    }
+
+    #[test]
+    fn test_verbose_flag_double() {
+        let command = new();
+        let matches = command.get_matches_from(vec!["pg_exporter", "-vv"]);
+        assert_eq!(matches.get_count("verbose"), 2);
+    }
+
+    #[test]
+    fn test_verbose_flag_triple() {
+        let command = new();
+        let matches = command.get_matches_from(vec!["pg_exporter", "-vvv"]);
+        assert_eq!(matches.get_count("verbose"), 3);
+    }
+
+    #[test]
+    fn test_verbose_flag_long_form() {
+        let command = new();
+        let matches = command.get_matches_from(vec!["pg_exporter", "--verbose", "--verbose"]);
+        assert_eq!(matches.get_count("verbose"), 2);
+    }
+
+    #[test]
+    fn test_port_short_flag() {
+        let command = new();
+        let matches = command.get_matches_from(vec!["pg_exporter", "-p", "8080"]);
+        assert_eq!(matches.get_one::<u16>("port").copied(), Some(8080));
+    }
+
+    #[test]
+    fn test_port_validation_min() {
+        let command = new();
+        let matches = command.get_matches_from(vec!["pg_exporter", "--port", "1"]);
+        assert_eq!(matches.get_one::<u16>("port").copied(), Some(1));
+    }
+
+    #[test]
+    fn test_port_validation_max() {
+        let command = new();
+        let matches = command.get_matches_from(vec!["pg_exporter", "--port", "65535"]);
+        assert_eq!(matches.get_one::<u16>("port").copied(), Some(65535));
+    }
+
+    #[test]
+    fn test_port_validation_invalid() {
+        let command = new();
+        let result = command.try_get_matches_from(vec!["pg_exporter", "--port", "99999"]);
+        assert!(result.is_err(), "Should reject port > 65535");
+    }
+
+    #[test]
+    fn test_port_validation_non_numeric() {
+        let command = new();
+        let result = command.try_get_matches_from(vec!["pg_exporter", "--port", "abc"]);
+        assert!(result.is_err(), "Should reject non-numeric port");
+    }
+
+    #[test]
+    fn test_port_from_env() {
+        temp_env::with_var("PG_EXPORTER_PORT", Some("7777"), || {
+            let command = new();
+            let matches = command.get_matches_from(vec!["pg_exporter"]);
+            assert_eq!(matches.get_one::<u16>("port").copied(), Some(7777));
+        });
+    }
+
+    #[test]
+    fn test_port_cli_overrides_env() {
+        temp_env::with_var("PG_EXPORTER_PORT", Some("7777"), || {
+            let command = new();
+            let matches = command.get_matches_from(vec!["pg_exporter", "--port", "8888"]);
+            assert_eq!(matches.get_one::<u16>("port").copied(), Some(8888));
+        });
+    }
+
+    #[test]
+    fn test_dsn_with_special_characters() {
+        let command = new();
+        let matches = command.get_matches_from(vec![
+            "pg_exporter",
+            "--dsn",
+            "postgres://user:p@ss%20word@host:5432/db?sslmode=require",
+        ]);
+
+        assert_eq!(
+            matches.get_one::<String>("dsn").map(|s| s.to_string()),
+            Some("postgres://user:p@ss%20word@host:5432/db?sslmode=require".to_string())
+        );
+    }
+
+    #[test]
+    fn test_dsn_from_env() {
+        temp_env::with_var(
+            "PG_EXPORTER_DSN",
+            Some("postgres://custom:5432/mydb"),
+            || {
+                let command = new();
+                let matches = command.get_matches_from(vec!["pg_exporter"]);
+
+                assert_eq!(
+                    matches.get_one::<String>("dsn").map(|s| s.to_string()),
+                    Some("postgres://custom:5432/mydb".to_string())
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn test_dsn_cli_overrides_env() {
+        temp_env::with_var("PG_EXPORTER_DSN", Some("postgres://env:5432/db"), || {
+            let command = new();
+            let matches =
+                command.get_matches_from(vec!["pg_exporter", "--dsn", "postgres://cli:5432/db"]);
+
+            assert_eq!(
+                matches.get_one::<String>("dsn").map(|s| s.to_string()),
+                Some("postgres://cli:5432/db".to_string())
+            );
+        });
+    }
+
+    #[test]
+    fn test_exclude_databases_multiple_flags() {
+        let command = new();
+        let matches = command.get_matches_from(vec![
+            "pg_exporter",
+            "--exclude-databases",
+            "db1",
+            "--exclude-databases",
+            "db2",
+            "--exclude-databases",
+            "db3",
+        ]);
+
+        let excludes: Vec<String> = matches
+            .get_many::<String>("exclude-databases")
+            .unwrap()
+            .map(|s| s.to_string())
+            .collect();
+
+        assert_eq!(excludes, vec!["db1", "db2", "db3"]);
+    }
+
+    #[test]
+    fn test_exclude_databases_comma_separated_single_flag() {
+        let command = new();
+        let matches =
+            command.get_matches_from(vec!["pg_exporter", "--exclude-databases", "db1,db2,db3"]);
+
+        let excludes: Vec<String> = matches
+            .get_many::<String>("exclude-databases")
+            .unwrap()
+            .map(|s| s.to_string())
+            .collect();
+
+        assert_eq!(excludes, vec!["db1", "db2", "db3"]);
+    }
+
+    #[test]
+    fn test_exclude_databases_with_spaces() {
+        let command = new();
+        let matches = command.get_matches_from(vec![
+            "pg_exporter",
+            "--exclude-databases",
+            " db1 , db2 , db3 ",
+        ]);
+
+        let excludes: Vec<String> = matches
+            .get_many::<String>("exclude-databases")
+            .unwrap()
+            .map(|s| s.trim().to_string())
+            .collect();
+
+        assert_eq!(excludes, vec!["db1", "db2", "db3"]);
+    }
+
+    #[test]
+    fn test_exclude_databases_mixed_flags_and_commas() {
+        let command = new();
+        let matches = command.get_matches_from(vec![
+            "pg_exporter",
+            "--exclude-databases",
+            "db1,db2",
+            "--exclude-databases",
+            "db3",
+        ]);
+
+        let excludes: Vec<String> = matches
+            .get_many::<String>("exclude-databases")
+            .unwrap()
+            .map(|s| s.to_string())
+            .collect();
+
+        assert_eq!(excludes, vec!["db1", "db2", "db3"]);
+    }
+
+    #[test]
+    fn test_long_version_includes_git_hash() {
+        let command = new();
+        let long_version = command.get_long_version().unwrap().to_string();
+
+        // Should include version and git hash separated by " - "
+        assert!(long_version.contains(env!("CARGO_PKG_VERSION")));
+        assert!(long_version.contains(" - "));
+    }
+
+    #[test]
+    fn test_command_name() {
+        let command = new();
+        assert_eq!(command.get_name(), "pg_exporter");
+    }
 }
