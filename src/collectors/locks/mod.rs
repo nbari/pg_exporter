@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tracing::{debug, info_span, instrument, warn};
 use tracing_futures::Instrument as _;
 
-mod relations;
+pub mod relations;
 use relations::LocksSubCollector;
 
 #[derive(Clone, Default)]

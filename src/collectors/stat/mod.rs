@@ -9,7 +9,7 @@ use tracing::{debug, info_span, instrument, warn};
 use tracing_futures::Instrument as _;
 
 // Sub-collectors under the "stat" umbrella.
-mod user_tables;
+pub mod user_tables;
 use user_tables::StatUserTablesCollector;
 
 #[derive(Clone, Default)]

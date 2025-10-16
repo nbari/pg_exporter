@@ -14,6 +14,12 @@ pub struct SettingsCollector {
     pub gauges: std::sync::Arc<RwLock<HashMap<String, IntGauge>>>,
 }
 
+impl Default for SettingsCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SettingsCollector {
     pub fn new() -> Self {
         Self {

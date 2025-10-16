@@ -16,6 +16,12 @@ pub struct VersionCollector {
     server_version_regex: Regex,
 }
 
+impl Default for VersionCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VersionCollector {
     pub fn new() -> Self {
         let pg_version_info = IntGaugeVec::new(

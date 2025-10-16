@@ -8,10 +8,10 @@ use std::sync::Arc;
 use tracing::{debug, info_span, instrument, warn};
 use tracing_futures::Instrument as _;
 
-mod progress;
+pub mod progress;
 use progress::VacuumProgressCollector;
 
-mod stats;
+pub mod stats;
 use stats::VacuumStatsCollector;
 
 #[derive(Clone, Default)]

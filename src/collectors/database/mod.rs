@@ -9,10 +9,10 @@ use tracing::{debug, info_span, instrument, warn};
 use tracing_futures::Instrument as _;
 
 // Sub-collectors under the "database" umbrella.
-mod stats;
+pub mod stats;
 use stats::DatabaseStatCollector;
 
-mod catalog;
+pub mod catalog;
 use catalog::DatabaseSubCollector;
 
 /// DatabaseCollector aggregates db-level metrics from multiple sources.

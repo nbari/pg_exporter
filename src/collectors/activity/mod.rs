@@ -8,10 +8,10 @@ use std::sync::Arc;
 use tracing::{debug, info_span, instrument, warn};
 use tracing_futures::Instrument as _;
 
-mod connections;
+pub mod connections;
 use connections::ConnectionsCollector;
 
-mod wait;
+pub mod wait;
 use wait::WaitEventsCollector;
 
 #[derive(Clone, Default)]

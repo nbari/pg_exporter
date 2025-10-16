@@ -8,13 +8,13 @@ use std::sync::Arc;
 use tracing::{debug, info_span, instrument, warn};
 use tracing_futures::Instrument as _;
 
-mod version;
+pub mod version;
 use version::VersionCollector;
 
-mod settings;
+pub mod settings;
 use settings::SettingsCollector;
 
-mod postmaster;
+pub mod postmaster;
 use postmaster::PostmasterCollector;
 
 /// DefaultCollector is an umbrella for cheap, always-on signals.
