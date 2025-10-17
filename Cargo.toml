@@ -1,6 +1,6 @@
 [package]
 name = "pg_exporter"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 authors = ["Nicolas Embriz <nbari@tequila.io>"]
 description = "PostgreSQL metric exporter for Prometheus"
