@@ -35,6 +35,8 @@ Activity
     cargo test --test collectors_tests activity::connections
     cargo test --test collectors_tests activity::wait
 
+...
+
 # Run a specific test
 
     cargo test --test collectors_tests test_version_collector_queries_database

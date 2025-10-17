@@ -6,6 +6,7 @@ authors = ["Nicolas Embriz <nbari@tequila.io>"]
 description = "PostgreSQL metric exporter for Prometheus"
 documentation = "https://docs.rs/pg_exporter/latest/pg_exporter/"
 readme = "README.md"
+repository = "https://github.com/nbari/pg_exporter"
 keywords = ["postgresql", "prometheus", "metrics", "exporter", "observability"]
 categories = ["command-line-utilities", "network-programming", "database"]
 license = "BSD-3-Clause"
