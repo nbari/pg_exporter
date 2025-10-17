@@ -47,12 +47,12 @@ once_cell = "1.21"
 
 [package.metadata.generate-rpm]
 assets = [
-    { source = "target/release/pg_exporter", dest = "/usr/bin/pg_exporter", mode = "0755" },
+    { source = "target/release/pg_exporter", dest = "/usr/local/bin/pg_exporter", mode = "0755" },
 ]
 
 [package.metadata.deb]
 assets = [
-  ["target/release/pg_exporter", "/usr/bin/pg_exporter", "755"],
+  ["target/release/pg_exporter", "/usr/local/bin/pg_exporter", "755"],
   ["contrib/systemd/pg_exporter.service", "/etc/systemd/system/pg_exporter.service", "644"],
   ["contrib/systemd/pg_exporter.env.example", "/etc/pg_exporter/pg_exporter.env", "640"],
 ]
