@@ -1,7 +1,10 @@
-use crate::collectors::{Collector, CollectorType, all_factories, config::CollectorConfig};
+use crate::{
+    collectors::{Collector, CollectorType, all_factories, config::CollectorConfig},
+    exporter::GIT_COMMIT_HASH,
+};
 use futures::stream::{FuturesUnordered, StreamExt};
-use prometheus::{Encoder, Gauge, Registry, TextEncoder};
-use std::sync::Arc;
+use prometheus::{Encoder, Gauge, GaugeVec, Opts, Registry, TextEncoder};
+use std::{env, sync::Arc};
 use tracing::{debug, debug_span, error, info, info_span, instrument, warn};
 use tracing_futures::Instrument as _;
 
@@ -16,12 +19,40 @@ impl CollectorRegistry {
     pub fn new(config: CollectorConfig) -> Self {
         let registry = Arc::new(Registry::new());
 
+        // Register pg_up gauge
         let pg_up_gauge = Gauge::new("pg_up", "Whether PostgreSQL is up (1) or down (0)")
             .expect("Failed to create pg_up gauge");
 
         registry
             .register(Box::new(pg_up_gauge.clone()))
             .expect("Failed to register pg_up gauge");
+
+        // Register pg_exporter_build_info gauge
+        let pg_exporter_build_info_opts = Opts::new(
+            "pg_exporter_build_info",
+            "Build information for pg_exporter",
+        );
+        let pg_exporter_build_info =
+            GaugeVec::new(pg_exporter_build_info_opts, &["version", "commit", "arch"])
+                .expect("Failed to create pg_exporter_build_info GaugeVec");
+
+        // Add build information as labels
+        let version = env!("CARGO_PKG_VERSION");
+        let commit_sha = GIT_COMMIT_HASH;
+        let arch = env::consts::ARCH;
+
+        pg_exporter_build_info
+            .with_label_values(&[version, commit_sha, arch])
+            .set(1.0); // Gauge is always set to 1.0
+
+        registry
+            .register(Box::new(pg_exporter_build_info.clone()))
+            .expect("Failed to register pg_exporter_build_info GaugeVec");
+
+        info!(
+            "Registered pg_exporter_build_info: version={} commit={}",
+            version, commit_sha
+        );
 
         let factories = all_factories();
 
@@ -87,6 +118,7 @@ impl CollectorRegistry {
 
         // Emit a summary log of which collectors are being launched in parallel.
         let names: Vec<&'static str> = self.collectors.iter().map(|c| c.name()).collect();
+
         info!("Launching collectors concurrently: {:?}", names);
 
         for collector in &self.collectors {
