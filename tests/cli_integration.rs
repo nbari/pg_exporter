@@ -22,6 +22,8 @@ fn run_binary_with_args(args: &[&str]) -> std::io::Result<std::process::Output> 
     Command::new("cargo")
         .args(["run", "--bin", "pg_exporter", "--"])
         .args(args)
+        .env_clear()
+        .envs(std::env::vars())
         .output()
 }
 
@@ -38,6 +40,8 @@ fn start_binary(port: u16, dsn: &str) -> std::io::Result<Child> {
             "--dsn",
             dsn,
         ])
+        .env_clear()
+        .envs(std::env::vars())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -47,6 +51,8 @@ fn start_binary(port: u16, dsn: &str) -> std::io::Result<Child> {
 fn start_binary_with_env(port: u16, dsn: &str) -> std::io::Result<Child> {
     Command::new("cargo")
         .args(["run", "--bin", "pg_exporter"])
+        .env_clear()
+        .envs(std::env::vars())
         .env("PG_EXPORTER_PORT", port.to_string())
         .env("PG_EXPORTER_DSN", dsn)
         .stdout(Stdio::null())
@@ -210,6 +216,8 @@ fn test_binary_validates_dsn_format() {
             "--port",
             "9999",
         ])
+        .env_clear()
+        .envs(std::env::vars())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
