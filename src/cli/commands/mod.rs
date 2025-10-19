@@ -357,4 +357,42 @@ mod tests {
         let command = new();
         assert_eq!(command.get_name(), "pg_exporter");
     }
+
+    #[test]
+    fn test_command_has_port_argument() {
+        let command = new();
+        let port_arg = command.get_arguments().find(|arg| arg.get_id() == "port");
+        assert!(port_arg.is_some(), "Command should have 'port' argument");
+    }
+
+    #[test]
+    fn test_command_has_dsn_argument() {
+        let command = new();
+        let dsn_arg = command.get_arguments().find(|arg| arg.get_id() == "dsn");
+        assert!(dsn_arg.is_some(), "Command should have 'dsn' argument");
+    }
+
+    #[test]
+    fn test_command_has_verbose_argument() {
+        let command = new();
+        let verbose_arg = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "verbose");
+        assert!(
+            verbose_arg.is_some(),
+            "Command should have 'verbose' argument"
+        );
+    }
+
+    #[test]
+    fn test_command_has_exclude_databases_argument() {
+        let command = new();
+        let exclude_arg = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "exclude-databases");
+        assert!(
+            exclude_arg.is_some(),
+            "Command should have 'exclude-databases' argument"
+        );
+    }
 }

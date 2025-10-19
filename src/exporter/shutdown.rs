@@ -1,24 +1,46 @@
+use anyhow::{Context, Result};
 use tokio::signal;
 
-pub async fn shutdown_signal() {
+/// Wait for shutdown signal (SIGINT, SIGTERM on Unix; Ctrl+C on Windows)
+///
+/// Returns Result to allow proper error handling during signal handler installation.
+/// The shutdown_signal_handler() wrapper provides a simple () return for graceful shutdown.
+pub async fn shutdown_signal() -> Result<()> {
     #[cfg(unix)]
     {
         let mut sigint = signal::unix::signal(signal::unix::SignalKind::interrupt())
-            .expect("install SIGINT handler");
+            .context("Failed to install SIGINT handler")?;
 
         let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("install SIGTERM handler");
+            .context("Failed to install SIGTERM handler")?;
 
         tokio::select! {
-            _ = sigint.recv()  => {},
-            _ = sigterm.recv() => {},
+            _ = sigint.recv()  => {
+                tracing::info!("Received SIGINT signal");
+            },
+            _ = sigterm.recv() => {
+                tracing::info!("Received SIGTERM signal");
+            },
         }
     }
 
     #[cfg(not(unix))]
     {
-        // Fallback to Ctrl+C only
-        let _ = signal::ctrl_c().await;
+        // Fallback to Ctrl+C only on non-Unix systems
+        signal::ctrl_c()
+            .await
+            .context("Failed to install Ctrl+C handler")?;
+        tracing::info!("Received Ctrl+C signal");
+    }
+
+    Ok(())
+}
+
+/// Wrapper that provides () return for axum's graceful shutdown
+/// This logs any errors in signal handling instead of propagating them
+pub async fn shutdown_signal_handler() {
+    if let Err(e) = shutdown_signal().await {
+        tracing::error!("Error setting up shutdown handler: {}", e);
     }
 }
 

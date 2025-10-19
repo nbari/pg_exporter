@@ -108,7 +108,7 @@ pub async fn new(port: u16, dsn: SecretString, collectors: Vec<String>) -> Resul
     }
 
     if let Err(e) = axum::serve(listener, app.into_make_service())
-        .with_graceful_shutdown(shutdown::shutdown_signal())
+        .with_graceful_shutdown(shutdown::shutdown_signal_handler())
         .await
     {
         error!(error=%e, "server error");
