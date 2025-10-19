@@ -8,10 +8,41 @@
 //! - Error handling and validation
 
 use anyhow::Result;
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 mod common;
+
+// ============================================================================
+// Binary Path Setup
+// ============================================================================
+
+static BINARY_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+/// Ensure binary is built and return path to it
+fn get_binary_path() -> &'static PathBuf {
+    BINARY_PATH.get_or_init(|| {
+        // Build the binary once
+        let output = Command::new("cargo")
+            .args(["build", "--bin", "pg_exporter"])
+            .output()
+            .expect("Failed to build binary");
+        
+        if !output.status.success() {
+            panic!("Failed to build binary: {}", String::from_utf8_lossy(&output.stderr));
+        }
+        
+        // Get the binary path
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("target");
+        path.push("debug");
+        path.push("pg_exporter");
+        
+        path
+    })
+}
 
 // ============================================================================
 // Helper Functions
@@ -19,20 +50,15 @@ mod common;
 
 /// Run the binary with given arguments and return output
 fn run_binary_with_args(args: &[&str]) -> std::io::Result<std::process::Output> {
-    Command::new("cargo")
-        .args(["run", "--bin", "pg_exporter", "--"])
+    Command::new(get_binary_path())
         .args(args)
         .output()
 }
 
 /// Start the binary in background with given port and DSN
 fn start_binary(port: u16, dsn: &str) -> std::io::Result<Child> {
-    Command::new("cargo")
+    Command::new(get_binary_path())
         .args([
-            "run",
-            "--bin",
-            "pg_exporter",
-            "--",
             "--port",
             &port.to_string(),
             "--dsn",
@@ -45,8 +71,7 @@ fn start_binary(port: u16, dsn: &str) -> std::io::Result<Child> {
 
 /// Start the binary with environment variables
 fn start_binary_with_env(port: u16, dsn: &str) -> std::io::Result<Child> {
-    Command::new("cargo")
-        .args(["run", "--bin", "pg_exporter"])
+    Command::new(get_binary_path())
         .env("PG_EXPORTER_PORT", port.to_string())
         .env("PG_EXPORTER_DSN", dsn)
         .stdout(Stdio::null())
@@ -199,12 +224,8 @@ fn test_binary_disable_collector() {
 /// Test that binary rejects invalid DSN format
 #[test]
 fn test_binary_validates_dsn_format() {
-    let output = Command::new("cargo")
+    let output = Command::new(get_binary_path())
         .args([
-            "run",
-            "--bin",
-            "pg_exporter",
-            "--",
             "--dsn",
             "not-a-valid-dsn",
             "--port",
