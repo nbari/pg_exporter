@@ -92,6 +92,54 @@ fn cleanup_child(child: &mut Child) {
     let _ = child.wait();
 }
 
+/// RAII guard for automatic cleanup of child process.
+/// When dropped, ensures the process is terminated.
+struct ChildGuard(Child);
+
+impl ChildGuard {
+    fn new(child: Child) -> Self {
+        Self(child)
+    }
+
+    fn as_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        cleanup_child(&mut self.0);
+    }
+}
+
+/// Start binary and return a RAII guard that ensures cleanup on drop.
+async fn start_and_wait(port: u16, dsn: &str) -> Result<ChildGuard> {
+    let child = start_binary(port, dsn)?;
+    let guard = ChildGuard::new(child);
+
+    if !common::wait_for_server(port, 100).await {
+        anyhow::bail!("Server failed to start on port {}", port);
+    }
+
+    Ok(guard)
+}
+
+/// Make HTTP request to given endpoint and return response body.
+async fn http_get(port: u16, endpoint: &str) -> Result<String> {
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("http://localhost:{}{}", port, endpoint))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        anyhow::bail!("HTTP request failed with status: {}", response.status());
+    }
+
+    Ok(response.text().await?)
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -146,15 +194,11 @@ async fn test_binary_starts_and_stops() -> Result<()> {
     let port = common::get_available_port();
     let dsn = common::get_test_dsn();
 
-    // Start the binary in background
-    let mut child = start_binary(port, &dsn).expect("Failed to start binary");
-
-    // Wait for server to start
-    let started = common::wait_for_server(port, 100).await;
-    assert!(started, "Server should start on port {}", port);
+    // Start the binary and wait for it to be ready
+    let mut guard = start_and_wait(port, &dsn).await?;
 
     // Kill the process
-    cleanup_child(&mut child);
+    cleanup_child(guard.as_mut());
 
     // Give it time to clean up
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -174,15 +218,10 @@ async fn test_binary_handles_graceful_shutdown() -> Result<()> {
     let dsn = common::get_test_dsn();
 
     // Start the binary
-    let mut child = start_binary(port, &dsn).expect("Failed to start binary");
-
-    // Wait for server to start
-    assert!(
-        common::wait_for_server(port, 100).await,
-        "Server should start"
-    );
+    let mut guard = start_and_wait(port, &dsn).await?;
 
     // Kill the process gracefully
+    let child = guard.as_mut();
     child.kill().expect("Failed to kill process");
     let status = child.wait().expect("Failed to wait for process");
 
@@ -204,14 +243,13 @@ async fn test_binary_uses_environment_variables() -> Result<()> {
     let dsn = common::get_test_dsn();
 
     // Start with environment variables
-    let mut child = start_binary_with_env(port, &dsn).expect("Failed to start binary");
+    let child = start_binary_with_env(port, &dsn)?;
+    let _guard = ChildGuard::new(child); // Auto-cleanup on drop
 
     // Wait for server to start
-    let started = common::wait_for_server(port, 100).await;
-    assert!(started, "Server should start using env vars");
-
-    // Clean up
-    cleanup_child(&mut child);
+    if !common::wait_for_server(port, 100).await {
+        anyhow::bail!("Server should start using env vars");
+    }
 
     Ok(())
 }
@@ -254,45 +292,19 @@ async fn test_binary_exposes_metrics_endpoint() -> Result<()> {
     let port = common::get_available_port();
     let dsn = common::get_test_dsn();
 
-    // Start the binary
-    let mut child = start_binary(port, &dsn).expect("Failed to start binary");
-
-    // Wait for server to start
-    assert!(
-        common::wait_for_server(port, 100).await,
-        "Server should start"
-    );
+    // Start the binary and ensure it's cleaned up automatically
+    let _guard = start_and_wait(port, &dsn).await?;
 
     // Make HTTP request to metrics endpoint
-    let result = async {
-        let client = reqwest::Client::new();
-        let response = client
-            .get(format!("http://localhost:{}/metrics", port))
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await?;
+    let body = http_get(port, "/metrics").await?;
 
-        assert!(
-            response.status().is_success(),
-            "Metrics endpoint should respond"
-        );
+    assert!(body.contains("pg_up"), "Metrics should include pg_up");
+    assert!(
+        body.contains("pg_exporter_build_info"),
+        "Metrics should include build info"
+    );
 
-        let body = response.text().await?;
-
-        assert!(body.contains("pg_up"), "Metrics should include pg_up");
-        assert!(
-            body.contains("pg_exporter_build_info"),
-            "Metrics should include build info"
-        );
-
-        Ok::<(), anyhow::Error>(())
-    }
-    .await;
-
-    // Clean up
-    cleanup_child(&mut child);
-
-    result
+    Ok(())
 }
 
 /// Test that the binary exposes health endpoint
@@ -301,35 +313,11 @@ async fn test_binary_exposes_health_endpoint() -> Result<()> {
     let port = common::get_available_port();
     let dsn = common::get_test_dsn();
 
-    // Start the binary
-    let mut child = start_binary(port, &dsn).expect("Failed to start binary");
-
-    // Wait for server to start
-    assert!(
-        common::wait_for_server(port, 100).await,
-        "Server should start"
-    );
+    // Start the binary and ensure it's cleaned up automatically
+    let _guard = start_and_wait(port, &dsn).await?;
 
     // Make HTTP request to health endpoint
-    let result = async {
-        let client = reqwest::Client::new();
-        let response = client
-            .get(format!("http://localhost:{}/health", port))
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await?;
+    let _body = http_get(port, "/health").await?;
 
-        assert!(
-            response.status().is_success(),
-            "Health endpoint should respond"
-        );
-
-        Ok::<(), anyhow::Error>(())
-    }
-    .await;
-
-    // Clean up
-    cleanup_child(&mut child);
-
-    result
+    Ok(())
 }
