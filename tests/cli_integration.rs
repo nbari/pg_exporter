@@ -29,17 +29,20 @@ fn get_binary_path() -> &'static PathBuf {
             .args(["build", "--bin", "pg_exporter"])
             .output()
             .expect("Failed to build binary");
-        
+
         if !output.status.success() {
-            panic!("Failed to build binary: {}", String::from_utf8_lossy(&output.stderr));
+            panic!(
+                "Failed to build binary: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
-        
+
         // Get the binary path
         let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         path.push("target");
         path.push("debug");
         path.push("pg_exporter");
-        
+
         path
     })
 }
@@ -50,20 +53,13 @@ fn get_binary_path() -> &'static PathBuf {
 
 /// Run the binary with given arguments and return output
 fn run_binary_with_args(args: &[&str]) -> std::io::Result<std::process::Output> {
-    Command::new(get_binary_path())
-        .args(args)
-        .output()
+    Command::new(get_binary_path()).args(args).output()
 }
 
 /// Start the binary in background with given port and DSN
 fn start_binary(port: u16, dsn: &str) -> std::io::Result<Child> {
     Command::new(get_binary_path())
-        .args([
-            "--port",
-            &port.to_string(),
-            "--dsn",
-            dsn,
-        ])
+        .args(["--port", &port.to_string(), "--dsn", dsn])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -225,12 +221,7 @@ fn test_binary_disable_collector() {
 #[test]
 fn test_binary_validates_dsn_format() {
     let output = Command::new(get_binary_path())
-        .args([
-            "--dsn",
-            "not-a-valid-dsn",
-            "--port",
-            "9999",
-        ])
+        .args(["--dsn", "not-a-valid-dsn", "--port", "9999"])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
