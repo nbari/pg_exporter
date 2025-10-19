@@ -32,7 +32,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Get the release version from the tag
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
@@ -106,7 +106,7 @@ jobs:
       # Skip release if the tag starts with 't'
       - name: Release
         if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref_name, 't')
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: |-
             ${{ env.ASSET }}
@@ -123,7 +123,7 @@ jobs:
       't')
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
