@@ -18,8 +18,8 @@ async fn test_settings_collector_returns_key_settings() -> Result<()> {
     // Check for some key settings that should always exist
     let expected_settings = vec![
         "pg_settings_max_connections",
-        "pg_settings_shared_buffers",
-        "pg_settings_work_mem",
+        "pg_settings_shared_buffers_bytes",
+        "pg_settings_work_mem_bytes",
         "pg_settings_fsync",
         "pg_settings_autovacuum",
     ];
@@ -159,7 +159,7 @@ async fn test_settings_collector_memory_settings_are_reasonable() -> Result<()> 
     // Check memory-related settings have reasonable values
     let work_mem = metric_families
         .iter()
-        .find(|m| m.name() == "pg_settings_work_mem")
+        .find(|m| m.name() == "pg_settings_work_mem_bytes")
         .unwrap();
 
     let value = work_mem.get_metric()[0].get_gauge().value() as i64;

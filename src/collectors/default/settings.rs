@@ -35,7 +35,7 @@ impl SettingsCollector {
             otel.kind = "client",
             db.system = "postgresql",
             db.operation = "SELECT",
-            db.statement = "SELECT name, setting FROM pg_settings WHERE name IN (...)",
+            db.statement = "SELECT name, setting, unit FROM pg_settings WHERE name IN (...)",
             db.sql.table = "pg_settings"
         )
     )]
@@ -46,7 +46,7 @@ impl SettingsCollector {
             otel.kind = "client",
             db.system = "postgresql",
             db.operation = "SELECT",
-            db.statement = "SELECT name, setting FROM pg_settings WHERE name IN (...)",
+            db.statement = "SELECT name, setting, unit FROM pg_settings WHERE name IN (...)",
             db.sql.table = "pg_settings"
         );
 
@@ -54,7 +54,8 @@ impl SettingsCollector {
             r#"
             SELECT
                 name,
-                setting
+                setting,
+                unit
             FROM pg_settings
             WHERE name IN (
                 'autovacuum',
@@ -88,8 +89,9 @@ impl SettingsCollector {
         for row in rows {
             let name: String = row.try_get("name")?;
             let setting: String = row.try_get("setting")?;
+            let unit: Option<String> = row.try_get("unit").ok();
 
-            let value: i64 = match setting.parse::<i64>() {
+            let mut value: i64 = match setting.parse::<i64>() {
                 Ok(v) => v,
                 Err(_) => match setting.as_str() {
                     "on" => 1,
@@ -97,6 +99,19 @@ impl SettingsCollector {
                     _ => 0,
                 },
             };
+
+            // Convert memory settings to bytes based on their units
+            if matches!(name.as_str(), "shared_buffers" | "maintenance_work_mem" | "work_mem" | "wal_buffers")
+                && let Some(ref u) = unit
+            {
+                value *= match u.as_str() {
+                    "8kB" => 8192,
+                    "kB" => 1024,
+                    "MB" => 1024 * 1024,
+                    "GB" => 1024 * 1024 * 1024,
+                    _ => 1,
+                };
+            }
 
             metrics.push((name, value));
         }
@@ -117,32 +132,28 @@ impl Collector for SettingsCollector {
         fields(collector = "settings")
     )]
     fn register_metrics(&self, registry: &Registry) -> Result<()> {
-        let metric_names = vec![
-            "autovacuum",
-            "autovacuum_max_workers",
-            "autovacuum_naptime",
-            "autovacuum_analyze_threshold",
-            "autovacuum_vacuum_threshold",
-            "checkpoint_timeout",
-            "fsync",
-            "log_min_duration_statement",
-            "maintenance_work_mem",
-            "max_connections",
-            "max_locks_per_transaction",
-            "shared_buffers",
-            "synchronous_commit",
-            "wal_buffers",
-            "work_mem",
+        let metric_configs = vec![
+            ("autovacuum", "pg_settings_autovacuum", "PostgreSQL setting: autovacuum"),
+            ("autovacuum_max_workers", "pg_settings_autovacuum_max_workers", "PostgreSQL setting: autovacuum_max_workers"),
+            ("autovacuum_naptime", "pg_settings_autovacuum_naptime", "PostgreSQL setting: autovacuum_naptime"),
+            ("autovacuum_analyze_threshold", "pg_settings_autovacuum_analyze_threshold", "PostgreSQL setting: autovacuum_analyze_threshold"),
+            ("autovacuum_vacuum_threshold", "pg_settings_autovacuum_vacuum_threshold", "PostgreSQL setting: autovacuum_vacuum_threshold"),
+            ("checkpoint_timeout", "pg_settings_checkpoint_timeout", "PostgreSQL setting: checkpoint_timeout"),
+            ("fsync", "pg_settings_fsync", "PostgreSQL setting: fsync"),
+            ("log_min_duration_statement", "pg_settings_log_min_duration_statement", "PostgreSQL setting: log_min_duration_statement"),
+            ("maintenance_work_mem", "pg_settings_maintenance_work_mem_bytes", "PostgreSQL setting: maintenance_work_mem in bytes"),
+            ("max_connections", "pg_settings_max_connections", "PostgreSQL setting: max_connections"),
+            ("max_locks_per_transaction", "pg_settings_max_locks_per_transaction", "PostgreSQL setting: max_locks_per_transaction"),
+            ("shared_buffers", "pg_settings_shared_buffers_bytes", "PostgreSQL setting: shared_buffers in bytes"),
+            ("synchronous_commit", "pg_settings_synchronous_commit", "PostgreSQL setting: synchronous_commit"),
+            ("wal_buffers", "pg_settings_wal_buffers_bytes", "PostgreSQL setting: wal_buffers in bytes"),
+            ("work_mem", "pg_settings_work_mem_bytes", "PostgreSQL setting: work_mem in bytes"),
         ];
 
         let mut gauges = self.gauges.write().unwrap();
 
-        for name in metric_names {
-            let metric_name = format!("pg_settings_{}", name);
-            let gauge = IntGauge::with_opts(Opts::new(
-                &metric_name,
-                format!("PostgreSQL setting: {}", name),
-            ))?;
+        for (name, metric_name, help) in metric_configs {
+            let gauge = IntGauge::with_opts(Opts::new(metric_name, help))?;
             registry.register(Box::new(gauge.clone()))?;
             gauges.insert(name.to_string(), gauge);
             debug!(metric = %metric_name, "registered settings gauge");

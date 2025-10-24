@@ -125,6 +125,32 @@ the `vacuum` collector has two files: `progress.rs` and `stats.rs`, this allows
 for better organization and separation of concerns within the collector and
 better testability. (or that is the plan).
 
+## Testing
+
+The project includes unit tests for each collector and integration tests for the
+exporter as a whole. You can run the tests using:
+
+    just
+
+> need just installed, see [just](https://github.com/casey/just)
+
+To run with opentelemetry set the environment variable `OTEL_EXPORTER_OTLP_ENDPOINT`, for example:
+
+    OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4317"
+
+Then you can run the exporter and it will send traces to the specified endpoint.
+
+To run postgres and jaeger locally
+
+    just postgres
+    just jaeger
+    just watch
+
+For tracees add more verbosity with `-v`, for example:
+
+    cargo watch -x 'run -- --collector.vacuum -vv'
+
+open `jaeger` at http://localhost:16686 and select the `pg_exporter` service to see the traces.
 
 ## Feedback
 
