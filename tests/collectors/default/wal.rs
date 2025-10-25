@@ -349,12 +349,18 @@ async fn test_wal_collector_bytes_increases() -> Result<()> {
     // Generate WAL activity
     let mut tx = pool.begin().await?;
     for i in 0..100 {
-        sqlx::query(&format!("CREATE TEMP TABLE wal_bytes_test_{} (data TEXT)", i))
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(&format!("INSERT INTO wal_bytes_test_{} SELECT 'test' FROM generate_series(1, 10)", i))
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(&format!(
+            "CREATE TEMP TABLE wal_bytes_test_{} (data TEXT)",
+            i
+        ))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(&format!(
+            "INSERT INTO wal_bytes_test_{} SELECT 'test' FROM generate_series(1, 10)",
+            i
+        ))
+        .execute(&mut *tx)
+        .await?;
     }
     tx.commit().await?;
 
