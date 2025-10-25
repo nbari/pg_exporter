@@ -1,7 +1,7 @@
 ---
 name: Test
 
-on:
+'on':
   workflow_call:
   pull_request:
     branches:
@@ -94,10 +94,9 @@ jobs:
       - check
 
     strategy:
-      fail-fast: false  # Continue other jobs if one fails
+      fail-fast: false
       matrix:
         postgres:
-          - 16
           - 17
           - 18
 
@@ -130,8 +129,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-test-pg${{ matrix.postgres }}-${{ hashFiles('**/Cargo.lock')
-            }}
+          key: ${{ runner.os }}-cargo-test-pg${{ matrix.postgres }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-test-pg${{ matrix.postgres }}-
             ${{ runner.os }}-cargo-test-
