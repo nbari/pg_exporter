@@ -48,7 +48,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      
+
       - name: Cache Rust dependencies
         uses: actions/cache@v4
         with:
@@ -58,7 +58,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-build-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-build-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock')
+            }}
           restore-keys: |
             ${{ runner.os }}-cargo-build-${{ matrix.target }}-
             ${{ runner.os }}-cargo-build-
