@@ -373,18 +373,26 @@ async fn test_stat_user_tables_collector_timestamp_values_are_reasonable() -> Re
 async fn test_stat_user_tables_collector_tracks_table_size() -> Result<()> {
     let pool = common::create_test_pool().await?;
 
-    // Create a test table with some data
-    sqlx::query("CREATE TABLE IF NOT EXISTS test_size (id INT, data TEXT)")
+    // Create a test table with some data using unique name
+    let table_name = format!("test_size_{}", std::process::id());
+    sqlx::query(&format!("DROP TABLE IF EXISTS {}", table_name))
+        .execute(&pool)
+        .await?;
+
+    sqlx::query(&format!("CREATE TABLE {} (id INT, data TEXT)", table_name))
         .execute(&pool)
         .await?;
 
     // Insert some data to ensure table has size
     for i in 1..=100 {
-        sqlx::query("INSERT INTO test_size (id, data) VALUES ($1, $2)")
-            .bind(i)
-            .bind("x".repeat(100))
-            .execute(&pool)
-            .await?;
+        sqlx::query(&format!(
+            "INSERT INTO {} (id, data) VALUES ($1, $2)",
+            table_name
+        ))
+        .bind(i)
+        .bind("x".repeat(100))
+        .execute(&pool)
+        .await?;
     }
 
     let collector = StatUserTablesCollector::new();
@@ -401,11 +409,12 @@ async fn test_stat_user_tables_collector_tracks_table_size() -> Result<()> {
         .find(|m| m.name() == "pg_stat_user_tables_table_size_bytes");
 
     if let Some(metric_family) = table_size {
-        // Find our test_size table
+        // Find our test table
+        let table_suffix = format!("_{}", std::process::id());
         let our_table = metric_family.get_metric().iter().find(|m| {
             m.get_label()
                 .iter()
-                .any(|l| l.name() == "relname" && l.value() == "test_size")
+                .any(|l| l.name() == "relname" && l.value().ends_with(&table_suffix))
         });
 
         if let Some(metric) = our_table {
@@ -419,7 +428,7 @@ async fn test_stat_user_tables_collector_tracks_table_size() -> Result<()> {
     }
 
     // Cleanup
-    sqlx::query("DROP TABLE IF EXISTS test_size")
+    sqlx::query(&format!("DROP TABLE IF EXISTS {}", table_name))
         .execute(&pool)
         .await?;
 
@@ -437,22 +446,33 @@ async fn test_stat_user_tables_collector_bloat_metrics() -> Result<()> {
     // Metrics should register without error
     collector.register_metrics(&registry)?;
 
-    // Create a table and collect data
-    sqlx::query("CREATE TABLE IF NOT EXISTS test_bloat (id INT PRIMARY KEY, data TEXT)")
+    // Create a table and collect data with unique name to avoid conflicts
+    let table_name = format!("test_bloat_{}", std::process::id());
+    sqlx::query(&format!("DROP TABLE IF EXISTS {}", table_name))
         .execute(&pool)
         .await?;
 
+    sqlx::query(&format!(
+        "CREATE TABLE {} (id INT PRIMARY KEY, data TEXT)",
+        table_name
+    ))
+    .execute(&pool)
+    .await?;
+
     // Insert data
     for i in 1..=100 {
-        sqlx::query("INSERT INTO test_bloat (id, data) VALUES ($1, $2) ON CONFLICT DO NOTHING")
-            .bind(i)
-            .bind("x".repeat(100))
-            .execute(&pool)
-            .await?;
+        sqlx::query(&format!(
+            "INSERT INTO {} (id, data) VALUES ($1, $2)",
+            table_name
+        ))
+        .bind(i)
+        .bind("x".repeat(100))
+        .execute(&pool)
+        .await?;
     }
 
     // Update rows to create dead tuples
-    sqlx::query("UPDATE test_bloat SET data = 'updated'")
+    sqlx::query(&format!("UPDATE {} SET data = 'updated'", table_name))
         .execute(&pool)
         .await?;
 
@@ -467,13 +487,13 @@ async fn test_stat_user_tables_collector_bloat_metrics() -> Result<()> {
             for metric in family.get_metric() {
                 let value = metric.get_gauge().value();
                 assert!(
-                    value >= 0.0 && value <= 1.0,
+                    (0.0..=1.0).contains(&value),
                     "Bloat ratio should be between 0.0 and 1.0, got: {}",
                     value
                 );
             }
         }
-        
+
         if family.name() == "pg_stat_user_tables_dead_tuple_size_bytes" {
             for metric in family.get_metric() {
                 let value = metric.get_gauge().value();
@@ -487,7 +507,7 @@ async fn test_stat_user_tables_collector_bloat_metrics() -> Result<()> {
     }
 
     // Cleanup
-    sqlx::query("DROP TABLE IF EXISTS test_bloat")
+    sqlx::query(&format!("DROP TABLE IF EXISTS {}", table_name))
         .execute(&pool)
         .await?;
 
