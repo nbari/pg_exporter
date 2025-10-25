@@ -96,7 +96,7 @@ impl Collector for ArchiverCollector {
                 db.sql.table = "pg_stat_archiver"
             );
 
-            let row = sqlx::query(
+            let row_result = sqlx::query(
                 r#"
                 SELECT
                     archived_count,
@@ -108,7 +108,20 @@ impl Collector for ArchiverCollector {
             )
             .fetch_one(pool)
             .instrument(query_span)
-            .await?;
+            .await;
+
+            let row = match row_result {
+                Ok(row) => row,
+                Err(e) => {
+                    // pg_stat_archiver should be available in all supported versions
+                    // but handle gracefully just in case
+                    if e.to_string().contains("pg_stat_archiver") {
+                        debug!("pg_stat_archiver view not found");
+                        return Ok(());
+                    }
+                    return Err(e.into());
+                }
+            };
 
             let archived_count: i64 = row.try_get("archived_count")?;
             let failed_count: i64 = row.try_get("failed_count")?;

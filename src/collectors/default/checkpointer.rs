@@ -106,7 +106,7 @@ impl Collector for CheckpointerCollector {
                 db.sql.table = "pg_stat_checkpointer"
             );
 
-            let row = sqlx::query(
+            let row_result = sqlx::query(
                 r#"
                 SELECT
                     num_timed,
@@ -119,7 +119,19 @@ impl Collector for CheckpointerCollector {
             )
             .fetch_one(pool)
             .instrument(query_span)
-            .await?;
+            .await;
+
+            let row = match row_result {
+                Ok(row) => row,
+                Err(e) => {
+                    // pg_stat_checkpointer was introduced in PostgreSQL 17
+                    if e.to_string().contains("pg_stat_checkpointer") {
+                        debug!("pg_stat_checkpointer view not found (requires PostgreSQL 17+)");
+                        return Ok(());
+                    }
+                    return Err(e.into());
+                }
+            };
 
             let num_timed: i64 = row.try_get("num_timed")?;
             let num_requested: i64 = row.try_get("num_requested")?;

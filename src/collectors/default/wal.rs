@@ -96,7 +96,7 @@ impl Collector for WalCollector {
                 db.sql.table = "pg_stat_wal"
             );
 
-            let row = sqlx::query(
+            let row_result = sqlx::query(
                 r#"
                 SELECT
                     wal_records,
@@ -108,7 +108,19 @@ impl Collector for WalCollector {
             )
             .fetch_one(pool)
             .instrument(query_span)
-            .await?;
+            .await;
+
+            let row = match row_result {
+                Ok(row) => row,
+                Err(e) => {
+                    // pg_stat_wal was introduced in PostgreSQL 14
+                    if e.to_string().contains("pg_stat_wal") {
+                        debug!("pg_stat_wal view not found (requires PostgreSQL 14+)");
+                        return Ok(());
+                    }
+                    return Err(e.into());
+                }
+            };
 
             let wal_records: i64 = row.try_get("wal_records")?;
             let wal_fpi: i64 = row.try_get("wal_fpi")?;

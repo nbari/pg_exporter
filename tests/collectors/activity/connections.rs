@@ -52,6 +52,9 @@ async fn test_connections_collector_has_all_metrics() -> Result<()> {
 async fn test_connections_collector_collects_from_database() -> Result<()> {
     let pool = common::create_test_pool().await?;
 
+    // Keep a connection active during the test to ensure we detect it
+    let _conn = pool.acquire().await?;
+
     let collector = ConnectionsCollector::new();
     let registry = Registry::new();
 
@@ -71,15 +74,17 @@ async fn test_connections_collector_collects_from_database() -> Result<()> {
         "Should have active connections"
     );
 
-    // Check that at least one database has connections
-    let has_connections = active_conn
+    // Check total connections across all databases
+    let total_connections: f64 = active_conn
         .get_metric()
         .iter()
-        .any(|m| m.get_gauge().value() >= 1.0);
+        .map(|m| m.get_gauge().value())
+        .sum();
 
     assert!(
-        has_connections,
-        "At least one database should have active connections"
+        total_connections >= 1.0,
+        "Should have at least one active connection, found: {}",
+        total_connections
     );
 
     pool.close().await;
