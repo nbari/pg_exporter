@@ -4,7 +4,7 @@ use crate::collectors::util::{
 };
 use anyhow::Result;
 use futures::future::BoxFuture;
-use prometheus::{IntGaugeVec, Opts, Registry};
+use prometheus::{GaugeVec, IntGaugeVec, Opts, Registry};
 use sqlx::{PgPool, Row};
 use std::sync::Arc;
 use tokio::task::JoinSet;
@@ -47,6 +47,10 @@ pub struct StatUserTablesCollector {
     // Sizes
     index_size_bytes: IntGaugeVec,
     table_size_bytes: IntGaugeVec,
+
+    // Bloat metrics (derived from tuple counts and sizes)
+    bloat_ratio: GaugeVec,
+    dead_tuple_size_bytes: GaugeVec,
 }
 
 impl Default for StatUserTablesCollector {
@@ -239,6 +243,24 @@ impl StatUserTablesCollector {
         )
         .expect("pg_stat_user_tables_table_size_bytes");
 
+        let bloat_ratio = GaugeVec::new(
+            Opts::new(
+                "pg_stat_user_tables_bloat_ratio",
+                "Ratio of dead tuples to total tuples (0.0-1.0). High values indicate need for VACUUM",
+            ),
+            labels,
+        )
+        .expect("pg_stat_user_tables_bloat_ratio");
+
+        let dead_tuple_size_bytes = GaugeVec::new(
+            Opts::new(
+                "pg_stat_user_tables_dead_tuple_size_bytes",
+                "Estimated size of dead tuples in bytes. Indicates reclaimable space after VACUUM",
+            ),
+            labels,
+        )
+        .expect("pg_stat_user_tables_dead_tuple_size_bytes");
+
         Self {
             seq_scan,
             seq_tup_read,
@@ -261,6 +283,8 @@ impl StatUserTablesCollector {
             autoanalyze_count,
             index_size_bytes,
             table_size_bytes,
+            bloat_ratio,
+            dead_tuple_size_bytes,
         }
     }
 }
@@ -292,6 +316,8 @@ impl Collector for StatUserTablesCollector {
         registry.register(Box::new(self.autoanalyze_count.clone()))?;
         registry.register(Box::new(self.index_size_bytes.clone()))?;
         registry.register(Box::new(self.table_size_bytes.clone()))?;
+        registry.register(Box::new(self.bloat_ratio.clone()))?;
+        registry.register(Box::new(self.dead_tuple_size_bytes.clone()))?;
         Ok(())
     }
 
@@ -468,6 +494,27 @@ impl Collector for StatUserTablesCollector {
 
                         this.index_size_bytes.with_label_values(&labels).set(row.try_get::<i64, _>("index_size_bytes").unwrap_or(0));
                         this.table_size_bytes.with_label_values(&labels).set(row.try_get::<i64, _>("table_size_bytes").unwrap_or(0));
+
+                        // Calculate bloat metrics
+                        let n_live = row.try_get::<i64, _>("n_live_tup").unwrap_or(0);
+                        let n_dead = row.try_get::<i64, _>("n_dead_tup").unwrap_or(0);
+                        let tbl_size = row.try_get::<i64, _>("table_size_bytes").unwrap_or(0);
+                        
+                        let total_tuples = n_live + n_dead;
+                        let bloat_ratio = if total_tuples > 0 {
+                            n_dead as f64 / total_tuples as f64
+                        } else {
+                            0.0
+                        };
+                        
+                        let dead_size_estimate = if tbl_size > 0 {
+                            tbl_size as f64 * bloat_ratio
+                        } else {
+                            0.0
+                        };
+
+                        this.bloat_ratio.with_label_values(&labels).set(bloat_ratio);
+                        this.dead_tuple_size_bytes.with_label_values(&labels).set(dead_size_estimate);
 
                         debug!(datname=%dat, schema=%schema, table=%table, "updated pg_stat_user_tables metrics");
                     }

@@ -426,3 +426,71 @@ async fn test_stat_user_tables_collector_tracks_table_size() -> Result<()> {
     pool.close().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn test_stat_user_tables_collector_bloat_metrics() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+
+    let collector = StatUserTablesCollector::new();
+    let registry = Registry::new();
+
+    // Metrics should register without error
+    collector.register_metrics(&registry)?;
+
+    // Create a table and collect data
+    sqlx::query("CREATE TABLE IF NOT EXISTS test_bloat (id INT PRIMARY KEY, data TEXT)")
+        .execute(&pool)
+        .await?;
+
+    // Insert data
+    for i in 1..=100 {
+        sqlx::query("INSERT INTO test_bloat (id, data) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+            .bind(i)
+            .bind("x".repeat(100))
+            .execute(&pool)
+            .await?;
+    }
+
+    // Update rows to create dead tuples
+    sqlx::query("UPDATE test_bloat SET data = 'updated'")
+        .execute(&pool)
+        .await?;
+
+    // Collect metrics
+    collector.collect(&pool).await?;
+
+    let metric_families = registry.gather();
+
+    // Validate bloat metrics if they appear (they will appear if pg_stat_user_tables has data)
+    for family in &metric_families {
+        if family.name() == "pg_stat_user_tables_bloat_ratio" {
+            for metric in family.get_metric() {
+                let value = metric.get_gauge().value();
+                assert!(
+                    value >= 0.0 && value <= 1.0,
+                    "Bloat ratio should be between 0.0 and 1.0, got: {}",
+                    value
+                );
+            }
+        }
+        
+        if family.name() == "pg_stat_user_tables_dead_tuple_size_bytes" {
+            for metric in family.get_metric() {
+                let value = metric.get_gauge().value();
+                assert!(
+                    value >= 0.0,
+                    "Dead tuple size should be non-negative, got: {}",
+                    value
+                );
+            }
+        }
+    }
+
+    // Cleanup
+    sqlx::query("DROP TABLE IF EXISTS test_bloat")
+        .execute(&pool)
+        .await?;
+
+    pool.close().await;
+    Ok(())
+}
