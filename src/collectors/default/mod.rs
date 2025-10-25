@@ -17,6 +17,9 @@ use settings::SettingsCollector;
 pub mod postmaster;
 use postmaster::PostmasterCollector;
 
+pub mod bgwriter;
+use bgwriter::BgwriterCollector;
+
 /// DefaultCollector is an umbrella for cheap, always-on signals.
 #[derive(Clone, Default)]
 pub struct DefaultCollector {
@@ -30,6 +33,7 @@ impl DefaultCollector {
                 Arc::new(VersionCollector::new()),
                 Arc::new(SettingsCollector::new()),
                 Arc::new(PostmasterCollector::new()),
+                Arc::new(BgwriterCollector::new()),
             ],
         }
     }
