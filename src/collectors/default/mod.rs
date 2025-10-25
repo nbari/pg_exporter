@@ -20,6 +20,15 @@ use postmaster::PostmasterCollector;
 pub mod bgwriter;
 use bgwriter::BgwriterCollector;
 
+pub mod checkpointer;
+use checkpointer::CheckpointerCollector;
+
+pub mod archiver;
+use archiver::ArchiverCollector;
+
+pub mod wal;
+use wal::WalCollector;
+
 /// DefaultCollector is an umbrella for cheap, always-on signals.
 #[derive(Clone, Default)]
 pub struct DefaultCollector {
@@ -34,6 +43,9 @@ impl DefaultCollector {
                 Arc::new(SettingsCollector::new()),
                 Arc::new(PostmasterCollector::new()),
                 Arc::new(BgwriterCollector::new()),
+                Arc::new(CheckpointerCollector::new()),
+                Arc::new(ArchiverCollector::new()),
+                Arc::new(WalCollector::new()),
             ],
         }
     }
