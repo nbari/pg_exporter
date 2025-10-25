@@ -1,3 +1,3 @@
-//! Tests for locks collector (relations)
+//! Tests for locks collector
 
-mod relations;
+mod count;

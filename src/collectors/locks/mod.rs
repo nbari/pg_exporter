@@ -8,8 +8,8 @@ use std::sync::Arc;
 use tracing::{debug, info_span, instrument, warn};
 use tracing_futures::Instrument as _;
 
-pub mod relations;
-use relations::LocksSubCollector;
+pub mod count;
+use count::LocksSubCollector;
 
 #[derive(Clone, Default)]
 pub struct LocksCollector {

@@ -99,8 +99,14 @@ bump-major: check-develop check-clean update clean test
 # Internal function to handle the merge and tag process
 _deploy-merge-and-tag:
     #!/usr/bin/env bash
+    set -euo pipefail
+    
     new_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
     echo "🚀 Starting deployment for version $new_version..."
+
+    # Ensure develop is up to date
+    echo "🔄 Ensuring develop is up to date..."
+    git pull origin develop
 
     # Switch to main and merge develop
     echo "🔄 Switching to main branch..."
@@ -108,16 +114,24 @@ _deploy-merge-and-tag:
     git pull origin main
 
     echo "🔀 Merging develop into main..."
-    git merge develop
+    if ! git merge develop --no-edit; then
+        echo "❌ Merge failed! Please resolve conflicts manually."
+        git checkout develop
+        exit 1
+    fi
 
-    # Create and push tag
-    echo "🏷️  Creating tag v$new_version..."
-    git tag -a "$new_version" -m "Release version $new_version"
+    # Create signed tag
+    echo "🏷️  Creating signed tag $new_version..."
+    git tag -s "$new_version" -m "Release version $new_version"
 
-    # Push everything
-    echo "⬆️  Pushing main branch and tags..."
-    git push origin main
-    git push origin "$new_version"
+    # Push main and tag atomically
+    echo "⬆️  Pushing main branch and tag..."
+    if ! git push origin main "$new_version"; then
+        echo "❌ Push failed! Rolling back..."
+        git tag -d "$new_version"
+        git checkout develop
+        exit 1
+    fi
 
     # Switch back to develop
     echo "🔄 Switching back to develop..."
@@ -129,6 +143,7 @@ _deploy-merge-and-tag:
     echo "   - develop branch: bumped and pushed"
     echo "   - main branch: merged and pushed"
     echo "   - tag $new_version: created and pushed"
+    echo "🔗 Monitor release: https://github.com/nbari/pg_exporter/actions"
 
 # Deploy: merge to main, tag, and push everything
 deploy: bump _deploy-merge-and-tag
@@ -145,10 +160,12 @@ deploy-major: bump-major _deploy-merge-and-tag
 #   just t-deploy "optional tag message"
 t-deploy message="CI test": check-develop check-clean test
     #!/usr/bin/env bash
+    set -euo pipefail
+    
     ts="$(date -u +%Y%m%d-%H%M%S)"
     tag="t-${ts}"
 
-    echo "🏷️  Creating annotated test tag: ${tag}"
+    echo "🏷️  Creating signed test tag: ${tag}"
     git fetch --tags --quiet
 
     if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
@@ -156,7 +173,7 @@ t-deploy message="CI test": check-develop check-clean test
         exit 1
     fi
 
-    git tag -a "${tag}" -m "${message}"
+    git tag -s "${tag}" -m "${message}"
     git push origin "${tag}"
 
     echo "✅ Pushed ${tag}"
