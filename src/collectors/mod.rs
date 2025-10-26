@@ -34,6 +34,7 @@ register_collectors! {
     stat => StatCollector,
     replication => ReplicationCollector,
     index => IndexCollector,
+    statements => StatementsCollector,
     // Add more collectors here - just follow the same pattern!
 }
 

@@ -54,6 +54,48 @@ The following collectors are available:
 * `--collector.stat` [stat](src/collectors/stat/mod.rs)
 * `--collector.replication` [replication](src/collectors/replication/mod.rs)
 * `--collector.index` [index](src/collectors/index/mod.rs)
+* `--collector.statements` [statements](src/collectors/statements/mod.rs) 🔥 **NEW - Critical for DBREs**
+
+### 🔥 pg_stat_statements Collector (NEW)
+
+The `statements` collector is **THE most important tool for Database Reliability Engineers**. It tracks query performance metrics from PostgreSQL's `pg_stat_statements` extension.
+
+**Why DBREs need this:**
+- Find slow queries during incidents ("What query is killing the database?")
+- Detect N+1 query problems before they scale
+- Identify performance regressions after deployments
+- Optimize based on actual production query patterns
+- Track resource-intensive queries (I/O, WAL generation, temp files)
+
+**Prerequisites:**
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+```
+
+Add to `postgresql.conf`:
+```
+shared_preload_libraries = 'pg_stat_statements'
+pg_stat_statements.track = all
+pg_stat_statements.max = 10000
+```
+
+**Enable the collector:**
+```bash
+pg_exporter --dsn postgresql:///postgres?user=postgres_exporter --collector.statements
+```
+
+**Key Metrics Exposed:**
+- `pg_stat_statements_total_exec_time_seconds` - Total time per query
+- `pg_stat_statements_mean_exec_time_seconds` - Average time per execution
+- `pg_stat_statements_calls_total` - Execution frequency
+- `pg_stat_statements_shared_blks_read_total` - Disk reads (cache misses)
+- `pg_stat_statements_temp_blks_written_total` - Queries spilling to disk
+- `pg_stat_statements_wal_bytes_total` - WAL generation per query
+- `pg_stat_statements_cache_hit_ratio` - Query cache effectiveness
+
+---
+
+## Available collectors (continued)
 
 You can enable `--colector.<name>` or disable `--no-collector.<name>` For example,
 to disable the `vacuum` collector:

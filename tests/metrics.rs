@@ -52,6 +52,7 @@ async fn test_metrics_endpoint_with_multiple_collectors() -> Result<()> {
         "stat".to_string(),
         "replication".to_string(),
         "index".to_string(),
+        "statements".to_string(),
     ];
 
     let handle =

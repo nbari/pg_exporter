@@ -11,4 +11,5 @@ pub mod index;
 pub mod locks;
 pub mod replication;
 pub mod stat;
+pub mod statements;
 pub mod vacuum;
