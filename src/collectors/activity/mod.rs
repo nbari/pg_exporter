@@ -96,3 +96,20 @@ impl Collector for ActivityCollector {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_activity_collector_name() {
+        let collector = ActivityCollector::new();
+        assert_eq!(collector.name(), "activity");
+    }
+
+    #[test]
+    fn test_activity_collector_enabled_by_default() {
+        let collector = ActivityCollector::new();
+        assert!(collector.enabled_by_default());
+    }
+}

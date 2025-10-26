@@ -94,3 +94,20 @@ impl Collector for ReplicationCollector {
         false
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_replication_collector_name() {
+        let collector = ReplicationCollector::new();
+        assert_eq!(collector.name(), "replication");
+    }
+
+    #[test]
+    fn test_replication_collector_not_enabled_by_default() {
+        let collector = ReplicationCollector::new();
+        assert!(!collector.enabled_by_default());
+    }
+}

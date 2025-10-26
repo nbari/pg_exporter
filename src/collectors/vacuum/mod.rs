@@ -90,3 +90,20 @@ impl Collector for VacuumCollector {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vacuum_collector_name() {
+        let collector = VacuumCollector::new();
+        assert_eq!(collector.name(), "vacuum");
+    }
+
+    #[test]
+    fn test_vacuum_collector_enabled_by_default() {
+        let collector = VacuumCollector::new();
+        assert!(collector.enabled_by_default());
+    }
+}

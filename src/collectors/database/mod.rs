@@ -87,3 +87,20 @@ impl Collector for DatabaseCollector {
         false
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_database_collector_name() {
+        let collector = DatabaseCollector::new();
+        assert_eq!(collector.name(), "database");
+    }
+
+    #[test]
+    fn test_database_collector_not_enabled_by_default() {
+        let collector = DatabaseCollector::new();
+        assert!(!collector.enabled_by_default());
+    }
+}

@@ -102,3 +102,20 @@ impl Collector for DefaultCollector {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_collector_name() {
+        let collector = DefaultCollector::new();
+        assert_eq!(collector.name(), "default");
+    }
+
+    #[test]
+    fn test_default_collector_enabled_by_default() {
+        let collector = DefaultCollector::new();
+        assert!(collector.enabled_by_default());
+    }
+}

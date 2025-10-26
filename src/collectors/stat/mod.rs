@@ -75,3 +75,20 @@ impl Collector for StatCollector {
         false
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_stat_collector_name() {
+        let collector = StatCollector::new();
+        assert_eq!(collector.name(), "stat");
+    }
+
+    #[test]
+    fn test_stat_collector_not_enabled_by_default() {
+        let collector = StatCollector::new();
+        assert!(!collector.enabled_by_default());
+    }
+}

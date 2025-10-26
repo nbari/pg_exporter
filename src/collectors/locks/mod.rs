@@ -81,3 +81,20 @@ impl Collector for LocksCollector {
         false
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_locks_collector_name() {
+        let collector = LocksCollector::new();
+        assert_eq!(collector.name(), "locks");
+    }
+
+    #[test]
+    fn test_locks_collector_not_enabled_by_default() {
+        let collector = LocksCollector::new();
+        assert!(!collector.enabled_by_default());
+    }
+}
