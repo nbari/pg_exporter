@@ -8,5 +8,6 @@ pub mod activity;
 pub mod database;
 pub mod default;
 pub mod locks;
+pub mod replication;
 pub mod stat;
 pub mod vacuum;

@@ -32,6 +32,7 @@ register_collectors! {
     locks => LocksCollector,
     database => DatabaseCollector,
     stat => StatCollector,
+    replication => ReplicationCollector,
     // Add more collectors here - just follow the same pattern!
 }
 

@@ -52,6 +52,7 @@ The following collectors are available:
 * `--collector.vacuum` [vacuum](src/collectors/vacuum/mod.rs)
 * `--collector.locks` [locks](src/collectors/locks/mod.rs)
 * `--collector.stat` [stat](src/collectors/stat/mod.rs)
+* `--collector.replication` [replication](src/collectors/replication/mod.rs)
 
 You can enable `--colector.<name>` or disable `--no-collector.<name>` For example,
 to disable the `vacuum` collector:
