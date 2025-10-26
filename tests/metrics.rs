@@ -47,6 +47,11 @@ async fn test_metrics_endpoint_with_multiple_collectors() -> Result<()> {
         "default".to_string(),
         "activity".to_string(),
         "vacuum".to_string(),
+        "database".to_string(),
+        "locks".to_string(),
+        "stat".to_string(),
+        "replication".to_string(),
+        "index".to_string(),
     ];
 
     let handle =
