@@ -51,6 +51,20 @@ pub struct StatUserTablesCollector {
     // Bloat metrics (derived from tuple counts and sizes)
     bloat_ratio: GaugeVec,
     dead_tuple_size_bytes: GaugeVec,
+
+    // Autovacuum-specific metrics (Phase 1 enhancement)
+    // These metrics enable predictive alerting and prevent wraparound disasters
+    
+    // Time-based metrics (easier for alerting than epoch timestamps)
+    last_autovacuum_seconds_ago: GaugeVec,   // Alert when >86400 (24h) - table not being maintained
+    last_autoanalyze_seconds_ago: GaugeVec,  // Track analyze freshness
+    
+    // ⭐ GOLD METRICS - Predict autovacuum triggers BEFORE they happen
+    // Ratio: n_dead_tup / (threshold + scale_factor * n_live_tup)
+    // Values: 0.0=clean, 0.8=warning, 1.0=trigger point, >1.0=overdue
+    // Use these to prevent transaction ID wraparound emergencies!
+    autovacuum_threshold_ratio: GaugeVec,    // THE critical metric for autovacuum monitoring
+    autoanalyze_threshold_ratio: GaugeVec,   // Predict when autoanalyze will trigger
 }
 
 impl Default for StatUserTablesCollector {
@@ -261,6 +275,42 @@ impl StatUserTablesCollector {
         )
         .expect("pg_stat_user_tables_dead_tuple_size_bytes");
 
+        let last_autovacuum_seconds_ago = GaugeVec::new(
+            Opts::new(
+                "pg_stat_user_tables_last_autovacuum_seconds_ago",
+                "Seconds since last autovacuum (easier for alerting than timestamps)",
+            ),
+            labels,
+        )
+        .expect("pg_stat_user_tables_last_autovacuum_seconds_ago");
+
+        let last_autoanalyze_seconds_ago = GaugeVec::new(
+            Opts::new(
+                "pg_stat_user_tables_last_autoanalyze_seconds_ago",
+                "Seconds since last autoanalyze (easier for alerting than timestamps)",
+            ),
+            labels,
+        )
+        .expect("pg_stat_user_tables_last_autoanalyze_seconds_ago");
+
+        let autovacuum_threshold_ratio = GaugeVec::new(
+            Opts::new(
+                "pg_stat_user_tables_autovacuum_threshold_ratio",
+                "Ratio of dead tuples to autovacuum threshold (0.0=clean, 1.0=at threshold, >1.0=overdue)",
+            ),
+            labels,
+        )
+        .expect("pg_stat_user_tables_autovacuum_threshold_ratio");
+
+        let autoanalyze_threshold_ratio = GaugeVec::new(
+            Opts::new(
+                "pg_stat_user_tables_autoanalyze_threshold_ratio",
+                "Ratio of modified tuples to autoanalyze threshold (0.0=clean, 1.0=at threshold, >1.0=overdue)",
+            ),
+            labels,
+        )
+        .expect("pg_stat_user_tables_autoanalyze_threshold_ratio");
+
         Self {
             seq_scan,
             seq_tup_read,
@@ -285,6 +335,10 @@ impl StatUserTablesCollector {
             table_size_bytes,
             bloat_ratio,
             dead_tuple_size_bytes,
+            last_autovacuum_seconds_ago,
+            last_autoanalyze_seconds_ago,
+            autovacuum_threshold_ratio,
+            autoanalyze_threshold_ratio,
         }
     }
 }
@@ -318,6 +372,10 @@ impl Collector for StatUserTablesCollector {
         registry.register(Box::new(self.table_size_bytes.clone()))?;
         registry.register(Box::new(self.bloat_ratio.clone()))?;
         registry.register(Box::new(self.dead_tuple_size_bytes.clone()))?;
+        registry.register(Box::new(self.last_autovacuum_seconds_ago.clone()))?;
+        registry.register(Box::new(self.last_autoanalyze_seconds_ago.clone()))?;
+        registry.register(Box::new(self.autovacuum_threshold_ratio.clone()))?;
+        registry.register(Box::new(self.autoanalyze_threshold_ratio.clone()))?;
         Ok(())
     }
 
@@ -402,7 +460,23 @@ impl Collector for StatUserTablesCollector {
                                 analyze_count::bigint,
                                 autoanalyze_count::bigint,
                                 pg_indexes_size(relid)::bigint AS index_size_bytes,
-                                pg_table_size(relid)::bigint   AS table_size_bytes
+                                pg_table_size(relid)::bigint   AS table_size_bytes,
+                                COALESCE(EXTRACT(EPOCH FROM (now() - last_autovacuum)), 0) AS last_autovacuum_seconds_ago,
+                                COALESCE(EXTRACT(EPOCH FROM (now() - last_autoanalyze)), 0) AS last_autoanalyze_seconds_ago,
+                                CASE
+                                    WHEN n_live_tup > 0 THEN
+                                        n_dead_tup::float /
+                                        (current_setting('autovacuum_vacuum_threshold')::float +
+                                         current_setting('autovacuum_vacuum_scale_factor')::float * n_live_tup)
+                                    ELSE 0
+                                END AS autovacuum_threshold_ratio,
+                                CASE
+                                    WHEN n_live_tup > 0 THEN
+                                        n_mod_since_analyze::float /
+                                        (current_setting('autovacuum_analyze_threshold')::float +
+                                         current_setting('autovacuum_analyze_scale_factor')::float * n_live_tup)
+                                    ELSE 0
+                                END AS autoanalyze_threshold_ratio
                             FROM pg_stat_user_tables
                             "#,
                         )
@@ -438,7 +512,23 @@ impl Collector for StatUserTablesCollector {
                                         analyze_count::bigint,
                                         autoanalyze_count::bigint,
                                         pg_indexes_size(relid)::bigint AS index_size_bytes,
-                                        pg_table_size(relid)::bigint   AS table_size_bytes
+                                        pg_table_size(relid)::bigint   AS table_size_bytes,
+                                        COALESCE(EXTRACT(EPOCH FROM (now() - last_autovacuum)), 0) AS last_autovacuum_seconds_ago,
+                                        COALESCE(EXTRACT(EPOCH FROM (now() - last_autoanalyze)), 0) AS last_autoanalyze_seconds_ago,
+                                        CASE
+                                            WHEN n_live_tup > 0 THEN
+                                                n_dead_tup::float /
+                                                (current_setting('autovacuum_vacuum_threshold')::float +
+                                                 current_setting('autovacuum_vacuum_scale_factor')::float * n_live_tup)
+                                            ELSE 0
+                                        END AS autovacuum_threshold_ratio,
+                                        CASE
+                                            WHEN n_live_tup > 0 THEN
+                                                n_mod_since_analyze::float /
+                                                (current_setting('autovacuum_analyze_threshold')::float +
+                                                 current_setting('autovacuum_analyze_scale_factor')::float * n_live_tup)
+                                            ELSE 0
+                                        END AS autoanalyze_threshold_ratio
                                     FROM pg_stat_user_tables
                                     "#,
                                 )
@@ -515,6 +605,25 @@ impl Collector for StatUserTablesCollector {
 
                         this.bloat_ratio.with_label_values(&labels).set(bloat_ratio);
                         this.dead_tuple_size_bytes.with_label_values(&labels).set(dead_size_estimate);
+
+                        // Autovacuum-specific metrics (Phase 1 enhancement)
+                        // These provide predictive alerting and prevent wraparound disasters
+                        
+                        // Time-based metrics - easier for alerting than epoch timestamps
+                        let last_autovac_seconds_ago: f64 = row.try_get("last_autovacuum_seconds_ago").unwrap_or(0.0);
+                        let last_autoanalyze_seconds_ago: f64 = row.try_get("last_autoanalyze_seconds_ago").unwrap_or(0.0);
+                        
+                        // ⭐ GOLD METRICS - Predict autovacuum triggers BEFORE they happen
+                        // Ratio of dead/modified tuples to autovacuum threshold
+                        // Values: 0.0=clean, 0.8=warning, 1.0=trigger, >1.0=overdue
+                        // These prevent transaction ID wraparound emergencies!
+                        let autovac_threshold_ratio: f64 = row.try_get("autovacuum_threshold_ratio").unwrap_or(0.0);
+                        let autoanalyze_threshold_ratio: f64 = row.try_get("autoanalyze_threshold_ratio").unwrap_or(0.0);
+
+                        this.last_autovacuum_seconds_ago.with_label_values(&labels).set(last_autovac_seconds_ago);
+                        this.last_autoanalyze_seconds_ago.with_label_values(&labels).set(last_autoanalyze_seconds_ago);
+                        this.autovacuum_threshold_ratio.with_label_values(&labels).set(autovac_threshold_ratio);
+                        this.autoanalyze_threshold_ratio.with_label_values(&labels).set(autoanalyze_threshold_ratio);
 
                         debug!(datname=%dat, schema=%schema, table=%table, "updated pg_stat_user_tables metrics");
                     }

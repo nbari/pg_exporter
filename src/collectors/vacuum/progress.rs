@@ -14,6 +14,12 @@ pub struct VacuumProgressCollector {
     heap_vacuumed: IntGaugeVec,
     index_vacuum_count: IntGaugeVec,
     global_active: IntGauge,
+    
+    // Autovacuum-specific metrics (Phase 1 enhancement)
+    // These metrics help DBREs distinguish autovacuum from manual vacuum
+    // and detect stuck/long-running autovacuum processes
+    is_autovacuum: IntGaugeVec,      // 1=autovacuum, 0=manual vacuum
+    duration_seconds: IntGaugeVec,   // How long the vacuum has been running (detect stuck processes)
 }
 
 impl Default for VacuumProgressCollector {
@@ -60,12 +66,32 @@ impl VacuumProgressCollector {
         ))
         .expect("valid pg_vacuum_active opts");
 
+        let is_autovacuum = IntGaugeVec::new(
+            Opts::new(
+                "pg_vacuum_is_autovacuum",
+                "Whether the vacuum is an autovacuum (1) or manual (0)",
+            ),
+            &["table"],
+        )
+        .expect("valid pg_vacuum_is_autovacuum opts");
+
+        let duration_seconds = IntGaugeVec::new(
+            Opts::new(
+                "pg_vacuum_duration_seconds",
+                "How long the vacuum has been running in seconds",
+            ),
+            &["table"],
+        )
+        .expect("valid pg_vacuum_duration_seconds opts");
+
         Self {
             in_progress,
             heap_progress,
             heap_vacuumed,
             index_vacuum_count,
             global_active,
+            is_autovacuum,
+            duration_seconds,
         }
     }
 }
@@ -87,6 +113,8 @@ impl Collector for VacuumProgressCollector {
         registry.register(Box::new(self.heap_vacuumed.clone()))?;
         registry.register(Box::new(self.index_vacuum_count.clone()))?;
         registry.register(Box::new(self.global_active.clone()))?;
+        registry.register(Box::new(self.is_autovacuum.clone()))?;
+        registry.register(Box::new(self.duration_seconds.clone()))?;
         Ok(())
     }
 
@@ -113,6 +141,7 @@ impl Collector for VacuumProgressCollector {
 
             // Filter by excluded databases via LEFT JOIN on datid.
             // Keep rows with no database match (shouldn't happen) by allowing d.datname IS NULL.
+            // JOIN with pg_stat_activity to detect autovacuum and get duration
             let rows = sqlx::query(
                 r#"
                 SELECT
@@ -120,9 +149,12 @@ impl Collector for VacuumProgressCollector {
                     p.heap_blks_total,
                     p.heap_blks_scanned,
                     p.heap_blks_vacuumed,
-                    p.index_vacuum_count
+                    p.index_vacuum_count,
+                    COALESCE(a.query LIKE 'autovacuum:%', false) AS is_autovacuum,
+                    COALESCE(EXTRACT(EPOCH FROM (now() - a.xact_start))::bigint, 0) AS duration_seconds
                 FROM pg_stat_progress_vacuum p
                 LEFT JOIN pg_database d ON d.oid = p.datid
+                LEFT JOIN pg_stat_activity a ON a.pid = p.pid
                 WHERE (d.datname IS NULL OR NOT (d.datname = ANY($1)))
                 "#,
             )
@@ -141,6 +173,8 @@ impl Collector for VacuumProgressCollector {
                 self.heap_progress.with_label_values(&["none"]).set(0);
                 self.heap_vacuumed.with_label_values(&["none"]).set(0);
                 self.index_vacuum_count.with_label_values(&["none"]).set(0);
+                self.is_autovacuum.with_label_values(&["none"]).set(0);
+                self.duration_seconds.with_label_values(&["none"]).set(0);
                 self.global_active.set(0);
                 debug!("no active vacuum operations");
             } else {
@@ -152,6 +186,8 @@ impl Collector for VacuumProgressCollector {
                     let heap_scanned: i64 = row.try_get("heap_blks_scanned").unwrap_or(0);
                     let heap_vac: i64 = row.try_get("heap_blks_vacuumed").unwrap_or(0);
                     let idx_count: i64 = row.try_get("index_vacuum_count").unwrap_or(0);
+                    let is_auto: bool = row.try_get("is_autovacuum").unwrap_or(false);
+                    let duration: i64 = row.try_get("duration_seconds").unwrap_or(0);
 
                     let progress_pct_i64 = if heap_total > 0 {
                         // Round to nearest integer percent for IntGauge
@@ -170,6 +206,12 @@ impl Collector for VacuumProgressCollector {
                     self.index_vacuum_count
                         .with_label_values(&[&table])
                         .set(idx_count);
+                    self.is_autovacuum
+                        .with_label_values(&[&table])
+                        .set(if is_auto { 1 } else { 0 });
+                    self.duration_seconds
+                        .with_label_values(&[&table])
+                        .set(duration);
 
                     debug!(
                         table = %table,
@@ -178,6 +220,8 @@ impl Collector for VacuumProgressCollector {
                         heap_vacuumed = heap_vac,
                         index_vacuum_count = idx_count,
                         progress_pct = progress_pct_i64,
+                        is_autovacuum = is_auto,
+                        duration_seconds = duration,
                         "updated vacuum progress metrics"
                     );
                 }
