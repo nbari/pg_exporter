@@ -52,8 +52,16 @@ async fn test_connections_collector_has_all_metrics() -> Result<()> {
 async fn test_connections_collector_collects_from_database() -> Result<()> {
     let pool = common::create_test_pool().await?;
 
-    // Keep a connection active during the test to ensure we detect it
-    let _conn = pool.acquire().await?;
+    // Keep a connection active during the test by running a long query
+    let mut conn = pool.acquire().await?;
+    let query_handle = tokio::spawn(async move {
+        // Run a 5-second sleep query to keep connection in 'active' state
+        let _ = sqlx::query("SELECT pg_sleep(5)").execute(&mut *conn).await;
+        conn
+    });
+
+    // Give the query time to start executing
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     let collector = ConnectionsCollector::new();
     let registry = Registry::new();
@@ -63,7 +71,7 @@ async fn test_connections_collector_collects_from_database() -> Result<()> {
 
     let metric_families = registry.gather();
 
-    // Should have at least one active connection (our test connection)
+    // Should have at least one active connection (our test connection running pg_sleep)
     let active_conn = metric_families
         .iter()
         .find(|m| m.name() == "pg_stat_activity_active_connections")
@@ -86,6 +94,9 @@ async fn test_connections_collector_collects_from_database() -> Result<()> {
         "Should have at least one active connection, found: {}",
         total_connections
     );
+
+    // Clean up - wait for the query to complete
+    let _conn = query_handle.await?;
 
     pool.close().await;
     Ok(())

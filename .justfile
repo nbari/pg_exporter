@@ -100,7 +100,7 @@ bump-major: check-develop check-clean update clean test
 _deploy-merge-and-tag:
     #!/usr/bin/env bash
     set -euo pipefail
-    
+
     new_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
     echo "🚀 Starting deployment for version $new_version..."
 
@@ -161,7 +161,7 @@ deploy-major: bump-major _deploy-merge-and-tag
 t-deploy message="CI test": check-develop check-clean test
     #!/usr/bin/env bash
     set -euo pipefail
-    
+
     ts="$(date -u +%Y%m%d-%H%M%S)"
     tag="t-${ts}"
 
@@ -182,7 +182,7 @@ t-deploy message="CI test": check-develop check-clean test
 
 # Watch for changes and run
 watch:
-  cargo watch -x 'run -- --collector.vacuum --collector.activity --collector.locks --collector.database --collector.stat -v'
+  cargo watch -x 'run -- --collector.vacuum --collector.activity --collector.locks --collector.database --collector.stat --collector.replication -v'
 
 # get metrics curl
 curl:

@@ -33,6 +33,7 @@ async fn test_database_stats_has_all_metrics_after_collection() -> Result<()> {
         "pg_stat_database_xact_rollback",
         "pg_stat_database_blks_read",
         "pg_stat_database_blks_hit",
+        "pg_stat_database_blks_hit_ratio", // NEW: cache hit ratio
         "pg_stat_database_tup_returned",
         "pg_stat_database_tup_fetched",
         "pg_stat_database_tup_inserted",
@@ -161,6 +162,207 @@ async fn test_database_stats_handles_concurrent_collection() -> Result<()> {
     let (r1, r2) = tokio::join!(collector.collect(&pool), collector.collect(&pool));
     r1?;
     r2?;
+
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_database_stats_cache_hit_ratio_exists() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+
+    let collector = DatabaseStatCollector::new();
+    let registry = Registry::new();
+
+    collector.register_metrics(&registry)?;
+    collector.collect(&pool).await?;
+
+    let families = registry.gather();
+
+    // Cache hit ratio metric must exist
+    let cache_hit = families
+        .iter()
+        .find(|m| m.name() == "pg_stat_database_blks_hit_ratio")
+        .expect("pg_stat_database_blks_hit_ratio metric should exist");
+
+    assert!(
+        !cache_hit.get_metric().is_empty(),
+        "Cache hit ratio should have at least one value"
+    );
+
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_database_stats_cache_hit_ratio_range() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+
+    let collector = DatabaseStatCollector::new();
+    let registry = Registry::new();
+
+    collector.register_metrics(&registry)?;
+    collector.collect(&pool).await?;
+
+    let families = registry.gather();
+
+    // Cache hit ratio should be between 0.0 and 1.0
+    let cache_hit = families
+        .iter()
+        .find(|m| m.name() == "pg_stat_database_blks_hit_ratio")
+        .expect("pg_stat_database_blks_hit_ratio metric should exist");
+
+    for metric in cache_hit.get_metric() {
+        let value = metric.get_gauge().value();
+        assert!(
+            (0.0..=1.0).contains(&value),
+            "Cache hit ratio should be between 0.0 and 1.0, got: {}",
+            value
+        );
+    }
+
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_database_stats_cache_hit_ratio_calculation() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+
+    // Generate some activity to ensure we have actual values
+    let _ = sqlx::query("SELECT 1").execute(&pool).await?;
+
+    let collector = DatabaseStatCollector::new();
+    let registry = Registry::new();
+
+    collector.register_metrics(&registry)?;
+    collector.collect(&pool).await?;
+
+    let families = registry.gather();
+
+    // Get blks_read, blks_hit, and cache_hit_ratio
+    let blks_read_family = families
+        .iter()
+        .find(|m| m.name() == "pg_stat_database_blks_read")
+        .expect("blks_read should exist");
+
+    let blks_hit_family = families
+        .iter()
+        .find(|m| m.name() == "pg_stat_database_blks_hit")
+        .expect("blks_hit should exist");
+
+    let cache_hit_family = families
+        .iter()
+        .find(|m| m.name() == "pg_stat_database_blks_hit_ratio")
+        .expect("cache_hit_ratio should exist");
+
+    // For each database, verify the calculation
+    for metric in cache_hit_family.get_metric() {
+        let labels: Vec<_> = metric
+            .get_label()
+            .iter()
+            .map(|l| (l.name(), l.value()))
+            .collect();
+
+        let datid = labels.iter().find(|(n, _)| *n == "datid").map(|(_, v)| *v);
+        let datname = labels
+            .iter()
+            .find(|(n, _)| *n == "datname")
+            .map(|(_, v)| *v);
+
+        let cache_ratio = metric.get_gauge().value();
+
+        // Find corresponding blks_read and blks_hit
+        let blks_read = blks_read_family
+            .get_metric()
+            .iter()
+            .find(|m| {
+                let m_labels: Vec<_> = m
+                    .get_label()
+                    .iter()
+                    .map(|l| (l.name(), l.value()))
+                    .collect();
+                m_labels
+                    .iter()
+                    .any(|(n, v)| *n == "datid" && datid == Some(*v))
+            })
+            .map(|m| m.get_gauge().value())
+            .unwrap_or(0.0);
+
+        let blks_hit = blks_hit_family
+            .get_metric()
+            .iter()
+            .find(|m| {
+                let m_labels: Vec<_> = m
+                    .get_label()
+                    .iter()
+                    .map(|l| (l.name(), l.value()))
+                    .collect();
+                m_labels
+                    .iter()
+                    .any(|(n, v)| *n == "datid" && datid == Some(*v))
+            })
+            .map(|m| m.get_gauge().value())
+            .unwrap_or(0.0);
+
+        // Verify calculation: cache_hit_ratio = blks_hit / (blks_hit + blks_read)
+        let total = blks_hit + blks_read;
+        if total > 0.0 {
+            let expected_ratio = blks_hit / total;
+            let diff = (cache_ratio - expected_ratio).abs();
+            assert!(
+                diff < 0.0001, // Allow tiny floating point differences
+                "Database {:?}: cache hit ratio mismatch. Expected {}, got {}. (blks_hit={}, blks_read={})",
+                datname,
+                expected_ratio,
+                cache_ratio,
+                blks_hit,
+                blks_read
+            );
+        } else {
+            // If no blocks accessed yet, ratio should be 0.0
+            assert_eq!(
+                cache_ratio, 0.0,
+                "Database {:?}: cache hit ratio should be 0.0 when no blocks accessed",
+                datname
+            );
+        }
+    }
+
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_database_stats_cache_hit_ratio_labels() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+
+    let collector = DatabaseStatCollector::new();
+    let registry = Registry::new();
+
+    collector.register_metrics(&registry)?;
+    collector.collect(&pool).await?;
+
+    let families = registry.gather();
+
+    let cache_hit = families
+        .iter()
+        .find(|m| m.name() == "pg_stat_database_blks_hit_ratio")
+        .expect("pg_stat_database_blks_hit_ratio metric should exist");
+
+    // Verify all metrics have correct labels
+    for metric in cache_hit.get_metric() {
+        let labels: Vec<_> = metric.get_label().iter().map(|l| l.name()).collect();
+
+        assert!(
+            labels.contains(&"datid"),
+            "Cache hit ratio should have 'datid' label"
+        );
+        assert!(
+            labels.contains(&"datname"),
+            "Cache hit ratio should have 'datname' label"
+        );
+    }
 
     pool.close().await;
     Ok(())

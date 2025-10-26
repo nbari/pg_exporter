@@ -14,6 +14,9 @@ use connections::ConnectionsCollector;
 pub mod wait;
 use wait::WaitEventsCollector;
 
+pub mod queries;
+use queries::QueriesCollector;
+
 #[derive(Clone, Default)]
 pub struct ActivityCollector {
     subs: Vec<Arc<dyn Collector + Send + Sync>>,
@@ -25,6 +28,7 @@ impl ActivityCollector {
             subs: vec![
                 Arc::new(ConnectionsCollector::new()),
                 Arc::new(WaitEventsCollector::new()),
+                Arc::new(QueriesCollector::new()),
             ],
         }
     }
