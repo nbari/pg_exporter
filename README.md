@@ -48,11 +48,12 @@ The following collectors are available:
 
 * `--collector.default` [default](src/collectors/default/mod.rs)
 * `--collector.activity` [activity](src/collectors/activity/mod.rs)
-* `--collector.databases` [databases](src/collectors/databases/mod.rs)
+* `--collector.database` [database](src/collectors/database/mod.rs)
 * `--collector.vacuum` [vacuum](src/collectors/vacuum/mod.rs)
 * `--collector.locks` [locks](src/collectors/locks/mod.rs)
 * `--collector.stat` [stat](src/collectors/stat/mod.rs)
 * `--collector.replication` [replication](src/collectors/replication/mod.rs)
+* `--collector.index` [index](src/collectors/index/mod.rs)
 
 You can enable `--colector.<name>` or disable `--no-collector.<name>` For example,
 to disable the `vacuum` collector:

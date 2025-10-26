@@ -33,6 +33,7 @@ register_collectors! {
     database => DatabaseCollector,
     stat => StatCollector,
     replication => ReplicationCollector,
+    index => IndexCollector,
     // Add more collectors here - just follow the same pattern!
 }
 

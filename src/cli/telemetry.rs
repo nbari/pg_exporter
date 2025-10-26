@@ -193,3 +193,144 @@ pub fn shutdown_tracer() {
         debug!("tracer provider shutdown complete");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_headers_env_empty() {
+        let result = parse_headers_env("");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_headers_env_single() {
+        let result = parse_headers_env("key1=value1");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get("key1"), Some(&"value1".to_string()));
+    }
+
+    #[test]
+    fn test_parse_headers_env_multiple() {
+        let result = parse_headers_env("key1=value1,key2=value2,key3=value3");
+        assert_eq!(result.len(), 3);
+        assert_eq!(result.get("key1"), Some(&"value1".to_string()));
+        assert_eq!(result.get("key2"), Some(&"value2".to_string()));
+        assert_eq!(result.get("key3"), Some(&"value3".to_string()));
+    }
+
+    #[test]
+    fn test_parse_headers_env_with_spaces() {
+        let result = parse_headers_env("key1 = value1 , key2 = value2");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get("key1"), Some(&"value1".to_string()));
+        assert_eq!(result.get("key2"), Some(&"value2".to_string()));
+    }
+
+    #[test]
+    fn test_parse_headers_env_malformed() {
+        // Missing values should be filtered out
+        let result = parse_headers_env("key1=value1,malformed,key2=value2");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get("key1"), Some(&"value1".to_string()));
+        assert_eq!(result.get("key2"), Some(&"value2".to_string()));
+        assert!(!result.contains_key("malformed"));
+    }
+
+    #[test]
+    fn test_headers_to_metadata_empty() {
+        let headers = HashMap::new();
+        let result = headers_to_metadata(&headers);
+        assert!(result.is_ok());
+        let metadata = result.unwrap();
+        assert_eq!(metadata.len(), 0);
+    }
+
+    #[test]
+    fn test_headers_to_metadata_ascii() {
+        let mut headers = HashMap::new();
+        headers.insert("authorization".to_string(), "Bearer token123".to_string());
+        headers.insert("x-custom-header".to_string(), "custom-value".to_string());
+
+        let result = headers_to_metadata(&headers);
+        assert!(result.is_ok());
+        let metadata = result.unwrap();
+        assert_eq!(metadata.len(), 2);
+    }
+
+    #[test]
+    fn test_headers_to_metadata_binary() {
+        let mut headers = HashMap::new();
+        // Base64 encoded "binary data"
+        headers.insert("custom-bin".to_string(), "YmluYXJ5IGRhdGE=".to_string());
+
+        let result = headers_to_metadata(&headers);
+        assert!(result.is_ok());
+        let metadata = result.unwrap();
+        assert_eq!(metadata.len(), 1);
+    }
+
+    #[test]
+    fn test_headers_to_metadata_invalid_base64() {
+        let mut headers = HashMap::new();
+        headers.insert("custom-bin".to_string(), "not-valid-base64!!!".to_string());
+
+        let result = headers_to_metadata(&headers);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("failed to base64-decode")
+        );
+    }
+
+    #[test]
+    fn test_headers_to_metadata_mixed() {
+        let mut headers = HashMap::new();
+        headers.insert("authorization".to_string(), "Bearer token123".to_string());
+        headers.insert("custom-bin".to_string(), "YmluYXJ5IGRhdGE=".to_string());
+
+        let result = headers_to_metadata(&headers);
+        assert!(result.is_ok());
+        let metadata = result.unwrap();
+        assert_eq!(metadata.len(), 2);
+    }
+
+    #[test]
+    fn test_normalize_endpoint_http() {
+        let result = normalize_endpoint("http://localhost:4317".to_string());
+        assert_eq!(result, "http://localhost:4317");
+    }
+
+    #[test]
+    fn test_normalize_endpoint_https() {
+        let result = normalize_endpoint("https://api.example.com:4317".to_string());
+        assert_eq!(result, "https://api.example.com:4317");
+    }
+
+    #[test]
+    fn test_normalize_endpoint_no_scheme() {
+        let result = normalize_endpoint("localhost:4317".to_string());
+        assert_eq!(result, "https://localhost:4317");
+    }
+
+    #[test]
+    fn test_normalize_endpoint_trailing_slash() {
+        let result = normalize_endpoint("api.example.com:4317/".to_string());
+        assert_eq!(result, "https://api.example.com:4317");
+    }
+
+    #[test]
+    fn test_normalize_endpoint_with_path() {
+        let result = normalize_endpoint("https://api.example.com:4317/v1/traces".to_string());
+        assert_eq!(result, "https://api.example.com:4317/v1/traces");
+    }
+
+    #[test]
+    fn test_shutdown_tracer_no_provider() {
+        // Should not panic when no provider is initialized
+        shutdown_tracer();
+    }
+}
