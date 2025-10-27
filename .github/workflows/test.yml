@@ -3,6 +3,7 @@ name: Test
 
 'on':
   workflow_call:
+  workflow_dispatch:
   pull_request:
     branches:
       - '*'
@@ -115,6 +116,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
           --health-start-period 10s
+        command: >-
           -c shared_preload_libraries=pg_stat_statements
           -c pg_stat_statements.track=all
         ports:
