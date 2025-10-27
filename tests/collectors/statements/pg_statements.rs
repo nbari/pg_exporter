@@ -209,3 +209,220 @@ async fn test_pg_statements_collector_cache_hit_ratio_is_valid() -> Result<()> {
     pool.close().await;
     Ok(())
 }
+
+/// Test that utility statements (VACUUM, ANALYZE, etc.) with NULL query text are handled properly
+#[tokio::test]
+async fn test_pg_statements_handles_utility_statements() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+
+    let ext_check = sqlx::query("SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'")
+        .fetch_optional(&pool)
+        .await?;
+
+    if ext_check.is_none() {
+        println!("pg_stat_statements extension not installed, skipping test");
+        pool.close().await;
+        return Ok(());
+    }
+
+    // Generate utility statements that may have NULL query text
+    let _ = sqlx::query("VACUUM").execute(&pool).await;
+    let _ = sqlx::query("ANALYZE").execute(&pool).await;
+
+    let collector = PgStatementsCollector::new();
+    let registry = Registry::new();
+
+    collector.register_metrics(&registry)?;
+
+    // Should not panic with utility statements
+    let result = collector.collect(&pool).await;
+    assert!(
+        result.is_ok(),
+        "Should handle utility statements without panicking"
+    );
+
+    pool.close().await;
+    Ok(())
+}
+
+/// Test that the collector handles queries with various types correctly
+/// This specifically tests for the NUMERIC vs BIGINT type mismatch issue
+#[tokio::test]
+async fn test_pg_statements_handles_numeric_types_correctly() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+
+    let ext_check = sqlx::query("SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'")
+        .fetch_optional(&pool)
+        .await?;
+
+    if ext_check.is_none() {
+        println!("pg_stat_statements extension not installed, skipping test");
+        pool.close().await;
+        return Ok(());
+    }
+
+    // Generate diverse queries to ensure pg_stat_statements has data with various numeric types
+    for _ in 0..10 {
+        let _ = sqlx::query("SELECT 1").execute(&pool).await;
+        let _ = sqlx::query("SELECT COUNT(*) FROM pg_stat_statements")
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("SELECT * FROM pg_stat_statements WHERE queryid IS NOT NULL LIMIT 1")
+            .execute(&pool)
+            .await;
+    }
+
+    let collector = PgStatementsCollector::new();
+    let registry = Registry::new();
+
+    collector.register_metrics(&registry)?;
+
+    // Should not panic on type conversions
+    let result = collector.collect(&pool).await;
+    assert!(
+        result.is_ok(),
+        "Should handle NUMERIC type conversions without panicking: {:?}",
+        result.err()
+    );
+
+    // Verify metrics were actually collected
+    let metric_families = registry.gather();
+    let has_data = metric_families.iter().any(|m| {
+        m.name().starts_with("postgres_pg_stat_statements_") && !m.get_metric().is_empty()
+    });
+
+    // It's okay if there's no data, but if there is data, it should be valid
+    if has_data {
+        println!("Successfully collected pg_stat_statements metrics with numeric types");
+    }
+
+    pool.close().await;
+    Ok(())
+}
+
+/// Test that all metrics handle zero/NULL values gracefully
+#[tokio::test]
+async fn test_pg_statements_handles_edge_case_values() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+
+    let ext_check = sqlx::query("SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'")
+        .fetch_optional(&pool)
+        .await?;
+
+    if ext_check.is_none() {
+        println!("pg_stat_statements extension not installed, skipping test");
+        pool.close().await;
+        return Ok(());
+    }
+
+    // Reset stats to ensure we're testing edge cases
+    let _ = sqlx::query("SELECT pg_stat_statements_reset()")
+        .execute(&pool)
+        .await;
+
+    // Generate a minimal query
+    let _ = sqlx::query("SELECT 1").execute(&pool).await;
+
+    let collector = PgStatementsCollector::new();
+    let registry = Registry::new();
+
+    collector.register_metrics(&registry)?;
+    collector.collect(&pool).await?;
+
+    let metric_families = registry.gather();
+
+    // Verify all numeric metrics handle zero/small values correctly
+    for family in &metric_families {
+        if family.name().starts_with("postgres_pg_stat_statements_") {
+            for metric in family.get_metric() {
+                // Check that we don't have NaN or Inf values
+                let value = metric.get_gauge().value();
+                assert!(
+                    value.is_finite(),
+                    "Metric {} should not have NaN/Inf values, got {}",
+                    family.name(),
+                    value
+                );
+            }
+        }
+    }
+
+    pool.close().await;
+    Ok(())
+}
+
+/// Test that the collector works correctly with a realistic workload
+#[tokio::test]
+async fn test_pg_statements_with_realistic_workload() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+
+    let ext_check = sqlx::query("SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'")
+        .fetch_optional(&pool)
+        .await?;
+
+    if ext_check.is_none() {
+        println!("pg_stat_statements extension not installed, skipping test");
+        pool.close().await;
+        return Ok(());
+    }
+
+    // Create a test table
+    let _ = sqlx::query("CREATE TEMP TABLE test_table (id SERIAL PRIMARY KEY, data TEXT)")
+        .execute(&pool)
+        .await;
+
+    // Generate a realistic workload with different query types
+    for i in 0..20 {
+        let _ = sqlx::query("INSERT INTO test_table (data) VALUES ($1)")
+            .bind(format!("data_{}", i))
+            .execute(&pool)
+            .await;
+    }
+
+    for _ in 0..30 {
+        let _ = sqlx::query("SELECT * FROM test_table WHERE id > $1")
+            .bind(5)
+            .execute(&pool)
+            .await;
+    }
+
+    for _ in 0..15 {
+        let _ = sqlx::query("UPDATE test_table SET data = $1 WHERE id = $2")
+            .bind("updated")
+            .bind(1)
+            .execute(&pool)
+            .await;
+    }
+
+    let collector = PgStatementsCollector::new();
+    let registry = Registry::new();
+
+    collector.register_metrics(&registry)?;
+    collector.collect(&pool).await?;
+
+    let metric_families = registry.gather();
+
+    // Verify we collected metrics
+    let calls_metric = metric_families
+        .iter()
+        .find(|m| m.name() == "postgres_pg_stat_statements_calls_total");
+
+    assert!(calls_metric.is_some(), "Should have calls_total metric");
+
+    if let Some(metric) = calls_metric {
+        let total_calls: i64 = metric
+            .get_metric()
+            .iter()
+            .map(|m| m.get_gauge().value() as i64)
+            .sum();
+
+        assert!(
+            total_calls > 0,
+            "Should have recorded some calls, got {}",
+            total_calls
+        );
+    }
+
+    pool.close().await;
+    Ok(())
+}

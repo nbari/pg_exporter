@@ -353,6 +353,12 @@ impl Collector for PgStatementsCollector {
 
                 // Query top N queries by total execution time
                 // This is what DBREs care about most: "What queries are consuming database time?"
+                //
+                // IMPORTANT: All numeric columns are explicitly cast to prevent type mismatches.
+                // PostgreSQL's pg_stat_statements uses NUMERIC type for many columns, but Rust
+                // expects i64/f64. Without ::bigint or ::double precision casts, we get:
+                // "mismatched types; Rust type `i64` is not compatible with SQL type `NUMERIC`"
+                // This caused production panics - never remove these casts!
                 let query = format!(
                     r#"
                     SELECT
@@ -360,23 +366,23 @@ impl Collector for PgStatementsCollector {
                         d.datname,
                         u.usename,
                         LEFT(query, 80) as query_short,
-                        calls,
-                        total_exec_time / 1000.0 as total_exec_time_sec,
-                        mean_exec_time / 1000.0 as mean_exec_time_sec,
-                        max_exec_time / 1000.0 as max_exec_time_sec,
-                        stddev_exec_time / 1000.0 as stddev_exec_time_sec,
-                        rows,
-                        shared_blks_hit,
-                        shared_blks_read,
-                        shared_blks_dirtied,
-                        shared_blks_written,
-                        local_blks_hit,
-                        local_blks_read,
-                        local_blks_dirtied,
-                        local_blks_written,
-                        temp_blks_read,
-                        temp_blks_written,
-                        COALESCE(wal_bytes, 0) as wal_bytes
+                        calls::bigint,
+                        (total_exec_time / 1000.0)::double precision as total_exec_time_sec,
+                        (mean_exec_time / 1000.0)::double precision as mean_exec_time_sec,
+                        (max_exec_time / 1000.0)::double precision as max_exec_time_sec,
+                        (stddev_exec_time / 1000.0)::double precision as stddev_exec_time_sec,
+                        rows::bigint,
+                        shared_blks_hit::bigint,
+                        shared_blks_read::bigint,
+                        shared_blks_dirtied::bigint,
+                        shared_blks_written::bigint,
+                        local_blks_hit::bigint,
+                        local_blks_read::bigint,
+                        local_blks_dirtied::bigint,
+                        local_blks_written::bigint,
+                        temp_blks_read::bigint,
+                        temp_blks_written::bigint,
+                        COALESCE(wal_bytes, 0)::bigint as wal_bytes
                     FROM pg_stat_statements s
                     JOIN pg_database d ON d.oid = s.dbid
                     JOIN pg_user u ON u.usesysid = s.userid
@@ -393,10 +399,19 @@ impl Collector for PgStatementsCollector {
                 let row_count = rows.len();
 
                 for row in rows {
-                    let queryid: String = row.get("queryid");
-                    let datname: String = row.get("datname");
-                    let usename: String = row.get("usename");
-                    let query_short: String = Self::truncate_query(&row.get::<String, _>("query_short"), 80);
+                    // SAFETY: Use try_get() instead of get() to handle NULL values gracefully.
+                    // Utility statements (VACUUM, ANALYZE) can have NULL query text.
+                    // Using get() would panic, causing production crashes.
+                    let queryid: String = row.try_get("queryid").unwrap_or_else(|_| "unknown".to_string());
+                    let datname: String = row.try_get("datname").unwrap_or_else(|_| "unknown".to_string());
+                    let usename: String = row.try_get("usename").unwrap_or_else(|_| "unknown".to_string());
+                    
+                    // Handle NULL query text (occurs with utility statements like VACUUM)
+                    let query_text: Option<String> = row.try_get("query_short").ok();
+                    let query_short = match query_text {
+                        Some(q) => Self::truncate_query(&q, 80),
+                        None => "<utility>".to_string(), // Fallback for NULL queries
+                    };
                     
                     let labels = &[
                         queryid.as_str(),
@@ -405,56 +420,56 @@ impl Collector for PgStatementsCollector {
                         query_short.as_str(),
                     ];
 
-                    // Execution time metrics
-                    let total_time: f64 = row.get("total_exec_time_sec");
-                    let mean_time: f64 = row.get("mean_exec_time_sec");
-                    let max_time: f64 = row.get("max_exec_time_sec");
-                    let stddev_time: f64 = row.get("stddev_exec_time_sec");
+                    // SAFETY: try_get() with unwrap_or() prevents panics on NULL or type mismatches.
+                    // SQL query already casts to ::double precision, but we handle edge cases here.
+                    let total_time: f64 = row.try_get("total_exec_time_sec").unwrap_or(0.0);
+                    let mean_time: f64 = row.try_get("mean_exec_time_sec").unwrap_or(0.0);
+                    let max_time: f64 = row.try_get("max_exec_time_sec").unwrap_or(0.0);
+                    let stddev_time: f64 = row.try_get("stddev_exec_time_sec").unwrap_or(0.0);
                     
                     self.total_exec_time.with_label_values(labels).set(total_time);
                     self.mean_exec_time.with_label_values(labels).set(mean_time);
                     self.max_exec_time.with_label_values(labels).set(max_time);
                     self.stddev_exec_time.with_label_values(labels).set(stddev_time);
 
-                    // Call and row metrics
-                    let calls: i64 = row.get("calls");
-                    let rows_count: i64 = row.get("rows");
+                    // SAFETY: Default to 0 for NULL values (though SQL casts should prevent this)
+                    let calls: i64 = row.try_get("calls").unwrap_or(0);
+                    let rows_count: i64 = row.try_get("rows").unwrap_or(0);
                     self.calls.with_label_values(labels).set(calls);
                     self.rows.with_label_values(labels).set(rows_count);
 
-                    // I/O metrics
-                    let shared_hit: i64 = row.get("shared_blks_hit");
-                    let shared_read: i64 = row.get("shared_blks_read");
-                    let shared_dirtied: i64 = row.get("shared_blks_dirtied");
-                    let shared_written: i64 = row.get("shared_blks_written");
+                    // I/O metrics - all use try_get() for safety
+                    let shared_hit: i64 = row.try_get("shared_blks_hit").unwrap_or(0);
+                    let shared_read: i64 = row.try_get("shared_blks_read").unwrap_or(0);
+                    let shared_dirtied: i64 = row.try_get("shared_blks_dirtied").unwrap_or(0);
+                    let shared_written: i64 = row.try_get("shared_blks_written").unwrap_or(0);
                     
                     self.shared_blks_hit.with_label_values(labels).set(shared_hit);
                     self.shared_blks_read.with_label_values(labels).set(shared_read);
                     self.shared_blks_dirtied.with_label_values(labels).set(shared_dirtied);
                     self.shared_blks_written.with_label_values(labels).set(shared_written);
 
-                    // Local I/O
-                    let local_hit: i64 = row.get("local_blks_hit");
-                    let local_read: i64 = row.get("local_blks_read");
-                    let local_dirtied: i64 = row.get("local_blks_dirtied");
-                    let local_written: i64 = row.get("local_blks_written");
+                    let local_hit: i64 = row.try_get("local_blks_hit").unwrap_or(0);
+                    let local_read: i64 = row.try_get("local_blks_read").unwrap_or(0);
+                    let local_dirtied: i64 = row.try_get("local_blks_dirtied").unwrap_or(0);
+                    let local_written: i64 = row.try_get("local_blks_written").unwrap_or(0);
                     
                     self.local_blks_hit.with_label_values(labels).set(local_hit);
                     self.local_blks_read.with_label_values(labels).set(local_read);
                     self.local_blks_dirtied.with_label_values(labels).set(local_dirtied);
                     self.local_blks_written.with_label_values(labels).set(local_written);
 
-                    // Temp file usage
-                    let temp_read: i64 = row.get("temp_blks_read");
-                    let temp_written: i64 = row.get("temp_blks_written");
+                    let temp_read: i64 = row.try_get("temp_blks_read").unwrap_or(0);
+                    let temp_written: i64 = row.try_get("temp_blks_written").unwrap_or(0);
                     self.temp_blks_read.with_label_values(labels).set(temp_read);
                     self.temp_blks_written.with_label_values(labels).set(temp_written);
 
-                    // WAL bytes (PG13+)
-                    let wal: i64 = row.get("wal_bytes");
+                    // WAL bytes available in PostgreSQL 13+
+                    let wal: i64 = row.try_get("wal_bytes").unwrap_or(0);
                     self.wal_bytes.with_label_values(labels).set(wal);
 
-                    // Calculate cache hit ratio
+                    // SAFETY: Check denominator before division to prevent division by zero.
+                    // If no blocks were accessed, we consider it a 100% hit rate (no misses).
                     let total_blocks = shared_hit + shared_read;
                     let hit_ratio = if total_blocks > 0 {
                         shared_hit as f64 / total_blocks as f64

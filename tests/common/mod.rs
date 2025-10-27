@@ -6,9 +6,27 @@ use sqlx::PgPool;
 use std::env;
 
 /// Get the test database DSN from environment
+///
+/// SAFETY: Tests should ALWAYS run against localhost to avoid accidentally
+/// running against production databases. If PG_EXPORTER_DSN is set (e.g., in .envrc),
+/// we verify it points to localhost. Use 'just test' which handles this automatically.
 pub fn get_test_dsn() -> String {
-    env::var("PG_EXPORTER_DSN")
-        .unwrap_or_else(|_| "postgresql://postgres:postgres@localhost:5432/postgres".to_string())
+    let dsn = env::var("PG_EXPORTER_DSN")
+        .unwrap_or_else(|_| "postgresql://postgres:postgres@localhost:5432/postgres".to_string());
+
+    // Safety check: ensure we're not accidentally testing against a remote database
+    if !dsn.contains("localhost") && !dsn.contains("127.0.0.1") && !dsn.contains("::1") {
+        eprintln!("⚠️  WARNING: PG_EXPORTER_DSN points to a remote database!");
+        eprintln!("⚠️  DSN: {}", dsn.replace(char::is_alphanumeric, "*"));
+        eprintln!("⚠️  Tests should run against localhost only.");
+        eprintln!("⚠️  Use: just test (handles this automatically)");
+        eprintln!(
+            "⚠️  Or:   PG_EXPORTER_DSN='postgresql://postgres:postgres@localhost:5432/postgres' cargo test"
+        );
+        panic!("Refusing to run tests against remote database. Use localhost.");
+    }
+
+    dsn
 }
 
 /// Create a test database pool

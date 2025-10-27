@@ -115,6 +115,8 @@ jobs:
           --health-timeout 5s
           --health-retries 10
           --health-start-period 10s
+          -c shared_preload_libraries=pg_stat_statements
+          -c pg_stat_statements.track=all
         ports:
           - 5432:5432
 
@@ -146,6 +148,19 @@ jobs:
       - name: Show PostgreSQL version
         run: |
           psql -h localhost -U postgres -d postgres -c "SELECT version();"
+
+      - name: Install and configure pg_stat_statements extension
+        run: |
+          # Enable pg_stat_statements extension
+          psql -h localhost -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;"
+          
+          # Verify extension is loaded
+          psql -h localhost -U postgres -d postgres -c "SELECT extname, extversion FROM pg_extension WHERE extname = 'pg_stat_statements';"
+          
+          # Generate some test queries to populate pg_stat_statements
+          psql -h localhost -U postgres -d postgres -c "SELECT 1;"
+          psql -h localhost -U postgres -d postgres -c "SELECT current_timestamp;"
+          psql -h localhost -U postgres -d postgres -c "SELECT COUNT(*) FROM pg_stat_statements;"
 
       - name: Run tests
         env:

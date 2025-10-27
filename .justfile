@@ -7,7 +7,12 @@ default: test
 
 # Test suite
 test: clippy fmt
-  cargo test -- --nocapture
+  @echo "🧪 Running setup check..."
+  @if [ -f scripts/setup-local-test-db.sh ]; then \
+    scripts/setup-local-test-db.sh || (echo "❌ Test database setup failed. Fix the issues above before running tests." && exit 1); \
+  fi
+  @echo "🔧 Using local test database (overriding .envrc)..."
+  PG_EXPORTER_DSN="postgresql://postgres:postgres@localhost:5432/postgres" cargo test -- --nocapture
 
 # Linting
 clippy:
@@ -182,7 +187,7 @@ t-deploy message="CI test": check-develop check-clean test
 
 # Watch for changes and run
 watch:
-  cargo watch -x 'run -- --collector.vacuum --collector.activity --collector.locks --collector.database --collector.stat --collector.replication -v'
+  cargo watch -x 'run -- --collector.vacuum --collector.activity --collector.locks --collector.database --collector.stat --collector.replication --collector.index --collector.statements -v'
 
 # get metrics curl
 curl:
