@@ -149,11 +149,10 @@ jobs:
 
       - name: Install and configure pg_stat_statements extension
         run: |
-          # Configure pg_stat_statements (requires restart)
+          # Configure shared_preload_libraries (requires restart)
           psql -h localhost -U postgres -d postgres -c "ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements';"
-          psql -h localhost -U postgres -d postgres -c "ALTER SYSTEM SET pg_stat_statements.track = 'all';"
           
-          # Restart PostgreSQL container to apply settings
+          # Restart PostgreSQL container to load pg_stat_statements
           docker ps -a
           CONTAINER_ID=$(docker ps --filter "ancestor=postgres:${{ matrix.postgres }}" --format "{{.ID}}")
           echo "Restarting container $CONTAINER_ID"
@@ -162,6 +161,12 @@ jobs:
           # Wait for PostgreSQL to be ready again
           sleep 5
           timeout 30 bash -c 'until pg_isready -h localhost -p 5432 -U postgres; do sleep 1; done'
+          
+          # Now set pg_stat_statements config (extension is preloaded)
+          psql -h localhost -U postgres -d postgres -c "ALTER SYSTEM SET pg_stat_statements.track = 'all';"
+          
+          # Reload configuration
+          psql -h localhost -U postgres -d postgres -c "SELECT pg_reload_conf();"
           
           # Enable pg_stat_statements extension
           psql -h localhost -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;"
