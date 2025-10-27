@@ -488,11 +488,14 @@ impl Collector for ConnectionsCollector {
                     *idle_in_tx_aborted_map.entry(db.clone()).or_insert(0) += cnt;
                 }
 
-                // Track connections by application
-                if !app_name.is_empty() {
-                    let key = (db.clone(), app_name);
-                    *app_conn_map.entry(key).or_insert(0) += cnt;
-                }
+                // Track connections by application (use "[unknown]" for empty app names)
+                let app_label = if app_name.is_empty() {
+                    "[unknown]".to_string()
+                } else {
+                    app_name
+                };
+                let key = (db.clone(), app_label);
+                *app_conn_map.entry(key).or_insert(0) += cnt;
 
                 // Categorize idle connections by age
                 if state == "idle" {

@@ -135,7 +135,7 @@
           ]
         },
         "orientation": "auto",
-        "textMode": "value_and_name",
+        "textMode": "value",
         "colorMode": "none",
         "graphMode": "none"
       },
@@ -193,7 +193,7 @@
           ]
         },
         "orientation": "auto",
-        "textMode": "value_and_name",
+        "textMode": "value",
         "colorMode": "none",
         "graphMode": "none"
       },
@@ -274,7 +274,7 @@
           ]
         },
         "orientation": "auto",
-        "textMode": "value_and_name",
+        "textMode": "value",
         "colorMode": "background",
         "graphMode": "none"
       },
@@ -355,7 +355,7 @@
           ]
         },
         "orientation": "auto",
-        "textMode": "value_and_name",
+        "textMode": "value",
         "colorMode": "background",
         "graphMode": "none"
       },
@@ -436,7 +436,7 @@
           ]
         },
         "orientation": "auto",
-        "textMode": "value_and_name",
+        "textMode": "value",
         "colorMode": "background",
         "graphMode": "none"
       },
@@ -495,7 +495,7 @@
           ]
         },
         "orientation": "auto",
-        "textMode": "value_and_name",
+        "textMode": "value",
         "colorMode": "none",
         "graphMode": "none"
       },
@@ -554,7 +554,7 @@
           ]
         },
         "orientation": "auto",
-        "textMode": "value_and_name",
+        "textMode": "value",
         "colorMode": "none",
         "graphMode": "none"
       },
@@ -613,7 +613,7 @@
           ]
         },
         "orientation": "auto",
-        "textMode": "value_and_name",
+        "textMode": "value",
         "colorMode": "none",
         "graphMode": "none"
       },

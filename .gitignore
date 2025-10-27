@@ -7,6 +7,11 @@ db/data
 db/log
 .otel-collector-config.yml
 
+# Editor/IDE artifacts
+flycheck_*
+flycheck*.rs
+.flycheck_*
+
 # test artifacts
 /tests/tmp/
 *.db
