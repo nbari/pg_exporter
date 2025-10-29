@@ -14,6 +14,10 @@ test: clippy fmt
   @echo "🔧 Using local test database (overriding .envrc)..."
   PG_EXPORTER_DSN="postgresql://postgres:postgres@localhost:5432/postgres" cargo test -- --nocapture
 
+# Test deployment workflow validation logic (safe - no actual deployment)
+test-deploy-validation:
+  @./scripts/test-deploy-validation.sh
+
 # Linting
 clippy:
   cargo clippy --all-targets --all-features -- -D warnings

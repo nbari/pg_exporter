@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # Test script to validate deploy workflow timing and logic
-# This simulates what happens during 'just deploy'
+# 
+# Usage:
+#   ./scripts/test-deploy-validation.sh        # Run all tests
+#   ./scripts/test-deploy-validation.sh help   # Show help
+#
+# This validates the deployment safeguards work correctly for:
+#   1. Normal 'just deploy' flow (should pass)
+#   2. Accidental feature branch tags (should fail)
+#   3. Shows the workflow logic
 
 set -euo pipefail
 
@@ -10,6 +18,30 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Show help
+if [[ "${1:-}" == "help" ]] || [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
+    cat << 'EOF'
+Deploy Validation Test Script
+==============================
+
+This script tests the deployment workflow validation logic without
+actually creating tags or triggering deployments.
+
+Usage:
+  ./scripts/test-deploy-validation.sh        Run all validation tests
+  ./scripts/test-deploy-validation.sh help   Show this help
+
+What it tests:
+  1. Normal 'just deploy' flow - tag created from main
+  2. Accidental feature branch tags - should be rejected
+  3. Shows the actual workflow validation logic
+
+The script is safe to run - it only reads git state, doesn't modify anything.
+
+EOF
+    exit 0
+fi
+
 echo -e "${BLUE}🧪 Testing Deploy Workflow Validation Logic${NC}\n"
 
 # Test 1: Simulate just deploy - tag and main pushed together
@@ -17,8 +49,6 @@ echo -e "${YELLOW}Test 1: Normal 'just deploy' flow${NC}"
 echo "  Scenario: Tag and main branch pushed atomically"
 echo "  Expected: ✅ Pass"
 
-# Simulate the state after 'git push origin main v1.2.3'
-TEST_TAG="test-tag-$$"
 CURRENT_BRANCH=$(git branch --show-current)
 CURRENT_SHA=$(git rev-parse HEAD)
 
