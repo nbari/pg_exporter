@@ -92,10 +92,19 @@ pub async fn new(port: u16, dsn: SecretString, collectors: Vec<String>) -> Resul
                 .layer(Extension(registry)),
         );
 
-    let listener = TcpListener::bind(format!("::0:{port}")).await?;
+    let (listener, bind_addr) = match TcpListener::bind(format!("::0:{port}")).await {
+        Ok(l) => (l, format!("[::]:{port}")),
+        Err(_) => {
+            // If IPv6 fails, fall back to binding to IPv4 address
+            (
+                TcpListener::bind(format!("0.0.0.0:{port}")).await?,
+                format!("0.0.0.0:{port}"),
+            )
+        }
+    };
 
     println!(
-        "{} {} - Listening on [::]:{port}\n\nEnabled collectors:\n{}",
+        "{} {} - Listening on {bind_addr}\n\nEnabled collectors:\n{}",
         env!("CARGO_PKG_NAME"),
         env!("CARGO_PKG_VERSION"),
         format_list(&collectors),
