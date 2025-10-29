@@ -60,7 +60,25 @@ pub fn new() -> Command {
         .arg(
             Arg::new("dsn")
                 .long("dsn")
-                .help("Database connection string")
+                .help("PostgreSQL connection string (URL format)")
+                .long_help(
+                    "PostgreSQL connection string in URL format.\n\n\
+                     Basic formats:\n\
+                     - TCP: postgresql://user:password@host:port/database\n\
+                     - Unix socket: postgresql:///database?host=/var/run/postgresql\n\
+                     - Unix socket (short): postgresql:///postgres?user=postgres_exporter\n\n\
+                     SSL/TLS options:\n\
+                     - Require SSL: postgresql://user@host/db?sslmode=require\n\
+                     - Verify CA: postgresql://user@host/db?sslmode=verify-ca\n\
+                     - Verify full: postgresql://user@host/db?sslmode=verify-full\n\n\
+                     Examples:\n\
+                       --dsn postgresql://postgres@localhost:5432/postgres\n\
+                       --dsn postgresql://monitor:pass@db.example.com/postgres?sslmode=require\n\
+                       --dsn 'postgresql:///postgres?user=postgres_exporter'\n\
+                       --dsn 'postgresql:///postgres?host=/var/run/postgresql&user=exporter'\n\n\
+                     SSL modes: disable, allow, prefer, require, verify-ca, verify-full\n\
+                     See: https://www.postgresql.org/docs/current/libpq-connect.html"
+                )
                 .default_value("postgresql://postgres@localhost:5432/postgres")
                 .env("PG_EXPORTER_DSN")
                 .value_name("DSN"),

@@ -156,7 +156,7 @@ async fn test_exporter_bind_to_ipv6_localhost() -> Result<()> {
     // Try to connect via IPv6 localhost
     // This may fail on systems without IPv6, which is OK
     let result = tokio::net::TcpStream::connect(format!("[::1]:{}", port)).await;
-    
+
     if result.is_ok() {
         // IPv6 is available and working
         println!("✓ IPv6 localhost binding works");
@@ -184,7 +184,7 @@ async fn test_exporter_invalid_ip_address() -> Result<()> {
     .await;
 
     assert!(result.is_err(), "Should reject invalid IP address");
-    
+
     let error_msg = result.unwrap_err().to_string();
     assert!(
         error_msg.contains("Invalid IP address"),
