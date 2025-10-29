@@ -1,5 +1,12 @@
 ---
 name: Deploy
+# Safeguards:
+# - Verifies tag is from main branch (prevents accidental deploys from feature branches)
+# - Runs full test suite (format, clippy, tests on PG 16/17/18) before building
+# - Only publishes if all tests + builds pass
+#
+# Recommended: Enable branch protection on 'main' to require status checks before merge.
+# Go to: Settings → Branches → Add rule → main → Require status checks to pass
 
 on:
   push:
@@ -11,8 +18,41 @@ permissions:
   contents: write
 
 jobs:
+  verify-main-status:
+    name: Verify main branch status
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Get latest commit on main
+        id: main-commit
+        run: |
+          MAIN_SHA=$(git rev-parse main)
+          echo "sha=${MAIN_SHA}" >> $GITHUB_OUTPUT
+          echo "Main branch latest commit: ${MAIN_SHA}"
+
+      - name: Check if tag is based on main
+        run: |
+          TAG_SHA=$(git rev-parse ${GITHUB_REF#refs/tags/})
+          MAIN_SHA=${{ steps.main-commit.outputs.sha }}
+          
+          # Check if tag commit exists in main branch history
+          if ! git merge-base --is-ancestor ${TAG_SHA} ${MAIN_SHA} && [ "${TAG_SHA}" != "${MAIN_SHA}" ]; then
+            echo "::error::Tag ${GITHUB_REF#refs/tags/} is not based on the main branch"
+            echo "::error::Tag commit: ${TAG_SHA}"
+            echo "::error::Main branch: ${MAIN_SHA}"
+            exit 1
+          fi
+          
+          echo "✅ Tag is based on main branch"
+
   test:
     uses: ./.github/workflows/test.yml
+    needs: verify-main-status
 
   build:
     name: Build and release
