@@ -39,17 +39,20 @@ pub fn new() -> Command {
             Arg::new("listen")
                 .short('l')
                 .long("listen")
-                .help("IP address to bind to (defaults to auto: try IPv6, fallback to IPv4)")
+                .help("IP address to bind to (default: [::]:port, accepts both IPv6 and IPv4)")
                 .long_help(
                     "IP address to bind to:\n\
-                     - Not specified (default): Try [::]:port first, fallback to 0.0.0.0:port\n\
+                     - Not specified (default): Binds to [::]:port which accepts both IPv6 and IPv4 connections.\n\
+                       Falls back to 0.0.0.0:port if IPv6 is not available on the system.\n\
                      - Specific IPv4: e.g., '0.0.0.0', '127.0.0.1', '192.168.1.100'\n\
                      - Specific IPv6: e.g., '::', '::1', 'fe80::1'\n\n\
                      Examples:\n\
-                       --listen 0.0.0.0       Listen on all IPv4 interfaces\n\
-                       --listen 127.0.0.1     Listen on localhost IPv4 only\n\
-                       --listen ::            Listen on all IPv6 interfaces\n\
-                       --listen ::1           Listen on localhost IPv6 only",
+                       --listen 0.0.0.0       Bind to all IPv4 interfaces only\n\
+                       --listen 127.0.0.1     Bind to localhost IPv4 only\n\
+                       --listen ::            Bind to all IPv6 interfaces (typically accepts IPv4 too)\n\
+                       --listen ::1           Bind to localhost IPv6 only\n\n\
+                     Note: Binding to [::] (IPv6 all interfaces) usually accepts both IPv6 and\n\
+                     IPv4 connections through IPv4-mapped IPv6 addresses on dual-stack systems.",
                 )
                 .env("PG_EXPORTER_LISTEN")
                 .value_name("IP"),
