@@ -1,0 +1,41 @@
+# AI Assistant Rules for pg_exporter
+
+Follow all guidelines in `.github/copilot-instructions.md` and `CONTRIBUTING.md`.
+
+## Critical: Zero Tolerance for Panics
+- Always use `try_get()`, never `get()`
+- Always cast SQL numeric types explicitly (`::bigint`, `::double precision`)
+- Always check denominators before division
+- Always check extension availability with `fetch_optional()`
+
+## Code Quality Standards
+- **Formatting**: `cargo fmt --all -- --check`
+- **Linting**: `cargo clippy --all-targets --all-features -- -D warnings`
+- **Testing**: `just test` (runs clippy, fmt, and all tests)
+
+## Required Tests for New Collectors
+1. Registration test
+2. Extension availability test
+3. NULL value handling test
+4. Type conversion test
+5. Realistic workload test
+
+## Before Committing
+```bash
+just postgres                      # Start PostgreSQL
+./scripts/setup-local-test-db.sh  # Verify test database
+just test                          # Run all checks
+```
+
+## Code Style
+- Minimal comments - code should be self-documenting
+- Use `anyhow::Result` for error handling
+- Use `warn!()` for non-critical issues, `debug!()` for verbose info
+- Never panic in production code
+
+## Documentation
+See `CONTRIBUTING.md` for complete development guide and safe coding patterns.
+
+---
+
+**Remember**: Every production panic is a test we didn't write.

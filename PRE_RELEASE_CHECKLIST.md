@@ -107,5 +107,5 @@ git push origin v0.x.x
 ---
 
 **See also:**
-- [DEVELOPMENT.md](DEVELOPMENT.md) - Development guide
+- [CONTRIBUTING.md](CONTRIBUTING.md) - Development guide
 - [tests/TESTING.md](tests/TESTING.md) - Testing patterns and examples

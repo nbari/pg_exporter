@@ -61,7 +61,7 @@ fi
 
 if [ "$UNSAFE_PATTERNS" -eq 1 ]; then
     echo ""
-    echo "See DEVELOPMENT.md for safe patterns"
+    echo "See CONTRIBUTING.md for safe patterns"
     read -p "Continue anyway? (y/N): " -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
