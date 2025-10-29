@@ -36,6 +36,25 @@ pub fn new() -> Command {
                 .value_parser(clap::value_parser!(u16)),
         )
         .arg(
+            Arg::new("listen")
+                .short('l')
+                .long("listen")
+                .help("IP address to bind to (defaults to auto: try IPv6, fallback to IPv4)")
+                .long_help(
+                    "IP address to bind to:\n\
+                     - Not specified (default): Try [::]:port first, fallback to 0.0.0.0:port\n\
+                     - Specific IPv4: e.g., '0.0.0.0', '127.0.0.1', '192.168.1.100'\n\
+                     - Specific IPv6: e.g., '::', '::1', 'fe80::1'\n\n\
+                     Examples:\n\
+                       --listen 0.0.0.0       Listen on all IPv4 interfaces\n\
+                       --listen 127.0.0.1     Listen on localhost IPv4 only\n\
+                       --listen ::            Listen on all IPv6 interfaces\n\
+                       --listen ::1           Listen on localhost IPv6 only",
+                )
+                .env("PG_EXPORTER_LISTEN")
+                .value_name("IP"),
+        )
+        .arg(
             Arg::new("dsn")
                 .long("dsn")
                 .help("Database connection string")
@@ -394,5 +413,88 @@ mod tests {
             exclude_arg.is_some(),
             "Command should have 'exclude-databases' argument"
         );
+    }
+
+    #[test]
+    fn test_listen_default() {
+        temp_env::with_var("PG_EXPORTER_LISTEN", None::<String>, || {
+            let command = new();
+            let matches = command.get_matches_from(vec!["pg_exporter"]);
+            assert_eq!(matches.get_one::<String>("listen"), None);
+        });
+    }
+
+    #[test]
+    fn test_listen_ipv4_all() {
+        let command = new();
+        let matches = command.get_matches_from(vec!["pg_exporter", "--listen", "0.0.0.0"]);
+        assert_eq!(
+            matches.get_one::<String>("listen").map(|s| s.as_str()),
+            Some("0.0.0.0")
+        );
+    }
+
+    #[test]
+    fn test_listen_ipv4_localhost() {
+        let command = new();
+        let matches = command.get_matches_from(vec!["pg_exporter", "--listen", "127.0.0.1"]);
+        assert_eq!(
+            matches.get_one::<String>("listen").map(|s| s.as_str()),
+            Some("127.0.0.1")
+        );
+    }
+
+    #[test]
+    fn test_listen_ipv4_specific() {
+        let command = new();
+        let matches = command.get_matches_from(vec!["pg_exporter", "--listen", "192.168.1.100"]);
+        assert_eq!(
+            matches.get_one::<String>("listen").map(|s| s.as_str()),
+            Some("192.168.1.100")
+        );
+    }
+
+    #[test]
+    fn test_listen_ipv6_all() {
+        let command = new();
+        let matches = command.get_matches_from(vec!["pg_exporter", "--listen", "::"]);
+        assert_eq!(
+            matches.get_one::<String>("listen").map(|s| s.as_str()),
+            Some("::")
+        );
+    }
+
+    #[test]
+    fn test_listen_ipv6_localhost() {
+        let command = new();
+        let matches = command.get_matches_from(vec!["pg_exporter", "--listen", "::1"]);
+        assert_eq!(
+            matches.get_one::<String>("listen").map(|s| s.as_str()),
+            Some("::1")
+        );
+    }
+
+    #[test]
+    fn test_listen_from_env() {
+        temp_env::with_var("PG_EXPORTER_LISTEN", Some("192.168.1.1"), || {
+            let command = new();
+            let matches = command.get_matches_from(vec!["pg_exporter"]);
+            assert_eq!(
+                matches.get_one::<String>("listen").map(|s| s.as_str()),
+                Some("192.168.1.1")
+            );
+        });
+    }
+
+    #[test]
+    fn test_listen_cli_overrides_env() {
+        temp_env::with_var("PG_EXPORTER_LISTEN", Some("::1"), || {
+            let command = new();
+            let matches = command.get_matches_from(vec!["pg_exporter", "--listen", "127.0.0.1"]);
+            assert_eq!(
+                matches.get_one::<String>("listen").map(|s| s.as_str()),
+                Some("127.0.0.1")
+            );
+        });
     }
 }

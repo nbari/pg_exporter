@@ -9,7 +9,7 @@ async fn test_health_endpoint_returns_ok() -> Result<()> {
     let dsn = common::get_test_dsn_secret();
 
     let handle = tokio::spawn(async move {
-        pg_exporter::exporter::new(port, dsn, vec!["default".to_string()]).await
+        pg_exporter::exporter::new(port, None, dsn, vec!["default".to_string()]).await
     });
 
     assert!(
@@ -42,7 +42,7 @@ async fn test_health_endpoint_options_request() -> Result<()> {
     let dsn = common::get_test_dsn_secret();
 
     let handle = tokio::spawn(async move {
-        pg_exporter::exporter::new(port, dsn, vec!["default".to_string()]).await
+        pg_exporter::exporter::new(port, None, dsn, vec!["default".to_string()]).await
     });
 
     assert!(common::wait_for_server(port, 50).await);
@@ -69,7 +69,7 @@ async fn test_health_endpoint_has_x_app_header() -> Result<()> {
     let dsn = common::get_test_dsn_secret();
 
     let handle = tokio::spawn(async move {
-        pg_exporter::exporter::new(port, dsn, vec!["default".to_string()]).await
+        pg_exporter::exporter::new(port, None, dsn, vec!["default".to_string()]).await
     });
 
     assert!(common::wait_for_server(port, 50).await);

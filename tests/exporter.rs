@@ -21,7 +21,7 @@ async fn test_exporter_starts_and_stops() -> Result<()> {
     let dsn = common::get_test_dsn_secret();
 
     let handle = tokio::spawn(async move {
-        pg_exporter::exporter::new(port, dsn, vec!["default".to_string()]).await
+        pg_exporter::exporter::new(port, None, dsn, vec!["default".to_string()]).await
     });
 
     assert!(
@@ -50,7 +50,7 @@ async fn test_exporter_with_excluded_databases() -> Result<()> {
     let dsn = common::get_test_dsn_secret();
 
     let handle = tokio::spawn(async move {
-        pg_exporter::exporter::new(port, dsn, vec!["default".to_string()]).await
+        pg_exporter::exporter::new(port, None, dsn, vec!["default".to_string()]).await
     });
 
     assert!(

@@ -8,7 +8,7 @@ async fn test_metrics_endpoint_returns_prometheus_format() -> Result<()> {
     let dsn = common::get_test_dsn_secret();
 
     let handle = tokio::spawn(async move {
-        pg_exporter::exporter::new(port, dsn, vec!["default".to_string()]).await
+        pg_exporter::exporter::new(port, None, dsn, vec!["default".to_string()]).await
     });
 
     assert!(common::wait_for_server(port, 50).await);
@@ -56,7 +56,7 @@ async fn test_metrics_endpoint_with_multiple_collectors() -> Result<()> {
     ];
 
     let handle =
-        tokio::spawn(async move { pg_exporter::exporter::new(port, dsn, collectors).await });
+        tokio::spawn(async move { pg_exporter::exporter::new(port, None, dsn, collectors).await });
 
     assert!(common::wait_for_server(port, 50).await);
 
@@ -84,7 +84,7 @@ async fn test_metrics_endpoint_performance() -> Result<()> {
     let dsn = common::get_test_dsn_secret();
 
     let handle = tokio::spawn(async move {
-        pg_exporter::exporter::new(port, dsn, vec!["default".to_string()]).await
+        pg_exporter::exporter::new(port, None, dsn, vec!["default".to_string()]).await
     });
 
     assert!(common::wait_for_server(port, 50).await);

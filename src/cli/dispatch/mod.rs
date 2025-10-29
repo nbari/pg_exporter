@@ -22,6 +22,9 @@ pub fn handler(matches: &clap::ArgMatches) -> Result<Action> {
         .copied()
         .ok_or_else(|| anyhow!("Port is required. Please provide it using the --port flag."))?;
 
+    // Get the listen address (None means auto-detect)
+    let listen = matches.get_one::<String>("listen").map(|s| s.to_string());
+
     // Get the DSN or return an error
     let dsn = SecretString::from(
         matches
@@ -32,6 +35,7 @@ pub fn handler(matches: &clap::ArgMatches) -> Result<Action> {
 
     Ok(Action::Run {
         port,
+        listen,
         dsn,
         collectors: get_enabled_collectors(matches),
     })

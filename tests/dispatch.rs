@@ -26,6 +26,7 @@ fn test_handler_happy_path_sets_exclusions_and_returns_action() -> Result<()> {
 
     let Action::Run {
         port,
+        listen: _,
         dsn,
         collectors,
     } = action;

@@ -6,6 +6,7 @@ use secrecy::SecretString;
 pub enum Action {
     Run {
         port: u16,
+        listen: Option<String>,
         dsn: SecretString,
         collectors: Vec<String>,
     },

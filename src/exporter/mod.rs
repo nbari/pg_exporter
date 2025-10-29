@@ -43,7 +43,12 @@ pub const GIT_COMMIT_HASH: &str = if let Some(hash) = built_info::GIT_COMMIT_HAS
     ":-("
 };
 
-pub async fn new(port: u16, dsn: SecretString, collectors: Vec<String>) -> Result<()> {
+pub async fn new(
+    port: u16,
+    listen: Option<String>,
+    dsn: SecretString,
+    collectors: Vec<String>,
+) -> Result<()> {
     let db_dsn = dsn.expose_secret().to_string();
 
     let pool = match timeout(
@@ -92,14 +97,43 @@ pub async fn new(port: u16, dsn: SecretString, collectors: Vec<String>) -> Resul
                 .layer(Extension(registry)),
         );
 
-    let (listener, bind_addr) = match TcpListener::bind(format!("::0:{port}")).await {
-        Ok(l) => (l, format!("[::]:{port}")),
-        Err(_) => {
-            // If IPv6 fails, fall back to binding to IPv4 address
-            (
-                TcpListener::bind(format!("0.0.0.0:{port}")).await?,
-                format!("0.0.0.0:{port}"),
-            )
+    let (listener, bind_addr) = match listen {
+        Some(addr) => {
+            // Try to parse as IpAddr to validate and determine type
+            match addr.parse::<std::net::IpAddr>() {
+                Ok(ip) => {
+                    let bind_addr = format!("{ip}:{port}");
+                    (
+                        TcpListener::bind(&bind_addr)
+                            .await
+                            .with_context(|| format!("Failed to bind to {bind_addr}"))?,
+                        if ip.is_ipv6() {
+                            format!("[{ip}]:{port}")
+                        } else {
+                            bind_addr.clone()
+                        },
+                    )
+                }
+                Err(_) => {
+                    return Err(anyhow!(
+                        "Invalid IP address: '{}'. Expected IPv4 (e.g., 0.0.0.0, 127.0.0.1) or IPv6 (e.g., ::, ::1)",
+                        addr
+                    ));
+                }
+            }
+        }
+        None => {
+            // Auto: try IPv6 first, fallback to IPv4
+            match TcpListener::bind(format!("::0:{port}")).await {
+                Ok(l) => (l, format!("[::]:{port}")),
+                Err(_) => {
+                    // If IPv6 fails, fall back to binding to IPv4 address
+                    (
+                        TcpListener::bind(format!("0.0.0.0:{port}")).await?,
+                        format!("0.0.0.0:{port}"),
+                    )
+                }
+            }
         }
     };
 

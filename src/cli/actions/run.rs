@@ -7,10 +7,11 @@ pub async fn handle(action: Action) -> Result<()> {
     match action {
         Action::Run {
             port,
+            listen,
             dsn,
             collectors,
         } => {
-            new(port, dsn, collectors).await?;
+            new(port, listen, dsn, collectors).await?;
         }
     }
 
@@ -29,6 +30,7 @@ mod tests {
 
         let action = Action::Run {
             port: 9999,
+            listen: None,
             dsn: SecretString::new("postgresql://localhost/test".into()),
             collectors: vec!["default".to_string()],
         };
@@ -48,6 +50,7 @@ mod tests {
         // Test that we can create Action::Run with valid parameters
         let action = Action::Run {
             port: 9432,
+            listen: Some("127.0.0.1".to_string()),
             dsn: SecretString::new("postgresql://user@host/db".into()),
             collectors: vec!["default".to_string(), "vacuum".to_string()],
         };
@@ -55,10 +58,12 @@ mod tests {
         match action {
             Action::Run {
                 port,
+                listen,
                 dsn: _,
                 collectors,
             } => {
                 assert_eq!(port, 9432);
+                assert_eq!(listen, Some("127.0.0.1".to_string()));
                 assert_eq!(collectors.len(), 2);
                 assert!(collectors.contains(&"default".to_string()));
                 assert!(collectors.contains(&"vacuum".to_string()));
@@ -71,6 +76,7 @@ mod tests {
         // Test that Action can be created with empty collectors list
         let action = Action::Run {
             port: 8080,
+            listen: None,
             dsn: SecretString::new("postgresql://localhost/db".into()),
             collectors: vec![],
         };
