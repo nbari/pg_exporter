@@ -40,11 +40,11 @@ jobs:
           TAG_SHA=$(git rev-parse ${GITHUB_REF#refs/tags/})
           MAIN_SHA=${{ steps.main-commit.outputs.sha }}
           TAG_NAME=${GITHUB_REF#refs/tags/}
-          
+
           echo "🏷️  Tag: ${TAG_NAME}"
           echo "📍 Tag commit: ${TAG_SHA}"
           echo "🌿 Main commit: ${MAIN_SHA}"
-          
+
           # Check if tag commit is the same as main or in main's history
           if [ "${TAG_SHA}" = "${MAIN_SHA}" ]; then
             echo "✅ Tag points to latest main commit (created via 'just deploy')"
@@ -184,7 +184,7 @@ jobs:
 
       - name: Deployment Summary
         if: success()
-        run: |
+        run: |-
           echo "::notice::✅ Deployment completed successfully!"
           echo "::notice::📦 Published ${GITHUB_REF#refs/tags/} to crates.io"
           echo "::notice::🚀 GitHub release created with binaries (RPM, DEB, tar.gz)"
