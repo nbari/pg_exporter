@@ -166,6 +166,40 @@ cp scripts/pre-commit-hook.sh .git/hooks/pre-commit
 chmod +x .git/hooks/pre-commit
 ```
 
+## Git Commit Signing
+
+**CRITICAL: This project requires signed commits!**
+
+### DO NOT use --no-gpg-sign
+
+❌ **WRONG:**
+```bash
+git commit --no-gpg-sign -m "message"
+```
+
+✅ **CORRECT:**
+```bash
+git commit -m "message"  # Uses configured signing automatically
+```
+
+### Configuration
+
+The user has SSH commit signing configured:
+```bash
+git config --global commit.gpgsign true
+git config --global gpg.format ssh
+```
+
+All commits will be automatically signed with SSH. The pre-commit hook and
+branch protection will enforce this.
+
+### Why This Matters
+
+- Branch protection requires signed commits
+- Bypassing signature breaks the workflow
+- Always respect the user's signing configuration
+- Never override with --no-gpg-sign
+
 ## Common Patterns
 
 ### Collector Structure
