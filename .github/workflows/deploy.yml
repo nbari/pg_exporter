@@ -35,20 +35,30 @@ jobs:
           echo "sha=${MAIN_SHA}" >> $GITHUB_OUTPUT
           echo "Main branch latest commit: ${MAIN_SHA}"
 
-      - name: Check if tag is based on main
+      - name: Verify tag is based on main branch
         run: |
           TAG_SHA=$(git rev-parse ${GITHUB_REF#refs/tags/})
           MAIN_SHA=${{ steps.main-commit.outputs.sha }}
+          TAG_NAME=${GITHUB_REF#refs/tags/}
           
-          # Check if tag commit exists in main branch history
-          if ! git merge-base --is-ancestor ${TAG_SHA} ${MAIN_SHA} && [ "${TAG_SHA}" != "${MAIN_SHA}" ]; then
-            echo "::error::Tag ${GITHUB_REF#refs/tags/} is not based on the main branch"
+          echo "🏷️  Tag: ${TAG_NAME}"
+          echo "📍 Tag commit: ${TAG_SHA}"
+          echo "🌿 Main commit: ${MAIN_SHA}"
+          
+          # Check if tag commit is the same as main or in main's history
+          if [ "${TAG_SHA}" = "${MAIN_SHA}" ]; then
+            echo "✅ Tag points to latest main commit (created via 'just deploy')"
+          elif git merge-base --is-ancestor ${TAG_SHA} ${MAIN_SHA}; then
+            echo "✅ Tag is based on main branch history"
+          else
+            echo "::error::❌ Tag ${TAG_NAME} is not based on the main branch"
+            echo "::error::This prevents accidental deploys from feature branches"
             echo "::error::Tag commit: ${TAG_SHA}"
             echo "::error::Main branch: ${MAIN_SHA}"
+            echo "::error::"
+            echo "::error::To fix: Merge your branch to main first, then create the tag"
             exit 1
           fi
-          
-          echo "✅ Tag is based on main branch"
 
   test:
     uses: ./.github/workflows/test.yml
@@ -171,3 +181,11 @@ jobs:
       - run: cargo publish --token ${CRATES_TOKEN}
         env:
           CRATES_TOKEN: ${{ secrets.CRATES_TOKEN }}
+
+      - name: Deployment Summary
+        if: success()
+        run: |
+          echo "::notice::✅ Deployment completed successfully!"
+          echo "::notice::📦 Published ${GITHUB_REF#refs/tags/} to crates.io"
+          echo "::notice::🚀 GitHub release created with binaries (RPM, DEB, tar.gz)"
+          echo "::notice::⏱️  Total pipeline: verify → test → build → publish"
