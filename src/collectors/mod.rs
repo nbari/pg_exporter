@@ -35,6 +35,7 @@ register_collectors! {
     replication => ReplicationCollector,
     index => IndexCollector,
     statements => StatementsCollector,
+    internal => InternalCollector,
     // Add more collectors here - just follow the same pattern!
 }
 

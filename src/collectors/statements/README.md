@@ -1,14 +1,21 @@
 # pg_stat_statements Collector
 
-The `statements` collector is **the most important tool for Database Reliability Engineers**. It tracks query performance metrics from PostgreSQL's `pg_stat_statements` extension.
+The `statements` collector tracks query performance metrics from PostgreSQL's `pg_stat_statements` extension. It's one of the most powerful tools for identifying and optimizing slow queries in production.
 
-## Why DBREs Need This
+## Why This Matters
 
-- **Find slow queries during incidents** - "What query is killing the database?"
+- **Find slow queries during incidents** - "What query is causing high load?"
 - **Detect N+1 query problems** - Before they scale and impact production
 - **Identify performance regressions** - After deployments or configuration changes
 - **Optimize based on real data** - Use actual production query patterns, not guesses
 - **Track resource-intensive queries** - I/O, WAL generation, temp files
+
+This collector complements other collectors:
+- **`default`** - System-wide metrics (cache hit ratio, checkpoints, connections)
+- **`stat.user_tables`** - Table-level metrics (bloat, vacuum, DML rates)
+- **`statements`** - Query-level metrics (execution time, frequency, I/O)
+
+Together, they provide complete visibility from system → table → query level.
 
 ## Prerequisites
 
@@ -192,11 +199,11 @@ This is normal for:
 
 ## Best Practices
 
-1. **Always enable in production** - The insights are invaluable for troubleshooting
+1. **Enable in production** - Query-level insights are essential for troubleshooting
 2. **Monitor the top 50-100 queries** - Balance coverage vs cardinality
-3. **Reset stats after schema changes** - `SELECT pg_stat_statements_reset();`
+3. **Reset stats after major changes** - `SELECT pg_stat_statements_reset();` after schema migrations
 4. **Set appropriate scrape intervals** - 30-60 seconds is usually sufficient
-5. **Use with Grafana** - Visualize query patterns over time
+5. **Combine with other collectors** - Use `activity`, `stat`, and `vacuum` collectors together for complete visibility
 
 ## Example Grafana Dashboard
 

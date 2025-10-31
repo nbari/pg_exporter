@@ -1,7 +1,7 @@
 use crate::collectors::{Collector, util::get_excluded_databases};
 use anyhow::Result;
 use futures::future::BoxFuture;
-use prometheus::{IntGauge, IntGaugeVec, Opts, Registry};
+use prometheus::{GaugeVec, IntGauge, IntGaugeVec, Opts, Registry};
 use sqlx::{PgPool, Row};
 use tracing::{debug, info_span, instrument};
 use tracing_futures::Instrument as _;
@@ -10,7 +10,7 @@ use tracing_futures::Instrument as _;
 #[derive(Clone)]
 pub struct VacuumProgressCollector {
     in_progress: IntGaugeVec,
-    heap_progress: IntGaugeVec,
+    heap_progress: GaugeVec,  // Changed to GaugeVec for 0.0-1.0 ratio
     heap_vacuumed: IntGaugeVec,
     index_vacuum_count: IntGaugeVec,
     global_active: IntGauge,
@@ -39,8 +39,8 @@ impl VacuumProgressCollector {
         )
         .expect("valid pg_vacuum_in_progress opts");
 
-        let heap_progress = IntGaugeVec::new(
-            Opts::new("pg_vacuum_heap_progress", "Percent of heap blocks scanned"),
+        let heap_progress = GaugeVec::new(
+            Opts::new("pg_vacuum_heap_progress", "Progress of heap blocks scanned (0.0-1.0 ratio)"),
             &["table"],
         )
         .expect("valid pg_vacuum_heap_progress opts");
@@ -145,7 +145,7 @@ impl Collector for VacuumProgressCollector {
             let rows = sqlx::query(
                 r#"
                 SELECT
-                    p.relid::regclass::text AS table_name,
+                    COALESCE(n.nspname || '.' || c.relname, p.relid::text) AS table_name,
                     p.heap_blks_total,
                     p.heap_blks_scanned,
                     p.heap_blks_vacuumed,
@@ -153,6 +153,8 @@ impl Collector for VacuumProgressCollector {
                     COALESCE(a.query LIKE 'autovacuum:%', false) AS is_autovacuum,
                     COALESCE(EXTRACT(EPOCH FROM (now() - a.xact_start))::bigint, 0) AS duration_seconds
                 FROM pg_stat_progress_vacuum p
+                LEFT JOIN pg_class c ON c.oid = p.relid
+                LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
                 LEFT JOIN pg_database d ON d.oid = p.datid
                 LEFT JOIN pg_stat_activity a ON a.pid = p.pid
                 WHERE (d.datname IS NULL OR NOT (d.datname = ANY($1)))
@@ -170,7 +172,7 @@ impl Collector for VacuumProgressCollector {
             if rows.is_empty() {
                 // Reset "none" placeholder metrics
                 self.in_progress.with_label_values(&["none"]).set(0);
-                self.heap_progress.with_label_values(&["none"]).set(0);
+                self.heap_progress.with_label_values(&["none"]).set(0.0);
                 self.heap_vacuumed.with_label_values(&["none"]).set(0);
                 self.index_vacuum_count.with_label_values(&["none"]).set(0);
                 self.is_autovacuum.with_label_values(&["none"]).set(0);
@@ -189,17 +191,17 @@ impl Collector for VacuumProgressCollector {
                     let is_auto: bool = row.try_get("is_autovacuum").unwrap_or(false);
                     let duration: i64 = row.try_get("duration_seconds").unwrap_or(0);
 
-                    let progress_pct_i64 = if heap_total > 0 {
-                        // Round to nearest integer percent for IntGauge
-                        ((heap_scanned as f64 / heap_total as f64) * 100.0).round() as i64
+                    let progress_ratio = if heap_total > 0 {
+                        // Progress as 0.0-1.0 ratio for percentunit display
+                        heap_scanned as f64 / heap_total as f64
                     } else {
-                        0
+                        0.0
                     };
 
                     self.in_progress.with_label_values(&[&table]).set(1);
                     self.heap_progress
                         .with_label_values(&[&table])
-                        .set(progress_pct_i64);
+                        .set(progress_ratio);
                     self.heap_vacuumed
                         .with_label_values(&[&table])
                         .set(heap_vac);
@@ -219,7 +221,7 @@ impl Collector for VacuumProgressCollector {
                         heap_scanned,
                         heap_vacuumed = heap_vac,
                         index_vacuum_count = idx_count,
-                        progress_pct = progress_pct_i64,
+                        progress_ratio = %format!("{:.2}", progress_ratio),
                         is_autovacuum = is_auto,
                         duration_seconds = duration,
                         "updated vacuum progress metrics"

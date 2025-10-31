@@ -75,7 +75,8 @@
       "id": 109,
       "panels": [],
       "title": "Instance Information & Settings",
-      "type": "row"
+      "type": "row",
+      "description": "Core PostgreSQL configuration and status. Monitor version, uptime, and critical settings."
     },
     {
       "datasource": {
@@ -135,7 +136,8 @@
         }
       ],
       "title": "Version",
-      "type": "stat"
+      "type": "stat",
+      "description": "PostgreSQL version. Goal: Stay current with latest stable versions for security and performance. Action: Plan upgrades annually, test in staging first."
     },
     {
       "datasource": {
@@ -194,7 +196,8 @@
         }
       ],
       "title": "Uptime",
-      "type": "stat"
+      "type": "stat",
+      "description": "Database uptime in days. Goal: High uptime with planned maintenance windows. Action: If uptime is very low, investigate recent crashes or restarts."
     },
     {
       "datasource": {
@@ -252,7 +255,8 @@
         }
       ],
       "title": "Max Connections",
-      "type": "stat"
+      "type": "stat",
+      "description": "Maximum allowed connections from postgresql.conf. Goal: Right-sized for workload. Action: If nearing limit, increase max_connections or implement connection pooling (PgBouncer)."
     },
     {
       "datasource": {
@@ -333,7 +337,8 @@
         }
       ],
       "title": "Autovacuum",
-      "type": "stat"
+      "type": "stat",
+      "description": "Autovacuum enabled status (1=on, 0=off). Goal: Always enabled. Action: If off, enable immediately to prevent bloat and wraparound."
     },
     {
       "datasource": {
@@ -414,7 +419,8 @@
         }
       ],
       "title": "Fsync",
-      "type": "stat"
+      "type": "stat",
+      "description": "Fsync enabled status (1=on, 0=off). Goal: Always enabled for data durability. Action: Never disable in production - data loss risk."
     },
     {
       "datasource": {
@@ -554,7 +560,8 @@
         }
       ],
       "title": "Shared Buffers",
-      "type": "stat"
+      "type": "stat",
+      "description": "PostgreSQL shared buffer pool size in bytes.\n\nGOAL: 25-40% of system RAM for dedicated servers\n- Too low: Poor cache hit ratio, high disk I/O\n- Too high: Less RAM for OS cache, can hurt performance\n\nACTIONS TO IMPROVE:\n1. Increase shared_buffers if cache hit ratio is low\n2. Monitor pg_stat_bgwriter for buffer allocation\n3. Balance with effective_cache_size setting\n4. For 16GB RAM: set shared_buffers = 4-6GB"
     },
     {
       "datasource": {
@@ -685,14 +692,15 @@
       "id": 100,
       "panels": [],
       "title": "Critical Alerts - Connection Pool & Performance",
-      "type": "row"
+      "type": "row",
+      "description": "Key metrics requiring immediate attention when thresholds exceeded."
     },
     {
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Connection pool utilization ratio (0.0-1.0). Shows how close PostgreSQL is to running out of connections.\n\nFORMULA: used_connections / max_connections\n\nTHRESHOLDS:\n- Green (0.0-0.69): Healthy - plenty of connections available\n- Yellow (0.7-0.79): Warning - approaching limit, investigate\n- Red (0.8-1.0): Critical - immediate action required\n\nHOW IT WORKS:\n1. Queries pg_settings for max_connections setting (e.g., 100, 200)\n2. Counts active client backend connections from pg_stat_activity\n3. Calculates ratio: used/max\n\nWHAT TO CHECK WHEN HIGH (>80%):\n- Connection leaks: Apps not closing connections (check idle_age metrics)\n- Pool misconfiguration: Total app pools > max_connections\n- Idle-in-transaction: Connections holding locks (check idle_in_transaction metric)\n- Undersized PostgreSQL: max_connections too low for workload\n\nCOMMON CAUSES:\n- K8s: (num_pods x connections_per_pod) > max_connections\n- Connection leaks in application code\n- Long-lived idle connections (>1 hour)\n- Missing connection pooler (PgBouncer)\n\nKUBERNETES SIZING FORMULA:\nmax_connections >= (num_pods x pool_size_per_pod) + 20% buffer\n\nExample: 10 pods x 15 connections = 150 + 30 buffer = 180 minimum\n\nWhen you hit 100%, new connections fail with:\n\"FATAL: remaining connection slots are reserved for non-replication superuser connections\"\n\nUSE WITH: pg_stat_activity_connections_by_application to identify connection hogs",
+      "description": "Connection pool utilization ratio (0.0-1.0). Shows how close PostgreSQL is to running out of connections.\n\nGOAL: Stay below 70% utilization during normal operation\n- < 0.7 (70%): Healthy\n- 0.7-0.8: Monitor closely, plan capacity increase\n- > 0.8: Critical - take immediate action\n\nACTIONS TO IMPROVE:\n1. Implement connection pooling (PgBouncer, Pgpool-II)\n2. Reduce application connection pool sizes\n3. Increase max_connections (requires RAM)\n4. Fix connection leaks (check idle_age metrics)\n5. Enable idle_in_transaction_session_timeout\n\nKUBERNETES TIP: max_connections >= (num_pods \u00d7 connections_per_pod) + 20% buffer",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -977,7 +985,8 @@
       "id": 101,
       "panels": [],
       "title": "Connection Analysis & Idle Age",
-      "type": "row"
+      "type": "row",
+      "description": "Connection state analysis - identify leaks, blocks, and connection pool issues."
     },
     {
       "datasource": {
@@ -1200,6 +1209,206 @@
       "type": "timeseries"
     },
     {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Maximum transaction and query duration across all connections.\n\nGOAL: No queries running >5 minutes (adjust for workload)\n- Long transactions: Block vacuum, cause bloat\n- Long queries: May indicate missing indexes or inefficient SQL\n\nACTIONS TO IMPROVE:\n1. Identify long queries: SELECT pid, now() - xact_start, query FROM pg_stat_activity WHERE state = 'active' ORDER BY xact_start;\n2. Add missing indexes (use EXPLAIN)\n3. Optimize query logic\n4. Set statement_timeout = 30s (adjust per workload)\n5. Monitor for blocking queries\n\nMETRICS: Max transaction duration, max query duration",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 300
+              },
+              {
+                "color": "red",
+                "value": 600
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "id": 115,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "pg_stat_activity_max_tx_duration{instance=\"$instance\", datname=~\"$database\"}",
+          "legendFormat": "{{datname}} - max transaction duration",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "pg_stat_activity_max_query_duration{instance=\"$instance\", datname=~\"$database\"}",
+          "legendFormat": "{{datname}} - max query duration",
+          "refId": "B"
+        }
+      ],
+      "title": "Long-Running Queries",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Active connections by wait event type.\n\nGOAL: Understand what database is waiting on\n- Lock: Blocking queries, tune application\n- IO: Slow disk, increase shared_buffers\n- Client: Application not reading results fast\n- CPU: Heavy processing, optimize queries\n\nACTIONS TO IMPROVE:\n1. Lock waits: Enable log_lock_waits, reduce transaction time\n2. IO waits: Add indexes, increase shared_buffers, faster storage\n3. Client waits: Fix slow applications reading data\n4. Check pg_stat_activity for wait_event details\n\nQUERY: SELECT wait_event_type, wait_event, count(*) FROM pg_stat_activity WHERE wait_event IS NOT NULL GROUP BY 1,2;",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "id": 116,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "pg_stat_activity_wait_events{instance=\"$instance\", datname=~\"$database\"}",
+          "legendFormat": "{{datname}} - {{wait_event_type}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Wait Events",
+      "type": "timeseries"
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -1210,7 +1419,8 @@
       "id": 102,
       "panels": [],
       "title": "Query Performance - pg_stat_statements (Top Queries)",
-      "type": "row"
+      "type": "row",
+      "description": "Top resource-consuming queries. Requires pg_stat_statements extension. Optimize these first for maximum impact."
     },
     {
       "datasource": {
@@ -1783,7 +1993,212 @@
       "id": 103,
       "panels": [],
       "title": "Database Activity & I/O",
-      "type": "row"
+      "type": "row",
+      "description": "Write-ahead log, buffer activity, and I/O patterns. Monitor for performance bottlenecks."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Checkpoint frequency and timing.\n\nGOAL: Checkpoints spread evenly, meeting checkpoint_completion_target\n- Too frequent: Tune checkpoint_timeout, increase max_wal_size\n- Too slow: Increase shared_buffers\n\nACTIONS TO IMPROVE:\n1. Tune checkpoint_timeout (5min-30min typical)\n2. Set checkpoint_completion_target = 0.9\n3. Increase max_wal_size for write-heavy workloads\n4. Monitor checkpoint_warning in logs\n5. Balance I/O load distribution\n\nMETRICS: Timed vs requested checkpoints",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 79
+      },
+      "id": 113,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "rate(pg_stat_bgwriter_checkpoints_timed{instance=\"$instance\"}[5m])",
+          "legendFormat": "Timed checkpoints",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "rate(pg_stat_bgwriter_checkpoints_req{instance=\"$instance\"}[5m])",
+          "legendFormat": "Requested checkpoints",
+          "refId": "B"
+        }
+      ],
+      "title": "Checkpoint Activity",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "WAL archiving status (if configured).\n\nGOAL: All archives successful, no failures\n- Failed archives: Check archive_command\n- Growing failed count: Storage or network issues\n\nACTIONS TO IMPROVE:\n1. Verify archive_command is correct\n2. Check archive destination has space\n3. Test network connectivity to archive location\n4. Monitor archive_status directory growth\n5. Set archive_timeout for streaming\n\nMETRICS: Archived count vs failed count",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 79
+      },
+      "id": 114,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "rate(pg_stat_archiver_archived_count{instance=\"$instance\"}[5m])",
+          "legendFormat": "Archived",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "rate(pg_stat_archiver_failed_count{instance=\"$instance\"}[5m])",
+          "legendFormat": "Failed",
+          "refId": "B"
+        }
+      ],
+      "title": "WAL Archiver Status",
+      "type": "timeseries"
     },
     {
       "datasource": {
@@ -2329,7 +2744,8 @@
       "id": 104,
       "panels": [],
       "title": "Locks & Blocking",
-      "type": "row"
+      "type": "row",
+      "description": "Lock monitoring and blocking query detection. Goal: minimal blocking, no deadlocks."
     },
     {
       "datasource": {
@@ -2434,14 +2850,15 @@
       "id": 105,
       "panels": [],
       "title": "Vacuum & Maintenance",
-      "type": "row"
+      "type": "row",
+      "description": "Autovacuum effectiveness and table bloat monitoring. Critical for preventing bloat and wraparound."
     },
     {
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Vacuum progress by table (0-100%). Shows the percentage of heap blocks scanned during active vacuum operations. This metric tracks ongoing VACUUM operations and helps identify: - Long-running vacuum processes that may need attention - Progress of manual or autovacuum operations - Tables currently undergoing maintenance Note: Only shows data when a VACUUM operation is actively running.",
+      "description": "Vacuum progress by table (0-100%). Shows the percentage of heap blocks scanned during active vacuum operations.\n\nThis metric tracks ongoing VACUUM operations and helps identify:\n- Long-running vacuum processes that may need attention\n- Progress of manual or autovacuum operations\n- Tables currently undergoing maintenance\n\nMETRIC: pg_vacuum_heap_progress (0.0-1.0 ratio)\n- 0.0 = Just started (0%)\n- 0.5 = Half complete (50%)\n- 1.0 = Fully scanned (100%)\n\nLABEL: table = schema.table name (e.g., public.users)\n\nNote: Only shows data when a VACUUM operation is actively running. When no vacuum is active, shows \"none\" with value 0.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2629,14 +3046,15 @@
       "id": 106,
       "panels": [],
       "title": "Replication & WAL",
-      "type": "row"
+      "type": "row",
+      "description": "Replication lag and WAL generation. Monitor replica health and streaming replication status."
     },
     {
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "WAL generation rate and buffer allocation",
+      "description": "WAL generation and buffer allocation rates.\n\nGOAL: Steady pattern, no sudden spikes\n- High WAL: Write-heavy workload\n- Buffer allocation: Shared buffers turnover\n\nACTIONS TO IMPROVE:\n1. Increase shared_buffers if buffer allocation high\n2. Tune checkpoint_completion_target\n3. Monitor wal_buffers\n4. Adjust wal_writer_delay\n5. Consider archiving/replication impact\n\nMETRIC: bytes/second",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2728,7 +3146,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Background writer clean operations",
+      "description": "Background writer cleaning dirty buffers.\n\nGOAL: Proactive cleaning before backends need pages\n- High bgwriter clean rate: Good\n- High backend writes: Increase bgwriter activity\n\nACTIONS TO IMPROVE:\n1. Tune bgwriter_lru_maxpages\n2. Adjust bgwriter_lru_multiplier\n3. Reduce bgwriter_delay\n4. Monitor buffer allocation patterns\n\nMETRIC: Buffers cleaned per second",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2826,14 +3244,15 @@
       "id": 107,
       "panels": [],
       "title": "Table Statistics",
-      "type": "row"
+      "type": "row",
+      "description": "Table-level DML activity and statistics. Identify hot tables and optimization candidates."
     },
     {
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Table-level DML (Data Manipulation Language) operations per second. Tracks the rate of: - INSERT operations: New rows added to tables - UPDATE operations: Existing rows modified - DELETE operations: Rows removed from tables High rates may indicate: - Active write workload on specific tables - Potential need for autovacuum tuning - Tables that may benefit from partitioning - Candidates for index optimization Uses pg_stat_user_tables metrics with 5-minute rate calculation. Only shows tables matching the selected database filter. Note: Counter-based metrics - shows cumulative operations since last stats reset.",
+      "description": "Rate of INSERT, UPDATE, DELETE operations per second.\n\nGOAL: Monitor for patterns, optimize high-activity tables\n- High INSERT rate: Consider bulk loading, COPY\n- High UPDATE rate: May cause bloat, check HOT updates\n- High DELETE rate: Triggers vacuum, monitor bloat\n\nACTIONS TO IMPROVE:\n1. Batch operations when possible\n2. Use COPY instead of INSERT for bulk data\n3. Enable HOT updates (avoid updating indexed columns)\n4. Partition high-activity tables\n5. Tune autovacuum for write-heavy tables\n6. Monitor table_size growth\n\nWHY SHOWING NOTHING:\n- No write activity in selected databases\n- Check database filter ($database variable)\n- Metrics are rate(counter[5m]) - needs sustained activity\n- Try running: INSERT/UPDATE/DELETE on test tables",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2949,14 +3368,15 @@
       "id": 108,
       "panels": [],
       "title": "Database Size & Growth",
-      "type": "row"
+      "type": "row",
+      "description": "Database and table size trends. Plan capacity and identify growth patterns."
     },
     {
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Database size by database",
+      "description": "Total size of each database in bytes.\n\nGOAL: Monitor growth trends, plan capacity\n- Sudden growth: investigate unexpected data\n- Steady growth: normal, plan storage scaling\n\nACTIONS TO IMPROVE:\n1. Identify large tables (pg_total_relation_size)\n2. Archive old data\n3. Partition large tables\n4. Drop unused indexes\n5. Run VACUUM FULL on bloated tables (maintenance window)\n6. Consider table compression (TOAST settings)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3047,7 +3467,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Database growth rate over time",
+      "description": "Database size change rate in bytes/sec.\n\nGOAL: Predictable, steady growth\n- Spikes: Investigate bulk loads or bloat\n- Negative: VACUUM FULL or DROP operations\n\nACTIONS TO IMPROVE:\n1. Implement data retention policies\n2. Archive historical data\n3. Monitor autovacuum effectiveness\n4. Plan storage capacity 6-12 months ahead\n5. Use partitioning for time-series data",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3132,6 +3552,213 @@
         }
       ],
       "title": "Database Growth Rate",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 129
+      },
+      "id": 110,
+      "panels": [],
+      "title": "Index Performance & Unused Indexes",
+      "type": "row",
+      "description": "Index usage statistics and unused index detection. Optimize by adding missing indexes and dropping unused ones."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Index scan rate vs sequential scan rate.\n\nGOAL: High index scan rate for OLTP workloads\n- Many sequential scans: Missing indexes\n- Small tables: Sequential scans acceptable\n\nACTIONS TO IMPROVE:\n1. Identify tables with high seq_scan: SELECT relname, seq_scan, idx_scan FROM pg_stat_user_tables WHERE seq_scan > 1000;\n2. Analyze query patterns with EXPLAIN\n3. Create missing indexes\n4. Run ANALYZE to update statistics\n5. Monitor index usage after creation\n\nFORMULA: rate(pg_stat_user_indexes_idx_scan[5m])",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 130
+      },
+      "id": 111,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "rate(pg_stat_user_indexes_idx_scan{instance=\"$instance\", datname=~\"$database\"}[5m])",
+          "legendFormat": "{{datname}}.{{schemaname}}.{{indexrelname}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Index Scan Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Index cache hit ratio - percentage of index reads from memory.\n\nGOAL: >95% for active indexes\n- Low ratio: Index not in cache\n- May indicate undersized shared_buffers\n\nACTIONS TO IMPROVE:\n1. Increase shared_buffers (25-40% of RAM)\n2. Increase effective_cache_size\n3. Identify cold indexes (rarely used)\n4. Drop unused indexes to free cache\n5. Monitor pg_statio_user_indexes\n\nFORMULA: idx_blks_hit / (idx_blks_hit + idx_blks_read)",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "max": 1,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.9
+              },
+              {
+                "color": "green",
+                "value": 0.95
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 130
+      },
+      "id": 112,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "pg_statio_user_indexes_idx_blks_hit{instance=\"$instance\", datname=~\"$database\"} / (pg_statio_user_indexes_idx_blks_hit{instance=\"$instance\", datname=~\"$database\"} + pg_statio_user_indexes_idx_blks_read{instance=\"$instance\", datname=~\"$database\"})",
+          "legendFormat": "{{datname}}.{{indexrelname}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Index Cache Hit Ratio",
       "type": "timeseries"
     }
   ],
