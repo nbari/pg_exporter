@@ -74,7 +74,7 @@
       },
       "id": 109,
       "panels": [],
-      "title": "\u2139\ufe0f Instance Information & Settings",
+      "title": "Instance Information & Settings",
       "type": "row"
     },
     {
@@ -684,7 +684,7 @@
       },
       "id": 100,
       "panels": [],
-      "title": "\ud83d\udea8 Critical Alerts - Connection Pool & Performance",
+      "title": "Critical Alerts - Connection Pool & Performance",
       "type": "row"
     },
     {
@@ -692,7 +692,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Connection pool utilization ratio. Alert if >80%",
+      "description": "Connection pool utilization ratio (0.0-1.0). Shows how close PostgreSQL is to running out of connections.\n\nFORMULA: used_connections / max_connections\n\nTHRESHOLDS:\n- Green (0.0-0.69): Healthy - plenty of connections available\n- Yellow (0.7-0.79): Warning - approaching limit, investigate\n- Red (0.8-1.0): Critical - immediate action required\n\nHOW IT WORKS:\n1. Queries pg_settings for max_connections setting (e.g., 100, 200)\n2. Counts active client backend connections from pg_stat_activity\n3. Calculates ratio: used/max\n\nWHAT TO CHECK WHEN HIGH (>80%):\n- Connection leaks: Apps not closing connections (check idle_age metrics)\n- Pool misconfiguration: Total app pools > max_connections\n- Idle-in-transaction: Connections holding locks (check idle_in_transaction metric)\n- Undersized PostgreSQL: max_connections too low for workload\n\nCOMMON CAUSES:\n- K8s: (num_pods x connections_per_pod) > max_connections\n- Connection leaks in application code\n- Long-lived idle connections (>1 hour)\n- Missing connection pooler (PgBouncer)\n\nKUBERNETES SIZING FORMULA:\nmax_connections >= (num_pods x pool_size_per_pod) + 20% buffer\n\nExample: 10 pods x 15 connections = 150 + 30 buffer = 180 minimum\n\nWhen you hit 100%, new connections fail with:\n\"FATAL: remaining connection slots are reserved for non-replication superuser connections\"\n\nUSE WITH: pg_stat_activity_connections_by_application to identify connection hogs",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -752,7 +752,7 @@
           "refId": "A"
         }
       ],
-      "title": "\u26a0\ufe0f Connection Pool Utilization",
+      "title": "Connection Pool Utilization",
       "type": "gauge"
     },
     {
@@ -853,7 +853,7 @@
           "refId": "B"
         }
       ],
-      "title": "\ud83d\udd34 Idle in Transaction (Dangerous!)",
+      "title": "Idle in Transaction (Dangerous!)",
       "type": "timeseries"
     },
     {
@@ -976,7 +976,7 @@
       },
       "id": 101,
       "panels": [],
-      "title": "\ud83d\udd0c Connection Analysis & Idle Age",
+      "title": "Connection Analysis & Idle Age",
       "type": "row"
     },
     {
@@ -1209,7 +1209,7 @@
       },
       "id": 102,
       "panels": [],
-      "title": "\ud83d\udd0d Query Performance - pg_stat_statements (Top Queries)",
+      "title": "Query Performance - pg_stat_statements (Top Queries)",
       "type": "row"
     },
     {
@@ -1782,7 +1782,7 @@
       },
       "id": 103,
       "panels": [],
-      "title": "\ud83d\udcbe Database Activity & I/O",
+      "title": "Database Activity & I/O",
       "type": "row"
     },
     {
@@ -2328,7 +2328,7 @@
       },
       "id": 104,
       "panels": [],
-      "title": "\ud83d\udd12 Locks & Blocking",
+      "title": "Locks & Blocking",
       "type": "row"
     },
     {
@@ -2433,7 +2433,7 @@
       },
       "id": 105,
       "panels": [],
-      "title": "\ud83e\uddf9 Vacuum & Maintenance",
+      "title": "Vacuum & Maintenance",
       "type": "row"
     },
     {
@@ -2441,7 +2441,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Vacuum progress by table (0.0-1.0)",
+      "description": "Vacuum progress by table (0-100%). Shows the percentage of heap blocks scanned during active vacuum operations. This metric tracks ongoing VACUUM operations and helps identify: - Long-running vacuum processes that may need attention - Progress of manual or autovacuum operations - Tables currently undergoing maintenance Note: Only shows data when a VACUUM operation is actively running.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2519,8 +2519,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_vacuum_heap_progress{instance=\"$instance\", datname=~\"$database\"}",
-          "legendFormat": "{{datname}}.{{relname}}",
+          "expr": "pg_vacuum_heap_progress{instance=\"$instance\"}",
+          "legendFormat": "{{table}}",
           "refId": "A"
         }
       ],
@@ -2532,7 +2532,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Number of heap blocks vacuumed",
+      "description": "Number of heap blocks vacuumed during active vacuum operations. This metric shows the absolute count of 8KB heap blocks that have been vacuumed. Higher values indicate more aggressive vacuum activity, which may correlate with: - High table bloat - Frequent UPDATE/DELETE operations - Autovacuum threshold being reached Note: This is a point-in-time metric during active vacuum operations. Use in conjunction with 'Vacuum Progress' to understand vacuum efficiency. Formula: heap_blks_vacuumed from pg_stat_progress_vacuum",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2610,8 +2610,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_vacuum_heap_vacuumed{instance=\"$instance\", datname=~\"$database\"}",
-          "legendFormat": "{{datname}}.{{relname}}",
+          "expr": "pg_vacuum_heap_vacuumed{instance=\"$instance\"}",
+          "legendFormat": "{{table}}",
           "refId": "A"
         }
       ],
@@ -2628,7 +2628,7 @@
       },
       "id": 106,
       "panels": [],
-      "title": "\ud83d\udd04 Replication & WAL",
+      "title": "Replication & WAL",
       "type": "row"
     },
     {
@@ -2825,7 +2825,7 @@
       },
       "id": 107,
       "panels": [],
-      "title": "\ud83d\udcca Table Statistics",
+      "title": "Table Statistics",
       "type": "row"
     },
     {
@@ -2833,7 +2833,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Table-level DML operations per second",
+      "description": "Table-level DML (Data Manipulation Language) operations per second. Tracks the rate of: - INSERT operations: New rows added to tables - UPDATE operations: Existing rows modified - DELETE operations: Rows removed from tables High rates may indicate: - Active write workload on specific tables - Potential need for autovacuum tuning - Tables that may benefit from partitioning - Candidates for index optimization Uses pg_stat_user_tables metrics with 5-minute rate calculation. Only shows tables matching the selected database filter. Note: Counter-based metrics - shows cumulative operations since last stats reset.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2948,7 +2948,7 @@
       },
       "id": 108,
       "panels": [],
-      "title": "\ud83d\udcbd Database Size & Growth",
+      "title": "Database Size & Growth",
       "type": "row"
     },
     {
@@ -3241,5 +3241,6 @@
   "title": "PostgreSQL Monitoring Dashboard",
   "uid": "pg_exporter_monitoring",
   "version": 1,
-  "weekStart": ""
+  "weekStart": "",
+  "description": "PostgreSQL Performance Monitoring Dashboard This dashboard provides comprehensive monitoring for PostgreSQL databases using pg_exporter metrics. KEY SECTIONS: - Instance Information: PostgreSQL version, settings, and uptime - Critical Alerts: Connection pool utilization and performance warnings - Connection Analysis: Active connections, idle transactions, and connection age - Query Performance: Top queries by execution time, calls, and I/O (requires pg_stat_statements extension) - Cache & I/O: Buffer cache hit ratios, shared buffers, and I/O operations - Locks & Blocking: Lock monitoring and blocking query detection - Vacuum & Maintenance: Autovacuum activity, table bloat, and maintenance statistics - Replication & WAL: Replication lag and WAL generation (if replication is configured) - Table Statistics: DML operations and table-level activity - Database Size: Database growth and size trends REQUIREMENTS: - PostgreSQL 12+ recommended - pg_stat_statements extension enabled for query performance metrics - Appropriate monitoring user permissions For more information, visit: https://github.com/nbari/pg_exporter"
 }
