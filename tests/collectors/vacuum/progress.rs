@@ -33,6 +33,8 @@ async fn test_vacuum_progress_collector_has_all_metrics_after_collection() -> Re
         "pg_vacuum_heap_vacuumed",
         "pg_vacuum_index_vacuum_count",
         "pg_vacuum_active",
+        "pg_vacuum_is_autovacuum",
+        "pg_vacuum_duration_seconds",
     ];
 
     for metric_name in expected_metrics {
@@ -82,7 +84,7 @@ async fn test_vacuum_progress_collector_handles_no_active_vacuums() -> Result<()
 }
 
 #[tokio::test]
-async fn test_vacuum_progress_collector_metrics_have_table_labels() -> Result<()> {
+async fn test_vacuum_progress_collector_metrics_have_database_and_table_labels() -> Result<()> {
     let pool = common::create_test_pool().await?;
 
     let collector = VacuumProgressCollector::new();
@@ -93,7 +95,7 @@ async fn test_vacuum_progress_collector_metrics_have_table_labels() -> Result<()
 
     let metric_families = registry.gather();
 
-    // Check that table-level metrics have "table" label
+    // Check that table-level metrics have both "database" and "table" labels
     let table_metrics = vec![
         "pg_vacuum_in_progress",
         "pg_vacuum_heap_progress",
@@ -103,9 +105,15 @@ async fn test_vacuum_progress_collector_metrics_have_table_labels() -> Result<()
 
     for metric_name in table_metrics {
         if let Some(metric_family) = metric_families.iter().find(|m| m.name() == metric_name) {
-            // If there are metrics, they should have a "table" label
+            // If there are metrics, they should have "database" and "table" labels
             for metric in metric_family.get_metric() {
+                let has_database_label = metric.get_label().iter().any(|l| l.name() == "database");
                 let has_table_label = metric.get_label().iter().any(|l| l.name() == "table");
+                assert!(
+                    has_database_label,
+                    "Metric {} should have 'database' label",
+                    metric_name
+                );
                 assert!(
                     has_table_label,
                     "Metric {} should have 'table' label",
@@ -207,6 +215,144 @@ async fn test_vacuum_progress_collector_handles_concurrent_collection() -> Resul
     r1?;
     r2?;
     r3?;
+
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vacuum_progress_collector_captures_actual_vacuum() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+
+    // Create a test table with data (split into separate statements)
+    sqlx::query("DROP TABLE IF EXISTS test_vacuum_progress_table")
+        .execute(&pool)
+        .await?;
+
+    sqlx::query(
+        "CREATE TABLE test_vacuum_progress_table (
+            id SERIAL PRIMARY KEY,
+            data TEXT
+        )",
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO test_vacuum_progress_table (data)
+        SELECT 'test_data_' || generate_series(1, 1000)",
+    )
+    .execute(&pool)
+    .await?;
+
+    let collector = VacuumProgressCollector::new();
+    let registry = Registry::new();
+    collector.register_metrics(&registry)?;
+
+    // Spawn a vacuum in a separate task (it will run for a moment)
+    let pool_clone = pool.clone();
+    let vacuum_task = tokio::spawn(async move {
+        // VACUUM VERBOSE to make it take longer
+        let _ = sqlx::query("VACUUM (VERBOSE) test_vacuum_progress_table")
+            .execute(&pool_clone)
+            .await;
+    });
+
+    // Give vacuum a moment to start
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    // Collect metrics while vacuum might be running
+    collector.collect(&pool).await?;
+
+    let metric_families = registry.gather();
+
+    // Check that we have the database label with value "postgres"
+    let in_progress_metric = metric_families
+        .iter()
+        .find(|m| m.name() == "pg_vacuum_in_progress");
+
+    if let Some(metric_family) = in_progress_metric {
+        for metric in metric_family.get_metric() {
+            let database_label = metric
+                .get_label()
+                .iter()
+                .find(|l| l.name() == "database")
+                .map(|l| l.value());
+
+            // If we caught a vacuum in progress, verify database label exists
+            if let Some(db) = database_label {
+                // Should have database label set to "postgres" or "none"
+                assert!(
+                    db == "postgres" || db == "none",
+                    "Database label should be 'postgres' or 'none', got: {}",
+                    db
+                );
+            }
+        }
+    }
+
+    // Wait for vacuum to complete
+    let _ = vacuum_task.await;
+
+    // Clean up
+    sqlx::query("DROP TABLE IF EXISTS test_vacuum_progress_table")
+        .execute(&pool)
+        .await?;
+
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vacuum_progress_collector_database_label_format() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+
+    let collector = VacuumProgressCollector::new();
+    let registry = Registry::new();
+
+    collector.register_metrics(&registry)?;
+    collector.collect(&pool).await?;
+
+    let metric_families = registry.gather();
+
+    // Verify that all vacuum metrics have properly formatted labels
+    let vacuum_metrics = vec![
+        "pg_vacuum_in_progress",
+        "pg_vacuum_heap_progress",
+        "pg_vacuum_heap_vacuumed",
+        "pg_vacuum_index_vacuum_count",
+        "pg_vacuum_is_autovacuum",
+        "pg_vacuum_duration_seconds",
+    ];
+
+    for metric_name in vacuum_metrics {
+        if let Some(metric_family) = metric_families.iter().find(|m| m.name() == metric_name) {
+            for metric in metric_family.get_metric() {
+                let labels: Vec<_> = metric.get_label().iter().map(|l| l.name()).collect();
+
+                // Should have exactly database and table labels (in that order)
+                assert_eq!(
+                    labels.len(),
+                    2,
+                    "Metric {} should have exactly 2 labels, got: {:?}",
+                    metric_name,
+                    labels
+                );
+
+                assert_eq!(
+                    labels[0], "database",
+                    "First label should be 'database' for metric {}",
+                    metric_name
+                );
+
+                assert_eq!(
+                    labels[1], "table",
+                    "Second label should be 'table' for metric {}",
+                    metric_name
+                );
+            }
+        }
+    }
 
     pool.close().await;
     Ok(())

@@ -37,11 +37,7 @@ pub mod built_info {
     include!(concat!(env!("OUT_DIR"), "/built.rs"));
 }
 
-pub const GIT_COMMIT_HASH: &str = if let Some(hash) = built_info::GIT_COMMIT_HASH {
-    hash
-} else {
-    ":-("
-};
+pub const GIT_COMMIT_HASH: Option<&str> = built_info::GIT_COMMIT_HASH;
 
 pub async fn new(
     port: u16,
@@ -267,22 +263,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_git_commit_hash_exists() {
-        // GIT_COMMIT_HASH is a compile-time constant, either a git hash or ":-("
-        // We can verify it's one of the expected patterns
-        assert!(
-            GIT_COMMIT_HASH.len() >= 3,
-            "Git commit hash should be at least 3 chars (even ':-(' is 3 chars)"
-        );
-
-        // It should be either a hex string (git hash) or the fallback
-        let is_hex = GIT_COMMIT_HASH.chars().all(|c| c.is_ascii_hexdigit());
-        let is_fallback = GIT_COMMIT_HASH == ":-(";
-
-        assert!(
-            is_hex || is_fallback,
-            "Git commit hash should be hex digits or the fallback ':-(' pattern"
-        );
+    fn test_git_commit_hash_is_valid_if_present() {
+        // GIT_COMMIT_HASH is an Option - either Some(hash) or None
+        if let Some(hash) = GIT_COMMIT_HASH {
+            // If present, should be a valid git hash (hex string)
+            assert!(
+                hash.len() >= 7,
+                "Git commit hash should be at least 7 chars, got: {}",
+                hash
+            );
+            assert!(
+                hash.chars().all(|c| c.is_ascii_hexdigit()),
+                "Git commit hash should be hex digits, got: {}",
+                hash
+            );
+        } else {
+            // None is valid when not built from git (e.g., cargo install from crates.io)
+            println!("No git commit hash available (normal for crates.io installs)");
+        }
     }
 
     #[test]

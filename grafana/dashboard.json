@@ -65,12 +65,858 @@
   "liveNow": false,
   "panels": [
     {
-      "collapsed": false,
+      "collapsed": true,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 0
+      },
+      "id": 200,
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "CPU usage of the pg_exporter process itself. Monitor exporter resource consumption.\n\nGOAL: Low CPU usage (< 5% on dedicated scrape intervals)\n\nACTIONS IF HIGH:\n1. Reduce scrape frequency in Prometheus\n2. Disable expensive collectors\n3. Optimize database queries\n4. Check for slow collectors in scrape duration metrics",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 50
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              },
+              "unit": "percent"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 0,
+            "y": 1
+          },
+          "id": 201,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "mean",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "rate(pg_exporter_process_cpu_seconds_total{instance=\"$instance\"}[5m]) * 100",
+              "legendFormat": "CPU Usage %",
+              "refId": "A"
+            }
+          ],
+          "title": "Exporter CPU Usage",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Memory usage of the pg_exporter process (RSS = Resident Set Size).\n\nGOAL: Stable memory usage, no memory leaks\n\nACTIONS IF INCREASING:\n1. Check for memory leaks in exporter\n2. Reduce number of collectors\n3. Check metric cardinality (see Total Metrics panel)",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 8,
+            "y": 1
+          },
+          "id": 202,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "mean",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_exporter_process_resident_memory_bytes{instance=\"$instance\"}",
+              "legendFormat": "Resident Memory (RSS)",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_exporter_process_virtual_memory_bytes{instance=\"$instance\"}",
+              "legendFormat": "Virtual Memory (VSZ)",
+              "refId": "B"
+            }
+          ],
+          "title": "Exporter Memory Usage",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Total number of metrics currently exported by pg_exporter.\n\nGOAL: Keep cardinality under your monitoring platform limits\n- Cortex/Mimir: Often have strict series limits\n- Prometheus: High cardinality = high memory usage\n\nACTIONS IF TOO HIGH:\n1. Disable unnecessary collectors\n2. Filter databases (use PG_EXPORTER_EXCLUDE_DATABASES)\n3. Review metric labels for high cardinality\n4. Check for label explosion (many tables/databases)",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 5000
+                  },
+                  {
+                    "color": "red",
+                    "value": 10000
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 16,
+            "y": 1
+          },
+          "id": 203,
+          "options": {
+            "reduceOptions": {
+              "values": false,
+              "fields": "",
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "orientation": "auto",
+            "textMode": "value_and_name",
+            "colorMode": "background",
+            "graphMode": "area",
+            "justifyMode": "auto"
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_exporter_metrics_total{instance=\"$instance\"}",
+              "refId": "A"
+            }
+          ],
+          "title": "Total Metrics Exported",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Scrape duration per collector - identify slow collectors.\n\nGOAL: All collectors scrape in <500ms\n\nACTIONS IF SLOW:\n1. Check specific collector (see legend)\n2. Optimize queries for slow collector\n3. Check database performance\n4. Consider disabling expensive collectors\n\nUSE: histogram_quantile for percentiles (p50, p95, p99)",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 0.5
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 9
+          },
+          "id": 204,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "mean",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "histogram_quantile(0.99, rate(pg_exporter_collector_scrape_duration_seconds_bucket{instance=\"$instance\"}[5m]))",
+              "legendFormat": "{{collector}} - p99",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "histogram_quantile(0.95, rate(pg_exporter_collector_scrape_duration_seconds_bucket{instance=\"$instance\"}[5m]))",
+              "legendFormat": "{{collector}} - p95",
+              "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "histogram_quantile(0.50, rate(pg_exporter_collector_scrape_duration_seconds_bucket{instance=\"$instance\"}[5m]))",
+              "legendFormat": "{{collector}} - p50",
+              "refId": "C"
+            }
+          ],
+          "title": "Collector Scrape Duration (Percentiles)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Failed collector scrapes over time. Should always be zero.\n\nGOAL: Zero errors\n\nACTIONS IF > 0:\n1. Check pg_exporter logs for errors\n2. Verify database connectivity\n3. Check collector-specific requirements (extensions, permissions)\n4. Review error pattern per collector",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "normal"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 9
+          },
+          "id": 205,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "sum"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "rate(pg_exporter_collector_scrape_errors_total{instance=\"$instance\"}[5m])",
+              "legendFormat": "{{collector}} errors/sec",
+              "refId": "A"
+            }
+          ],
+          "title": "Collector Scrape Errors",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Success/failure status of last scrape per collector.\n\nGOAL: All collectors showing 1 (success)\n\nACTIONS IF 0:\n1. Check pg_exporter logs\n2. Verify database connectivity\n3. Check collector requirements (extensions, permissions)",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [
+                {
+                  "options": {
+                    "0": {
+                      "text": "FAILED",
+                      "color": "red"
+                    }
+                  },
+                  "type": "value"
+                },
+                {
+                  "options": {
+                    "1": {
+                      "text": "SUCCESS",
+                      "color": "green"
+                    }
+                  },
+                  "type": "value"
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 6,
+            "x": 0,
+            "y": 17
+          },
+          "id": 206,
+          "options": {
+            "reduceOptions": {
+              "values": false,
+              "fields": "",
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "orientation": "auto",
+            "textMode": "value_and_name",
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto"
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_exporter_collector_last_scrape_success{instance=\"$instance\"}",
+              "legendFormat": "{{collector}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Collector Health Status",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Last scrape timestamp for each collector. Detect stale collectors.\n\nGOAL: All collectors scraped recently (< 2 minutes ago)\n\nACTIONS IF STALE:\n1. Check if collector is stuck\n2. Review pg_exporter logs\n3. Verify Prometheus is scraping regularly",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": -300
+                  },
+                  {
+                    "color": "green",
+                    "value": -120
+                  }
+                ]
+              },
+              "unit": "dateTimeFromNow"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 6,
+            "x": 6,
+            "y": 17
+          },
+          "id": 207,
+          "options": {
+            "reduceOptions": {
+              "values": false,
+              "fields": "",
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "orientation": "auto",
+            "textMode": "value_and_name",
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto"
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_exporter_collector_last_scrape_timestamp_seconds{instance=\"$instance\"} * 1000",
+              "legendFormat": "{{collector}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Last Scrape Time",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Total scrapes performed since exporter start. Validates exporter is active.\n\nGOAL: Steadily increasing\n\nACTIONS IF FLAT:\n1. Check Prometheus is scraping the endpoint\n2. Verify pg_exporter is running\n3. Check network connectivity",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 6,
+            "x": 12,
+            "y": 17
+          },
+          "id": 208,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "mean"
+              ],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": false
+            },
+            "tooltip": {
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_exporter_scrapes_total{instance=\"$instance\"}",
+              "legendFormat": "Total Scrapes",
+              "refId": "A"
+            }
+          ],
+          "title": "Total Scrapes",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Process resource metrics: threads, file descriptors, uptime.\n\nGOAL: Stable values\n\nACTIONS IF INCREASING:\n- File descriptors: Check for connection leaks\n- Threads: Normal if using thread pools",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 6,
+            "x": 18,
+            "y": 17
+          },
+          "id": 209,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_exporter_process_threads{instance=\"$instance\"}",
+              "legendFormat": "Threads",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_exporter_process_open_fds{instance=\"$instance\"}",
+              "legendFormat": "File Descriptors",
+              "refId": "B"
+            }
+          ],
+          "title": "Process Resources",
+          "type": "timeseries"
+        }
+      ],
+      "title": "Exporter Self-Monitoring (enable --collector.exporter)",
+      "type": "row",
+      "description": "Monitor pg_exporter's own performance and health. Enable with --collector.exporter flag."
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 1
       },
       "id": 109,
       "panels": [],
@@ -106,7 +952,7 @@
         "h": 4,
         "w": 2,
         "x": 0,
-        "y": 1
+        "y": 2
       },
       "id": 26,
       "options": {
@@ -167,7 +1013,7 @@
         "h": 4,
         "w": 3,
         "x": 2,
-        "y": 1
+        "y": 2
       },
       "id": 27,
       "options": {
@@ -226,7 +1072,7 @@
         "h": 4,
         "w": 2,
         "x": 5,
-        "y": 1
+        "y": 2
       },
       "id": 28,
       "options": {
@@ -308,7 +1154,7 @@
         "h": 4,
         "w": 2,
         "x": 7,
-        "y": 1
+        "y": 2
       },
       "id": 29,
       "options": {
@@ -390,7 +1236,7 @@
         "h": 4,
         "w": 2,
         "x": 9,
-        "y": 1
+        "y": 2
       },
       "id": 30,
       "options": {
@@ -472,7 +1318,7 @@
         "h": 4,
         "w": 3,
         "x": 11,
-        "y": 1
+        "y": 2
       },
       "id": 31,
       "options": {
@@ -531,7 +1377,7 @@
         "h": 4,
         "w": 3,
         "x": 14,
-        "y": 1
+        "y": 2
       },
       "id": 32,
       "options": {
@@ -591,7 +1437,7 @@
         "h": 4,
         "w": 3,
         "x": 17,
-        "y": 1
+        "y": 2
       },
       "id": 33,
       "options": {
@@ -650,7 +1496,7 @@
         "h": 4,
         "w": 4,
         "x": 20,
-        "y": 1
+        "y": 2
       },
       "id": 34,
       "options": {
@@ -687,7 +1533,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 12
+        "y": 13
       },
       "id": 100,
       "panels": [],
@@ -734,7 +1580,7 @@
         "h": 8,
         "w": 6,
         "x": 0,
-        "y": 13
+        "y": 14
       },
       "id": 1,
       "options": {
@@ -822,7 +1668,7 @@
         "h": 8,
         "w": 9,
         "x": 6,
-        "y": 13
+        "y": 14
       },
       "id": 2,
       "options": {
@@ -923,7 +1769,7 @@
         "h": 8,
         "w": 9,
         "x": 15,
-        "y": 13
+        "y": 14
       },
       "id": 3,
       "options": {
@@ -980,7 +1826,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 15
+        "y": 16
       },
       "id": 101,
       "panels": [],
@@ -1047,7 +1893,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 16
+        "y": 17
       },
       "id": 4,
       "options": {
@@ -1139,7 +1985,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 16
+        "y": 17
       },
       "id": 5,
       "options": {
@@ -1275,7 +2121,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 24
+        "y": 25
       },
       "id": 115,
       "options": {
@@ -1376,7 +2222,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 24
+        "y": 25
       },
       "id": 116,
       "options": {
@@ -1414,7 +2260,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 25
+        "y": 26
       },
       "id": 102,
       "panels": [],
@@ -1481,7 +2327,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 26
+        "y": 27
       },
       "id": 6,
       "options": {
@@ -1573,7 +2419,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 26
+        "y": 27
       },
       "id": 7,
       "options": {
@@ -1665,7 +2511,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 35
+        "y": 36
       },
       "id": 8,
       "options": {
@@ -1756,7 +2602,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 35
+        "y": 36
       },
       "id": 9,
       "options": {
@@ -1848,7 +2694,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 44
+        "y": 45
       },
       "id": 10,
       "options": {
@@ -1949,7 +2795,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 44
+        "y": 45
       },
       "id": 11,
       "options": {
@@ -1988,7 +2834,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 53
+        "y": 54
       },
       "id": 103,
       "panels": [],
@@ -2055,7 +2901,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 79
+        "y": 80
       },
       "id": 113,
       "options": {
@@ -2159,7 +3005,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 79
+        "y": 80
       },
       "id": 114,
       "options": {
@@ -2296,7 +3142,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 54
+        "y": 55
       },
       "id": 25,
       "options": {
@@ -2397,7 +3243,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 62
+        "y": 63
       },
       "id": 12,
       "options": {
@@ -2489,7 +3335,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 62
+        "y": 63
       },
       "id": 13,
       "options": {
@@ -2590,7 +3436,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 71
+        "y": 72
       },
       "id": 14,
       "options": {
@@ -2682,7 +3528,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 71
+        "y": 72
       },
       "id": 15,
       "options": {
@@ -2739,7 +3585,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 80
+        "y": 81
       },
       "id": 104,
       "panels": [],
@@ -2806,7 +3652,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 81
+        "y": 82
       },
       "id": 16,
       "options": {
@@ -2845,7 +3691,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 90
+        "y": 91
       },
       "id": 105,
       "panels": [],
@@ -2912,7 +3758,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 91
+        "y": 92
       },
       "id": 17,
       "options": {
@@ -3003,7 +3849,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 91
+        "y": 92
       },
       "id": 18,
       "options": {
@@ -3041,7 +3887,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 100
+        "y": 101
       },
       "id": 106,
       "panels": [],
@@ -3108,7 +3954,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 101
+        "y": 102
       },
       "id": 19,
       "options": {
@@ -3200,7 +4046,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 101
+        "y": 102
       },
       "id": 20,
       "options": {
@@ -3239,7 +4085,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 110
+        "y": 111
       },
       "id": 107,
       "panels": [],
@@ -3306,7 +4152,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 111
+        "y": 112
       },
       "id": 21,
       "options": {
@@ -3363,7 +4209,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 120
+        "y": 121
       },
       "id": 108,
       "panels": [],
@@ -3430,7 +4276,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 121
+        "y": 122
       },
       "id": 22,
       "options": {
@@ -3521,7 +4367,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 121
+        "y": 122
       },
       "id": 23,
       "options": {
@@ -3560,7 +4406,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 129
+        "y": 130
       },
       "id": 110,
       "panels": [],
@@ -3627,7 +4473,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 130
+        "y": 131
       },
       "id": 111,
       "options": {
@@ -3729,7 +4575,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 130
+        "y": 131
       },
       "id": 112,
       "options": {

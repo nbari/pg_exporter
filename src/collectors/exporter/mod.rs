@@ -1,10 +1,10 @@
-/// Internal exporter metrics
+/// Exporter self-monitoring
 ///
 /// This module provides self-monitoring capabilities for pg_exporter itself.
 /// Unlike other collectors that monitor PostgreSQL, this monitors the exporter's
 /// own health and performance.
 ///
-/// # Why Internal Metrics Matter
+/// # Why Exporter Metrics Matter
 ///
 /// When running in production, you need visibility into:
 /// - **Resource usage**: Is the exporter leaking memory? Using too much CPU?
@@ -13,7 +13,7 @@
 ///
 /// # Architecture
 ///
-/// The internal collector consists of two sub-collectors:
+/// The exporter collector consists of two sub-collectors:
 ///
 /// ## ProcessCollector
 /// Monitors the exporter's process resource consumption using the `sysinfo` crate:
@@ -22,7 +22,7 @@
 /// - Thread count and file descriptors
 /// - Process start time (for uptime calculation)
 ///
-/// ## ScraperCollector  
+/// ## ScraperCollector
 /// Tracks scrape performance and health:
 /// - Per-collector scrape duration (histogram with percentiles)
 /// - Error counts per collector
@@ -79,10 +79,10 @@
 ///
 /// # Example Usage
 ///
-/// The internal collector is **disabled by default**. Enable it explicitly:
+/// The exporter collector is **disabled by default**. Enable it explicitly:
 ///
 /// ```bash
-/// pg_exporter --dsn postgresql://localhost/postgres --collector.internal
+/// pg_exporter --dsn postgresql://localhost/postgres --collector.exporter
 /// # Exports pg_exporter_process_* and pg_exporter_collector_* metrics
 /// ```
 ///
@@ -114,7 +114,7 @@ mod process;
 mod scraper;
 
 pub use process::ProcessCollector;
-pub use scraper::{ScraperCollector, ScrapeTimer};
+pub use scraper::{ScrapeTimer, ScraperCollector};
 
 use crate::collectors::Collector;
 use anyhow::Result;
@@ -126,51 +126,77 @@ use std::sync::Arc;
 use tracing::{debug, info_span, instrument, warn};
 use tracing_futures::Instrument as _;
 
-/// InternalCollector combines all exporter self-monitoring
-#[derive(Clone, Default)]
-pub struct InternalCollector {
+/// ExporterCollector combines all exporter self-monitoring
+#[derive(Clone)]
+pub struct ExporterCollector {
     subs: Vec<Arc<dyn Collector + Send + Sync>>,
+    scraper: Arc<ScraperCollector>,
 }
 
-impl InternalCollector {
-    pub fn new() -> Self {
-        Self {
-            subs: vec![
-                Arc::new(ProcessCollector::new()),
-                // ScraperCollector is handled specially in metrics handler
-            ],
-        }
+impl Default for ExporterCollector {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
-impl Collector for InternalCollector {
+impl ExporterCollector {
+    pub fn new() -> Self {
+        let scraper = Arc::new(ScraperCollector::new());
+        Self {
+            subs: vec![
+                Arc::new(ProcessCollector::new()),
+                Arc::clone(&scraper) as Arc<dyn Collector + Send + Sync>,
+            ],
+            scraper,
+        }
+    }
+
+    /// Get a reference to the scraper collector.
+    ///
+    /// The scraper tracks performance metrics for all collectors:
+    /// - Scrape duration histograms (for percentile calculations)
+    /// - Error counts per collector
+    /// - Total metrics exported (cardinality tracking)
+    ///
+    /// This is called by `CollectorRegistry` during initialization to
+    /// extract the scraper for tracking all collector performance.
+    pub fn get_scraper(&self) -> &Arc<ScraperCollector> {
+        &self.scraper
+    }
+}
+
+impl Collector for ExporterCollector {
     fn name(&self) -> &'static str {
-        "internal"
+        "exporter"
     }
 
     #[instrument(
         skip(self, registry),
         level = "info",
         err,
-        fields(collector = "internal")
+        fields(collector = "exporter")
     )]
     fn register_metrics(&self, registry: &Registry) -> Result<()> {
         for sub in &self.subs {
             let span = info_span!("collector.register_metrics", sub_collector = %sub.name());
+
             let res = sub.register_metrics(registry);
+
             match res {
-                Ok(_) => debug!(collector = sub.name(), "registered internal metrics"),
+                Ok(_) => debug!(collector = sub.name(), "registered exporter metrics"),
                 Err(ref e) => {
-                    warn!(collector = sub.name(), error = %e, "failed to register internal metrics")
+                    warn!(collector = sub.name(), error = %e, "failed to register exporter metrics")
                 }
             }
+
             res?;
+
             drop(span);
         }
         Ok(())
     }
 
-    #[instrument(skip(self, pool), level = "info", err, fields(collector = "internal", otel.kind = "internal"))]
+    #[instrument(skip(self, pool), level = "info", err, fields(collector = "exporter", otel.kind = "internal"))]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let mut tasks = FuturesUnordered::new();
@@ -193,3 +219,90 @@ impl Collector for InternalCollector {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_exporter_collector_new() {
+        let collector = ExporterCollector::new();
+        assert_eq!(collector.subs.len(), 2);
+    }
+
+    #[test]
+    fn test_exporter_collector_name() {
+        let collector = ExporterCollector::new();
+        assert_eq!(collector.name(), "exporter");
+    }
+
+    #[test]
+    fn test_exporter_collector_not_enabled_by_default() {
+        let collector = ExporterCollector::new();
+        assert!(!collector.enabled_by_default());
+    }
+
+    #[test]
+    fn test_exporter_collector_registers_without_error() {
+        let collector = ExporterCollector::new();
+        let registry = Registry::new();
+        assert!(collector.register_metrics(&registry).is_ok());
+    }
+
+    #[test]
+    fn test_exporter_collector_has_scraper() {
+        let collector = ExporterCollector::new();
+        let scraper = collector.get_scraper();
+        
+        // Scraper should be accessible
+        assert!(Arc::strong_count(scraper) >= 1);
+    }
+
+    #[test]
+    fn test_exporter_collector_scraper_is_same_instance() {
+        let collector = ExporterCollector::new();
+        
+        // Get scraper twice and verify it's the same Arc
+        let scraper1 = collector.get_scraper();
+        let scraper2 = collector.get_scraper();
+        
+        assert!(Arc::ptr_eq(scraper1, scraper2));
+    }
+
+    #[tokio::test]
+    async fn test_exporter_collector_collect_succeeds() {
+        use sqlx::postgres::PgPoolOptions;
+        
+        // This test requires a database connection
+        let dsn = std::env::var("PG_EXPORTER_DSN")
+            .unwrap_or_else(|_| "postgresql://postgres:postgres@localhost:5432/postgres".to_string());
+        
+        let pool = match PgPoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect(&dsn)
+            .await
+        {
+            Ok(pool) => pool,
+            Err(_) => {
+                eprintln!("Skipping test: database not available");
+                return;
+            }
+        };
+
+        let collector = ExporterCollector::new();
+        let registry = Registry::new();
+        
+        // Register metrics first
+        collector.register_metrics(&registry).unwrap();
+        
+        // Collect should succeed (it's a no-op but shouldn't error)
+        let result = collector.collect(&pool).await;
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_exporter_collector_default_trait() {
+        let collector = ExporterCollector::default();
+        assert_eq!(collector.name(), "exporter");
+    }
+}

@@ -1,5 +1,8 @@
 use crate::{
-    collectors::{Collector, CollectorType, all_factories, config::CollectorConfig},
+    collectors::{
+        Collector, CollectorType, all_factories, config::CollectorConfig,
+        exporter::ScraperCollector,
+    },
     exporter::GIT_COMMIT_HASH,
 };
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -13,6 +16,7 @@ pub struct CollectorRegistry {
     collectors: Vec<CollectorType>,
     registry: Arc<Registry>,
     pg_up_gauge: Gauge,
+    scraper: Option<Arc<ScraperCollector>>,
 }
 
 impl CollectorRegistry {
@@ -38,7 +42,7 @@ impl CollectorRegistry {
 
         // Add build information as labels
         let version = env!("CARGO_PKG_VERSION");
-        let commit_sha = GIT_COMMIT_HASH;
+        let commit_sha = GIT_COMMIT_HASH.unwrap_or("unknown");
         let arch = env::consts::ARCH;
 
         pg_exporter_build_info
@@ -56,6 +60,9 @@ impl CollectorRegistry {
 
         let factories = all_factories();
 
+        // Extract scraper if exporter collector is enabled
+        let mut scraper_opt = None;
+
         // Build all requested collectors and register their metrics.
         let collectors = config
             .enabled_collectors
@@ -63,6 +70,11 @@ impl CollectorRegistry {
             .filter_map(|name| {
                 factories.get(name.as_str()).map(|f| {
                     let collector = f();
+
+                    // If this collector provides a scraper, extract it
+                    if let Some(scraper) = collector.get_scraper() {
+                        scraper_opt = Some(scraper);
+                    }
 
                     // Register metrics per collector under a span so failures surface in traces.
                     let reg_span = debug_span!("collector.register_metrics", collector = %name);
@@ -81,12 +93,18 @@ impl CollectorRegistry {
             collectors,
             registry,
             pg_up_gauge,
+            scraper: scraper_opt,
         }
     }
 
     /// Collect from all enabled collectors.
     #[instrument(skip(self, pool), level = "info", err, fields(otel.kind = "internal"))]
     pub async fn collect_all(&self, pool: &sqlx::PgPool) -> anyhow::Result<String> {
+        // Increment scrape counter if scraper is available
+        if let Some(ref scraper) = self.scraper {
+            scraper.increment_scrapes();
+        }
+
         let mut any_success = false;
 
         // Quick connectivity check (does not guarantee every collector will succeed).
@@ -97,6 +115,7 @@ impl CollectorRegistry {
             db.operation = "SELECT",
             db.statement = "SELECT 1"
         );
+
         match sqlx::query("SELECT 1")
             .fetch_one(pool)
             .instrument(connect_span)
@@ -106,6 +125,7 @@ impl CollectorRegistry {
                 self.pg_up_gauge.set(1.0);
                 any_success = true;
             }
+
             Err(e) => {
                 error!("Failed to connect to PostgreSQL: {}", e);
                 self.pg_up_gauge.set(0.0);
@@ -127,6 +147,9 @@ impl CollectorRegistry {
             // Create a span per collector execution to visualize overlap in traces.
             let span = info_span!("collector.collect", collector = %name, otel.kind = "internal");
 
+            // Start timing this collector if scraper is available
+            let timer = self.scraper.as_ref().map(|s| s.start_scrape(name));
+
             // Prepare the future now (do not await here).
             let fut = collector.collect(pool);
 
@@ -137,8 +160,18 @@ impl CollectorRegistry {
                 let res = fut.instrument(span).await;
 
                 match &res {
-                    Ok(_) => debug!("collector '{}' done: ok", name),
-                    Err(e) => error!("collector '{}' done: error: {}", name, e),
+                    Ok(_) => {
+                        debug!("collector '{}' done: ok", name);
+                        if let Some(t) = timer {
+                            t.success();
+                        }
+                    }
+                    Err(e) => {
+                        error!("collector '{}' done: error: {}", name, e);
+                        if let Some(t) = timer {
+                            t.error();
+                        }
+                    }
                 }
 
                 (name, res)
@@ -174,6 +207,16 @@ impl CollectorRegistry {
         let encoder = TextEncoder::new();
 
         let metric_families = self.registry.gather();
+
+        // Update metrics count for next scrape
+        // Note: This count will be visible in the NEXT scrape (eventual consistency)
+        if let Some(ref scraper) = self.scraper {
+            let total_metrics: i64 = metric_families
+                .iter()
+                .map(|mf| mf.get_metric().len() as i64)
+                .sum();
+            scraper.update_metrics_count(total_metrics);
+        }
 
         let mut buffer = Vec::new();
 

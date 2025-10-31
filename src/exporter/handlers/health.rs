@@ -12,7 +12,8 @@ use tracing_futures::Instrument as _;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Health {
-    commit: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commit: Option<String>,
     name: String,
     version: String,
     database: String,
@@ -44,7 +45,7 @@ async fn check_database_health(pool: &PgPool) -> Result<(), StatusCode> {
 // Create health struct based on database status
 fn create_health_response(db_result: &Result<(), StatusCode>) -> Health {
     Health {
-        commit: GIT_COMMIT_HASH.to_string(),
+        commit: GIT_COMMIT_HASH.map(|s| s.to_string()),
         name: env!("CARGO_PKG_NAME").to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         database: if db_result.is_ok() {
@@ -66,13 +67,18 @@ fn create_response_body(method: Method, health: &Health) -> Body {
 
 // Create X-App header
 fn create_app_headers(health: &Health) -> HeaderMap {
-    let short_hash = if health.commit.len() > 7 {
-        &health.commit[0..7]
-    } else {
-        ""
-    };
+    let short_hash = health
+        .commit
+        .as_deref()
+        .filter(|s| s.len() > 7)
+        .map(|s| &s[0..7])
+        .unwrap_or("");
 
-    let header_value = format!("{}:{}:{}", health.name, health.version, short_hash);
+    let header_value = if short_hash.is_empty() {
+        format!("{}:{}", health.name, health.version)
+    } else {
+        format!("{}:{}:{}", health.name, health.version, short_hash)
+    };
 
     match header_value.parse::<HeaderValue>() {
         Ok(x_app_header_value) => {
@@ -114,9 +120,9 @@ mod tests {
     use axum::http::Method;
 
     #[test]
-    fn test_health_struct_serialization() {
+    fn test_health_struct_serialization_with_commit() {
         let health = Health {
-            commit: "abc123".to_string(),
+            commit: Some("abc123".to_string()),
             name: "test_app".to_string(),
             version: "1.0.0".to_string(),
             database: "ok".to_string(),
@@ -130,7 +136,24 @@ mod tests {
     }
 
     #[test]
-    fn test_health_struct_deserialization() {
+    fn test_health_struct_serialization_without_commit() {
+        let health = Health {
+            commit: None,
+            name: "test_app".to_string(),
+            version: "1.0.0".to_string(),
+            database: "ok".to_string(),
+        };
+
+        let json = serde_json::to_string(&health).unwrap();
+        // commit field should be omitted when None
+        assert!(!json.contains("commit"));
+        assert!(json.contains("test_app"));
+        assert!(json.contains("1.0.0"));
+        assert!(json.contains("ok"));
+    }
+
+    #[test]
+    fn test_health_struct_deserialization_with_commit() {
         let json = r#"{
             "commit": "def456",
             "name": "my_app",
@@ -139,7 +162,22 @@ mod tests {
         }"#;
 
         let health: Health = serde_json::from_str(json).unwrap();
-        assert_eq!(health.commit, "def456");
+        assert_eq!(health.commit, Some("def456".to_string()));
+        assert_eq!(health.name, "my_app");
+        assert_eq!(health.version, "2.0.0");
+        assert_eq!(health.database, "error");
+    }
+
+    #[test]
+    fn test_health_struct_deserialization_without_commit() {
+        let json = r#"{
+            "name": "my_app",
+            "version": "2.0.0",
+            "database": "error"
+        }"#;
+
+        let health: Health = serde_json::from_str(json).unwrap();
+        assert_eq!(health.commit, None);
         assert_eq!(health.name, "my_app");
         assert_eq!(health.version, "2.0.0");
         assert_eq!(health.database, "error");
@@ -153,7 +191,7 @@ mod tests {
         assert_eq!(health.database, "ok");
         assert_eq!(health.name, env!("CARGO_PKG_NAME"));
         assert_eq!(health.version, env!("CARGO_PKG_VERSION"));
-        assert!(!health.commit.is_empty());
+        // commit may be Some or None depending on build context
     }
 
     #[test]
@@ -169,7 +207,7 @@ mod tests {
     #[test]
     fn test_create_response_body_get() {
         let health = Health {
-            commit: "test".to_string(),
+            commit: Some("test".to_string()),
             name: "test".to_string(),
             version: "1.0".to_string(),
             database: "ok".to_string(),
@@ -186,7 +224,7 @@ mod tests {
     #[test]
     fn test_create_response_body_options() {
         let health = Health {
-            commit: "test".to_string(),
+            commit: Some("test".to_string()),
             name: "test".to_string(),
             version: "1.0".to_string(),
             database: "ok".to_string(),
@@ -202,7 +240,7 @@ mod tests {
     #[test]
     fn test_create_app_headers_full_hash() {
         let health = Health {
-            commit: "abc123def456".to_string(),
+            commit: Some("abc123def456".to_string()),
             name: "myapp".to_string(),
             version: "1.2.3".to_string(),
             database: "ok".to_string(),
@@ -223,7 +261,7 @@ mod tests {
     #[test]
     fn test_create_app_headers_short_hash() {
         let health = Health {
-            commit: "abc".to_string(),
+            commit: Some("abc".to_string()),
             name: "myapp".to_string(),
             version: "1.0.0".to_string(),
             database: "ok".to_string(),
@@ -234,14 +272,14 @@ mod tests {
         let x_app = headers.get("X-App").expect("X-App header should exist");
         let x_app_str = x_app.to_str().unwrap();
 
-        // Short hash should result in empty string in header
-        assert_eq!(x_app_str, "myapp:1.0.0:");
+        // Short hash (<= 7 chars) should be omitted from header
+        assert_eq!(x_app_str, "myapp:1.0.0");
     }
 
     #[test]
-    fn test_create_app_headers_empty_commit() {
+    fn test_create_app_headers_no_commit() {
         let health = Health {
-            commit: "".to_string(),
+            commit: None,
             name: "myapp".to_string(),
             version: "1.0.0".to_string(),
             database: "ok".to_string(),
@@ -252,13 +290,14 @@ mod tests {
         let x_app = headers.get("X-App").expect("X-App header should exist");
         let x_app_str = x_app.to_str().unwrap();
 
-        assert_eq!(x_app_str, "myapp:1.0.0:");
+        // No commit should omit the hash entirely
+        assert_eq!(x_app_str, "myapp:1.0.0");
     }
 
     #[test]
     fn test_create_app_headers_special_characters() {
         let health = Health {
-            commit: "abc123!@#".to_string(),
+            commit: Some("abc123!@#".to_string()),
             name: "my-app".to_string(),
             version: "1.0.0-beta".to_string(),
             database: "ok".to_string(),

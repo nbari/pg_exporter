@@ -51,7 +51,7 @@ use std::time::Instant;
 /// that automatically records scrape duration and status when dropped:
 ///
 /// ```no_run
-/// # use pg_exporter::collectors::internal::ScraperCollector;
+/// # use pg_exporter::collectors::exporter::ScraperCollector;
 /// # use anyhow::Result;
 /// # async fn example() -> Result<()> {
 /// let scraper = ScraperCollector::new();
@@ -74,7 +74,7 @@ use std::time::Instant;
 ///
 /// # Thread Safety
 ///
-/// Uses `std::sync::RwLock` for the internal state:
+/// Uses `std::sync::RwLock` for the metrics state:
 /// - Multiple readers (metric reads) don't block each other
 /// - Single writer (updates) blocks readers briefly
 /// - Poison errors handled explicitly for resilience
@@ -307,6 +307,26 @@ impl ScraperCollector {
         registry.register(Box::new(self.metrics_total.clone()))?;
         registry.register(Box::new(self.scrapes_total.clone()))?;
         Ok(())
+    }
+}
+
+impl crate::collectors::Collector for ScraperCollector {
+    fn name(&self) -> &'static str {
+        "scraper"
+    }
+
+    fn register_metrics(&self, registry: &Registry) -> Result<()> {
+        self.register(registry)
+    }
+
+    fn collect<'a>(&'a self, _pool: &'a sqlx::PgPool) -> futures::future::BoxFuture<'a, Result<()>> {
+        // ScraperCollector doesn't scrape from PostgreSQL
+        // It's updated by other collectors via start_scrape(), update_metrics_count(), etc.
+        Box::pin(async move { Ok(()) })
+    }
+
+    fn enabled_by_default(&self) -> bool {
+        false
     }
 }
 

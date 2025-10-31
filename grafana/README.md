@@ -47,6 +47,28 @@ scrape_configs:
 
 ## Dashboard Sections
 
+### 📊 Exporter Self-Monitoring (Collapsible)
+
+**Enable with**: `--collector.exporter`
+
+Monitor pg_exporter's own health and performance:
+
+- **Exporter CPU Usage**: CPU % consumed by the exporter process
+- **Exporter Memory Usage**: RSS and VSZ memory consumption
+- **Total Metrics Exported**: Current metric cardinality (critical for Cortex/Mimir limits)
+- **Collector Scrape Duration**: Per-collector performance with p50/p95/p99 percentiles
+- **Collector Scrape Errors**: Failed collector scrapes (should always be zero)
+- **Collector Health Status**: Success/failure status per collector
+- **Last Scrape Time**: Detect stale collectors
+- **Total Scrapes**: Verify exporter is active
+- **Process Resources**: Threads and file descriptors
+
+**Why monitor the exporter?**
+- Detect resource leaks or high CPU usage
+- Identify slow or failing collectors
+- Track metric cardinality (prevent Cortex/Mimir rejections)
+- Validate exporter health
+
 ### 🚨 Critical Alerts - Connection Pool & Performance
 - **Connection Pool Utilization**: Gauge showing pool saturation (0-100%). Alert when >80%
 - **Idle in Transaction**: Dangerous connections holding locks/snapshots
@@ -138,6 +160,7 @@ Different sections require different collectors to be enabled:
 
 | Section | Collector | Default Enabled |
 |---------|-----------|-----------------|
+| Exporter Self-Monitoring | `exporter` | ❌ No (opt-in for self-monitoring) |
 | Connection Pool & Alerts | `default`, `activity` | ✅ Yes |
 | Query Performance | `statements` | ❌ No (requires `pg_stat_statements` extension) |
 | Database Activity | `database`, `activity` | Partial |
@@ -160,7 +183,8 @@ pg_exporter \
     --collector.stat \
     --collector.replication \
     --collector.index \
-    --collector.statements
+    --collector.statements \
+    --collector.exporter  # Optional: for self-monitoring
 ```
 
 #### Systemd service (recommended):
@@ -174,7 +198,8 @@ ExecStart=/usr/local/bin/pg_exporter \
     --collector.stat \
     --collector.replication \
     --collector.index \
-    --collector.statements
+    --collector.statements \
+    --collector.exporter
 ```
 
 #### Configuration file:

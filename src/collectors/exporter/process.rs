@@ -65,7 +65,7 @@ use tracing::{debug, instrument, warn};
 /// # Example
 ///
 /// ```rust,no_run
-/// # use pg_exporter::collectors::internal::ProcessCollector;
+/// # use pg_exporter::collectors::exporter::ProcessCollector;
 /// # use pg_exporter::collectors::Collector;
 /// # use prometheus::Registry;
 /// # fn example() -> anyhow::Result<()> {
@@ -270,7 +270,7 @@ impl ProcessCollector {
 
 impl Collector for ProcessCollector {
     fn name(&self) -> &'static str {
-        "internal.process"
+        "metrics.process"
     }
 
     fn register_metrics(&self, registry: &Registry) -> Result<()> {

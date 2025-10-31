@@ -53,6 +53,52 @@ macro_rules! register_collectors {
             }
         }
 
+        /// Methods specific to particular collector variants.
+        ///
+        /// These methods provide capabilities that only certain collectors have,
+        /// without polluting the core `Collector` trait with optional methods.
+        impl CollectorType {
+            /// Get the scraper collector for tracking scrape performance metrics.
+            ///
+            /// # Design Rationale
+            ///
+            /// Only `ExporterCollector` tracks scrape performance (duration, errors, etc).
+            /// Rather than adding an optional method to the `Collector` trait that 99%
+            /// of collectors would return `None` for, we implement this as a method on
+            /// the `CollectorType` enum.
+            ///
+            /// This keeps the trait focused on the universal collector contract while
+            /// providing type-safe access to collector-specific capabilities.
+            ///
+            /// # Returns
+            ///
+            /// - `Some(Arc<ScraperCollector>)` if this is an `ExporterCollector`
+            /// - `None` for all other collector types
+            ///
+            /// # Example
+            ///
+            /// ```rust,ignore
+            /// // In CollectorRegistry::new()
+            /// for (name, factory) in factories {
+            ///     let collector = factory();
+            ///
+            ///     // Extract scraper if exporter collector is enabled
+            ///     if let Some(scraper) = collector.get_scraper() {
+            ///         // Use scraper to track performance of all collectors
+            ///         self.scraper = Some(scraper);
+            ///     }
+            /// }
+            /// ```
+            pub fn get_scraper(&self) -> Option<std::sync::Arc<crate::collectors::exporter::ScraperCollector>> {
+                match self {
+                    // ExporterCollector is the only collector that tracks scrape performance
+                    CollectorType::ExporterCollector(c) => Some(c.get_scraper().clone()),
+                    // All other collectors don't have scraping capabilities
+                    _ => None,
+                }
+            }
+        }
+
         // Generate the factory function map
         pub fn all_factories() -> HashMap<&'static str, fn() -> CollectorType> {
             let mut map: HashMap<&'static str, fn() -> CollectorType> = HashMap::new();
@@ -239,5 +285,75 @@ mod tests {
             unique_count,
             "Factory map has duplicate keys"
         );
+    }
+
+    #[test]
+    fn test_exporter_collector_is_registered() {
+        let names = crate::collectors::COLLECTOR_NAMES;
+        assert!(
+            names.contains(&"exporter"),
+            "Exporter collector should be registered"
+        );
+    }
+
+    #[test]
+    fn test_exporter_collector_factory_exists() {
+        let factories = crate::collectors::all_factories();
+        assert!(
+            factories.contains_key("exporter"),
+            "Exporter factory should exist"
+        );
+    }
+
+    #[test]
+    fn test_get_scraper_returns_some_for_exporter() {
+        let factories = crate::collectors::all_factories();
+
+        if let Some(factory) = factories.get("exporter") {
+            let collector = factory();
+            let scraper = collector.get_scraper();
+
+            assert!(
+                scraper.is_some(),
+                "ExporterCollector should provide a scraper"
+            );
+        } else {
+            panic!("Exporter factory not found");
+        }
+    }
+
+    #[test]
+    fn test_get_scraper_returns_none_for_other_collectors() {
+        let factories = crate::collectors::all_factories();
+
+        // Test that non-exporter collectors return None
+        let non_exporter_collectors = vec!["default", "vacuum", "activity", "locks"];
+
+        for name in non_exporter_collectors {
+            if let Some(factory) = factories.get(name) {
+                let collector = factory();
+                let scraper = collector.get_scraper();
+
+                assert!(
+                    scraper.is_none(),
+                    "Collector '{}' should not provide a scraper",
+                    name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_exporter_collector_name_matches() {
+        let factories = crate::collectors::all_factories();
+
+        if let Some(factory) = factories.get("exporter") {
+            let collector = factory();
+            assert_eq!(
+                collector.name(),
+                "exporter",
+                "ExporterCollector name should be 'exporter'"
+            );
+        }
     }
 }

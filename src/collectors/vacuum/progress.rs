@@ -35,19 +35,19 @@ impl VacuumProgressCollector {
                 "pg_vacuum_in_progress",
                 "Is a vacuum currently running (1=yes,0=no)",
             ),
-            &["table"],
+            &["database", "table"],
         )
         .expect("valid pg_vacuum_in_progress opts");
 
         let heap_progress = GaugeVec::new(
             Opts::new("pg_vacuum_heap_progress", "Progress of heap blocks scanned (0.0-1.0 ratio)"),
-            &["table"],
+            &["database", "table"],
         )
         .expect("valid pg_vacuum_heap_progress opts");
 
         let heap_vacuumed = IntGaugeVec::new(
             Opts::new("pg_vacuum_heap_vacuumed", "Number of heap blocks vacuumed"),
-            &["table"],
+            &["database", "table"],
         )
         .expect("valid pg_vacuum_heap_vacuumed opts");
 
@@ -56,7 +56,7 @@ impl VacuumProgressCollector {
                 "pg_vacuum_index_vacuum_count",
                 "Number of index vacuum passes",
             ),
-            &["table"],
+            &["database", "table"],
         )
         .expect("valid pg_vacuum_index_vacuum_count opts");
 
@@ -71,7 +71,7 @@ impl VacuumProgressCollector {
                 "pg_vacuum_is_autovacuum",
                 "Whether the vacuum is an autovacuum (1) or manual (0)",
             ),
-            &["table"],
+            &["database", "table"],
         )
         .expect("valid pg_vacuum_is_autovacuum opts");
 
@@ -80,7 +80,7 @@ impl VacuumProgressCollector {
                 "pg_vacuum_duration_seconds",
                 "How long the vacuum has been running in seconds",
             ),
-            &["table"],
+            &["database", "table"],
         )
         .expect("valid pg_vacuum_duration_seconds opts");
 
@@ -140,11 +140,14 @@ impl Collector for VacuumProgressCollector {
             );
 
             // Filter by excluded databases via LEFT JOIN on datid.
-            // Keep rows with no database match (shouldn't happen) by allowing d.datname IS NULL.
-            // JOIN with pg_stat_activity to detect autovacuum and get duration
+            // Note: pg_stat_progress_vacuum shows vacuums in ALL databases, but pg_class
+            // only contains tables from the CURRENT database. When viewing from 'postgres' db,
+            // we can't resolve table names from other databases. We include the database name
+            // and relid to help identify tables across databases.
             let rows = sqlx::query(
                 r#"
                 SELECT
+                    COALESCE(d.datname, 'unknown') AS database_name,
                     COALESCE(n.nspname || '.' || c.relname, p.relid::text) AS table_name,
                     p.heap_blks_total,
                     p.heap_blks_scanned,
@@ -153,9 +156,9 @@ impl Collector for VacuumProgressCollector {
                     COALESCE(a.query LIKE 'autovacuum:%', false) AS is_autovacuum,
                     COALESCE(EXTRACT(EPOCH FROM (now() - a.xact_start))::bigint, 0) AS duration_seconds
                 FROM pg_stat_progress_vacuum p
+                LEFT JOIN pg_database d ON d.oid = p.datid
                 LEFT JOIN pg_class c ON c.oid = p.relid
                 LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
-                LEFT JOIN pg_database d ON d.oid = p.datid
                 LEFT JOIN pg_stat_activity a ON a.pid = p.pid
                 WHERE (d.datname IS NULL OR NOT (d.datname = ANY($1)))
                 "#,
@@ -171,18 +174,19 @@ impl Collector for VacuumProgressCollector {
 
             if rows.is_empty() {
                 // Reset "none" placeholder metrics
-                self.in_progress.with_label_values(&["none"]).set(0);
-                self.heap_progress.with_label_values(&["none"]).set(0.0);
-                self.heap_vacuumed.with_label_values(&["none"]).set(0);
-                self.index_vacuum_count.with_label_values(&["none"]).set(0);
-                self.is_autovacuum.with_label_values(&["none"]).set(0);
-                self.duration_seconds.with_label_values(&["none"]).set(0);
+                self.in_progress.with_label_values(&["none", "none"]).set(0);
+                self.heap_progress.with_label_values(&["none", "none"]).set(0.0);
+                self.heap_vacuumed.with_label_values(&["none", "none"]).set(0);
+                self.index_vacuum_count.with_label_values(&["none", "none"]).set(0);
+                self.is_autovacuum.with_label_values(&["none", "none"]).set(0);
+                self.duration_seconds.with_label_values(&["none", "none"]).set(0);
                 self.global_active.set(0);
                 debug!("no active vacuum operations");
             } else {
                 self.global_active.set(1);
 
                 for row in rows {
+                    let database: String = row.try_get("database_name")?;
                     let table: String = row.try_get("table_name")?;
                     let heap_total: i64 = row.try_get("heap_blks_total").unwrap_or(0);
                     let heap_scanned: i64 = row.try_get("heap_blks_scanned").unwrap_or(0);
@@ -198,24 +202,25 @@ impl Collector for VacuumProgressCollector {
                         0.0
                     };
 
-                    self.in_progress.with_label_values(&[&table]).set(1);
+                    self.in_progress.with_label_values(&[&database, &table]).set(1);
                     self.heap_progress
-                        .with_label_values(&[&table])
+                        .with_label_values(&[&database, &table])
                         .set(progress_ratio);
                     self.heap_vacuumed
-                        .with_label_values(&[&table])
+                        .with_label_values(&[&database, &table])
                         .set(heap_vac);
                     self.index_vacuum_count
-                        .with_label_values(&[&table])
+                        .with_label_values(&[&database, &table])
                         .set(idx_count);
                     self.is_autovacuum
-                        .with_label_values(&[&table])
+                        .with_label_values(&[&database, &table])
                         .set(if is_auto { 1 } else { 0 });
                     self.duration_seconds
-                        .with_label_values(&[&table])
+                        .with_label_values(&[&database, &table])
                         .set(duration);
 
                     debug!(
+                        database = %database,
                         table = %table,
                         heap_total,
                         heap_scanned,
