@@ -1,8 +1,7 @@
 use anyhow::Result;
 use prometheus::{CounterVec, GaugeVec, HistogramVec, IntGauge, Opts, Registry};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
-use parking_lot::RwLock;
 
 /// Tracks scrape performance and metrics cardinality
 ///
@@ -75,15 +74,34 @@ use parking_lot::RwLock;
 ///
 /// # Thread Safety
 ///
-/// Uses `parking_lot::RwLock` for the internal state:
+/// Uses `std::sync::RwLock` for the internal state:
 /// - Multiple readers (metric reads) don't block each other
 /// - Single writer (updates) blocks readers briefly
-/// - No lock poisoning (panic-safe)
+/// - Poison errors handled explicitly for resilience
 ///
 /// Why RwLock instead of Mutex?
 /// - Scrape counters are read-heavy (Prometheus scrapes every 15-60s)
 /// - Writes only happen during collector execution
 /// - Better concurrency for high scrape rates
+///
+/// ## Poison Error Handling
+///
+/// If a panic occurs while holding the write lock, the RwLock becomes poisoned.
+/// We detect this and recover gracefully using `into_inner()`:
+///
+/// ```rust,no_run
+/// # use std::sync::RwLock;
+/// # let lock = RwLock::new(0);
+/// let mut guard = match lock.write() {
+///     Ok(guard) => guard,
+///     Err(poisoned) => {
+///         eprintln!("Lock poisoned, recovering");
+///         poisoned.into_inner()
+///     }
+/// };
+/// ```
+///
+/// This ensures one panic doesn't break all future metric updates.
 ///
 /// # Example Prometheus Queries
 ///
@@ -121,10 +139,10 @@ pub struct ScraperCollector {
     /// - Reads: Prometheus scrapes metrics
     /// - Writes: update_metrics_count(), increment_scrapes()
     ///
-    /// We use parking_lot::RwLock instead of std::sync::RwLock:
-    /// - No lock poisoning (panic won't poison the lock)
-    /// - Better performance (faster lock/unlock)
-    /// - Smaller memory footprint
+    /// We handle PoisonError explicitly to recover from panics:
+    /// - If a write panics, the lock becomes poisoned
+    /// - We detect this and recover via `into_inner()`
+    /// - This prevents one failed update from breaking all future scrapes
     state: Arc<RwLock<ScraperState>>,
 }
 
@@ -213,15 +231,29 @@ impl ScraperCollector {
 
     /// Update total metrics count
     /// Call this after each scrape to track cardinality
+    /// Handles lock poisoning gracefully.
     pub fn update_metrics_count(&self, count: i64) {
         self.metrics_total.set(count);
-        let mut state = self.state.write();
+        let mut state = match self.state.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("ScraperState write lock was poisoned, recovering");
+                poisoned.into_inner()
+            }
+        };
         state.total_metrics = count;
     }
 
     /// Increment total scrapes counter
+    /// Handles lock poisoning gracefully.
     pub fn increment_scrapes(&self) {
-        let mut state = self.state.write();
+        let mut state = match self.state.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("ScraperState write lock was poisoned, recovering");
+                poisoned.into_inner()
+            }
+        };
         state.total_scrapes += 1;
         self.scrapes_total.set(state.total_scrapes);
     }

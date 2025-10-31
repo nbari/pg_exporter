@@ -31,42 +31,43 @@
 ///
 /// # Threading and Locking
 ///
-/// We use `parking_lot::Mutex` instead of `std::sync::Mutex` for performance:
+/// We use `std::sync::{Mutex, RwLock}` for thread-safe access to shared state.
 ///
-/// ## Why parking_lot?
+/// ## Poison Error Handling
 ///
-/// 1. **No lock poisoning** - If a panic occurs while holding the lock, future
-///    acquirers won't panic. This is critical for metrics collection - one
-///    failed scrape shouldn't break all future scrapes.
+/// Rust's standard library mutexes become "poisoned" if a thread panics while
+/// holding the lock. We handle this explicitly to ensure resilience:
 ///
-/// 2. **Simpler API** - No `.unwrap()` needed:
 ///    ```rust,no_run
-///    # use std::sync::Mutex as StdMutex;
-///    # use parking_lot::Mutex;
-///    # let std_mutex = StdMutex::new(0);
-///    # let parking_mutex = Mutex::new(0);
-///    // std::sync::Mutex
-///    let guard = std_mutex.lock().unwrap(); // Can panic!
-///    
-///    // parking_lot::Mutex  
-///    let guard = parking_mutex.lock(); // Never panics
+///    # use std::sync::Mutex;
+///    # let mutex = Mutex::new(0);
+///    // Acquire lock with poison recovery
+///    let guard = match mutex.lock() {
+///        Ok(guard) => guard,
+///        Err(poisoned) => {
+///            // Lock was poisoned, but we can recover
+///            eprintln!("Mutex poisoned, recovering");
+///            poisoned.into_inner()
+///        }
+///    };
 ///    ```
 ///
-/// 3. **Better performance** - Uses an efficient spinlock before parking,
-///    reducing overhead for short critical sections (like reading /proc files).
-///
-/// 4. **Smaller size** - Only 1 word vs multiple words for std::sync::Mutex.
+/// This pattern ensures that one panic during metrics collection doesn't
+/// break all future collections.
 ///
 /// ## Lock Usage Pattern
 ///
 /// ```rust,no_run
-/// # use parking_lot::Mutex;
+/// # use std::sync::Mutex;
 /// # use sysinfo::System;
 /// # struct ProcessCollector { system: std::sync::Arc<Mutex<System>> }
 /// # impl ProcessCollector {
 /// # fn collect_stats(&self) {
 /// // ProcessCollector locks briefly to read /proc
-/// let mut system = self.system.lock();  // ~1-5ms hold time
+/// let mut system = match self.system.lock() {
+///     Ok(guard) => guard,
+///     Err(poisoned) => poisoned.into_inner(),
+/// };
 /// system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
 /// # drop(system); // Lock released
 /// # }
@@ -78,10 +79,10 @@
 ///
 /// # Example Usage
 ///
-/// The internal collector is enabled by default:
+/// The internal collector is **disabled by default**. Enable it explicitly:
 ///
 /// ```bash
-/// pg_exporter --dsn postgresql://localhost/postgres
+/// pg_exporter --dsn postgresql://localhost/postgres --collector.internal
 /// # Exports pg_exporter_process_* and pg_exporter_collector_* metrics
 /// ```
 ///
@@ -188,7 +189,7 @@ impl Collector for InternalCollector {
     }
 
     fn enabled_by_default(&self) -> bool {
-        true // Always enable internal monitoring
+        false
     }
 }
 

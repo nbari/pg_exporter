@@ -49,57 +49,62 @@ Tracks scrape performance and health across all collectors.
 - `parking_lot::RwLock` for concurrent read access
 - Histogram buckets: 1ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s
 
-## Why `parking_lot`?
+## Why Standard Library Instead of parking_lot?
 
-We use `parking_lot::{Mutex, RwLock}` instead of `std::sync::{Mutex, RwLock}` for several reasons:
+We use `std::sync::{Mutex, RwLock}` instead of external crates like `parking_lot`:
 
-### 1. No Lock Poisoning
-
-```rust
-// std::sync::Mutex
-let guard = mutex.lock().unwrap(); // Panics if another thread panicked while holding lock
-
-// parking_lot::Mutex  
-let guard = mutex.lock(); // Never panics, lock is not poisoned
-```
-
-This is critical for metrics collection - one failed scrape shouldn't break all future scrapes.
-
-### 2. Simpler API
-
-No need for `.unwrap()` or error handling when acquiring locks:
+### 1. No External Dependencies
 
 ```rust
-// Cleaner code
-let mut system = self.system.lock();  // No .unwrap() needed
-system.refresh_processes(...);
+use std::sync::Mutex;
+
+// Handle lock poisoning explicitly
+let guard = match mutex.lock() {
+    Ok(guard) => guard,
+    Err(poisoned) => {
+        warn!("Mutex poisoned, recovering");
+        poisoned.into_inner()
+    }
+};
 ```
 
-### 3. Better Performance
+This is explicit and self-documenting. The code clearly shows how we handle panics.
 
-- Uses an efficient spinlock before parking threads
-- Reduces overhead for short critical sections (like reading `/proc` files)
-- Smaller memory footprint (1 word vs multiple words)
+### 2. Educational Value
 
-### 4. Read-Write Lock Benefits
+Demonstrates proper `PoisonError` handling:
+- Shows awareness of panic safety
+- Teaches recovery patterns
+- No hidden behavior from external libraries
 
-`RwLock` allows multiple concurrent readers, which is perfect for:
-- Prometheus scraping metrics (read-heavy)
-- Occasional updates from collector execution (write-light)
+### 3. Minimal Dependencies
+
+Since internal metrics are supplementary (not core PostgreSQL monitoring):
+- Zero dependencies for a "nice-to-have" feature
+- Simpler dependency tree
+- Easier to audit
+
+### 4. Lock Usage Benefits
+
+- **RwLock** allows multiple concurrent readers (Prometheus scrapes)
+- **Mutex** protects the cached System object
+- Both handle poisoning with the `.into_inner()` pattern
+- Performance is identical for our use case (low contention)
 
 ## Usage
 
-The internal collector is enabled by default:
+The internal collector is **disabled by default**. Enable it explicitly:
 
 ```bash
-pg_exporter --dsn postgresql://localhost/postgres
+pg_exporter --dsn postgresql://localhost/postgres --collector.internal
 # Automatically exports pg_exporter_process_* and pg_exporter_collector_* metrics
 ```
 
 Disable with:
 
 ```bash
-pg_exporter --dsn postgresql://localhost/postgres --no-collector.internal
+# Internal metrics not needed - disabled by default
+pg_exporter --dsn postgresql://localhost/postgres
 ```
 
 ## Prometheus Queries
@@ -257,5 +262,13 @@ test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured
 
 - [Process Collector Source](process.rs)
 - [Scraper Collector Source](scraper.rs)
-- [sysinfo crate documentation](https://docs.rs/sysinfo/)
-- [parking_lot crate documentation](https://docs.rs/parking_lot/)
+## Dependencies
+
+The internal collector only requires one external dependency:
+
+- **sysinfo = "0.37"** - Cross-platform system information library
+  - Used to read process stats from the OS
+  - Well-maintained, widely used
+  - Platform-specific implementations (Linux: /proc, macOS: proc_pidinfo, etc.)
+
+All synchronization primitives use standard library (`std::sync`).

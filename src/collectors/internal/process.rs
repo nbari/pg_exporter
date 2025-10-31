@@ -3,10 +3,10 @@ use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{Counter, Gauge, IntGauge, Opts, Registry};
 use sqlx::PgPool;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use sysinfo::{Pid, System};
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, warn};
 
 /// Monitors the pg_exporter process itself
 ///
@@ -88,16 +88,17 @@ pub struct ProcessCollector {
     threads: IntGauge,
     start_time_seconds: Gauge,
     
-    /// Cached sysinfo System object, protected by parking_lot::Mutex
+    /// Cached sysinfo System object, protected by std::sync::Mutex
     ///
-    /// Why parking_lot::Mutex?
-    /// - No lock poisoning (panic-safe)
-    /// - Simpler API (no .unwrap())
-    /// - Better performance for short critical sections
-    /// - Smaller memory footprint (1 word vs std::sync::Mutex)
+    /// Mutex allows safe concurrent access to the System object. We handle
+    /// PoisonError explicitly to recover from panics during collection.
     ///
-    /// The lock is only held for ~1ms while reading /proc files.
-    system: Arc<parking_lot::Mutex<System>>,
+    /// If a panic occurs while holding the lock:
+    /// - The lock becomes "poisoned"
+    /// - We detect this and recover via `into_inner()`
+    /// - A warning is logged, but collection continues
+    /// - This prevents one bad scrape from breaking all future scrapes
+    system: Arc<Mutex<System>>,
     
     /// Process ID of this exporter
     pid: Pid,
@@ -147,7 +148,7 @@ impl ProcessCollector {
         ))
         .expect("pg_exporter_process_start_time_seconds");
 
-        let system = Arc::new(parking_lot::Mutex::new(System::new_all()));
+        let system = Arc::new(Mutex::new(System::new_all()));
         let pid = Pid::from(std::process::id() as usize);
 
         // Set start time once (doesn't change)
@@ -178,14 +179,23 @@ impl ProcessCollector {
     ///
     /// This method:
     /// 1. Acquires a lock on the cached System object (~0.1ms)
-    /// 2. Refreshes process data from OS (~1-5ms)
-    /// 3. Extracts metrics (memory, CPU, threads, FDs)
-    /// 4. Updates Prometheus gauges/counters
-    /// 5. Releases lock
+    /// 2. Handles PoisonError if a previous panic occurred
+    /// 3. Refreshes process data from OS (~1-5ms)
+    /// 4. Extracts metrics (memory, CPU, threads, FDs)
+    /// 5. Updates Prometheus gauges/counters
+    /// 6. Releases lock
     ///
     /// Total execution time: ~1-5ms on Linux, may be slower on other platforms.
     fn collect_stats(&self) {
-        let mut system = self.system.lock();
+        // Acquire lock, handling poison errors gracefully
+        let mut system = match self.system.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                // Lock was poisoned by a panic, but we can recover
+                warn!("System mutex was poisoned, recovering");
+                poisoned.into_inner()
+            }
+        };
         
         // Refresh only our process (more efficient than refresh_all)
         // sysinfo 0.32 API: refresh_processes(processes_to_update, refresh_kind)
@@ -282,7 +292,7 @@ impl Collector for ProcessCollector {
     }
 
     fn enabled_by_default(&self) -> bool {
-        true
+        false
     }
 }
 
