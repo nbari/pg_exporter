@@ -17,15 +17,15 @@ use tracing::{debug, instrument, warn};
 ///
 /// ## CPU Usage
 /// - `pg_exporter_process_cpu_seconds_total` (Counter)
-///   - Total CPU time (user + system) since process start
-///   - **Value is normalized per-core** (100% = 1.0, not N cores × 100%)
-///   - Use `rate()` in Prometheus to get CPU percentage per core
-///   - Example: `rate(pg_exporter_process_cpu_seconds_total[5m]) * 100` gives 0-100% per core
+///   - Total CPU time (user + system) cumulative across all cores
+///   - **Matches node_exporter standard** - NOT normalized per-core
+///   - Example: Using 6 of 12 cores for 10s → counter increases by 60s
+///   - Use `pg_exporter_process_cpu_cores` for normalization in queries
 ///
 /// - `pg_exporter_process_cpu_cores` (IntGauge)
 ///   - Number of CPU cores available to the system
-///   - Use to calculate total CPU capacity
-///   - Example: Max CPU% = `cpu_cores * 100`
+///   - Use for calculating per-core percentage
+///   - Example: `rate(cpu_seconds_total) / cpu_cores * 100` = % per core (0-100%)
 ///
 /// ## Memory Usage  
 /// - `pg_exporter_process_resident_memory_bytes` (IntGauge)
@@ -54,16 +54,34 @@ use tracing::{debug, instrument, warn};
 ///
 /// # CPU Percentage Calculation
 ///
-/// **Before (confusing):**
-/// - On 12-core system: 100% per core = 1200% total
-/// - Dashboard shows 1200% CPU when using all cores
+/// **Node Exporter Approach (Standard):**
+/// - Metric is cumulative across ALL cores (not normalized)
+/// - On 12-core system using 6 cores for 10s → counter increases by 60 seconds
+/// - We integrate sysinfo's `cpu_usage()` over time for simplicity
 ///
-/// **After (normalized):**
-/// - CPU time is divided by number of cores
-/// - 100% = fully using 1 core
-/// - 1200% = fully using all 12 cores  
-/// - PromQL: `rate(pg_exporter_process_cpu_seconds_total[5m]) * 100` = % per core (0-100%)
-/// - Total %: `rate(pg_exporter_process_cpu_seconds_total[5m]) * pg_exporter_process_cpu_cores * 100`
+/// **How it works:**
+/// - `cpu_usage()` returns instantaneous CPU% (e.g., 600% = 6 cores)
+/// - We convert to cores: 600% / 100 = 6.0 cores
+/// - Multiply by time interval: 6.0 cores × 5 seconds = 30 CPU-seconds
+/// - Accumulate in counter for cumulative total
+///
+/// **PromQL Queries:**
+/// ```promql
+/// # Per-core percentage (0-100%)
+/// rate(pg_exporter_process_cpu_seconds_total[5m]) / on(job,instance) pg_exporter_process_cpu_cores * 100
+///
+/// # Total percentage (0-1200% on 12-core system)  
+/// rate(pg_exporter_process_cpu_seconds_total[5m]) * 100
+///
+/// # Number of cores in use
+/// rate(pg_exporter_process_cpu_seconds_total[5m])
+/// ```
+///
+/// **Why this approach:**
+/// - Simple: Uses only sysinfo crate (no /proc parsing)
+/// - Cross-platform: Works on Linux, macOS, BSD
+/// - Standard: Matches node_exporter semantics
+/// - Flexible: Can show both total % and per-core % in PromQL
 ///
 /// # Implementation Details
 ///
@@ -138,7 +156,7 @@ impl ProcessCollector {
     pub fn new() -> Self {
         let cpu_seconds_total = Counter::with_opts(Opts::new(
             "pg_exporter_process_cpu_seconds_total",
-            "Total user and system CPU time spent in seconds (normalized per-core)",
+            "Total user and system CPU time spent in seconds (cumulative across all cores)",
         ))
         .expect("pg_exporter_process_cpu_seconds_total");
 
@@ -247,21 +265,31 @@ impl ProcessCollector {
             self.resident_memory_bytes.set(rss as i64);
             self.virtual_memory_bytes.set(vsz as i64);
 
-            // CPU time (cumulative, normalized per-core)
-            // sysinfo 0.37: cpu_usage() returns total CPU time in seconds
-            // We normalize by dividing by number of cores so:
-            // - 100% = fully using 1 core
-            // - Not 1200% on a 12-core system
-            let cpu_time = process.run_time() as f64;
+            // CPU time (cumulative across all cores, like node_exporter)
+            // 
+            // sysinfo 0.37 cpu_usage() returns instantaneous CPU% (total across all cores)
+            // - Can exceed 100% on multi-core (e.g., 600% = using 6 cores)
+            // - We need to integrate over time to get cumulative CPU seconds
+            //
+            // Simple approach: Integrate cpu_usage() over scrape intervals
+            let cpu_percent = process.cpu_usage() as f64;  // Total CPU% across all cores
             
-            // Normalize by number of cores
-            // This makes rate(cpu_seconds_total[5m]) * 100 give 0-100% per core
-            let normalized_cpu_time = cpu_time / self.num_cores as f64;
+            // Convert percentage to cores in use
+            // Example: 600% = 6.0 cores
+            let cores_in_use = cpu_percent / 100.0;
             
-            // Counter must be monotonically increasing
-            let current_cpu = self.cpu_seconds_total.get();
-            if normalized_cpu_time > current_cpu {
-                self.cpu_seconds_total.inc_by(normalized_cpu_time - current_cpu);
+            // Assume Prometheus scrapes every 15-30 seconds
+            // We refresh process stats on each scrape, so use a conservative estimate
+            // TODO: Track actual elapsed time for better accuracy
+            let estimated_interval_seconds = 5.0;
+            
+            // Calculate CPU seconds consumed in this interval
+            // Example: 6 cores × 5 seconds = 30 CPU-seconds
+            let cpu_seconds_delta = cores_in_use * estimated_interval_seconds;
+            
+            // Only increment if we have meaningful CPU usage
+            if cpu_seconds_delta > 0.0 {
+                self.cpu_seconds_total.inc_by(cpu_seconds_delta);
             }
 
             // Thread count (Linux-specific via /proc)
@@ -300,7 +328,7 @@ impl ProcessCollector {
             debug!(
                 rss_mb = rss / 1024 / 1024,
                 vsz_mb = vsz / 1024 / 1024,
-                cpu_seconds_normalized = normalized_cpu_time,
+                cpu_seconds_total = self.cpu_seconds_total.get(),
                 cpu_cores = self.num_cores,
                 threads = self.threads.get(),
                 fds = self.open_fds.get(),

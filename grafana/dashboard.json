@@ -79,11 +79,137 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "description": "Current CPU usage (normalized per-core).\n\n100% = 1 CPU core fully utilized\n\nOn 12-core system: 50% = using 6 cores\n\nGOAL: < 5% under normal load\n\nThresholds:\n- Green: < 50%\n- Yellow: 50-80%\n- Red: > 80%",
+          "description": "Time spent collecting metrics from PostgreSQL per collector.\n\nGOAL: < 1 second per collector\n\nUse to identify slow collectors.",
           "fieldConfig": {
             "defaults": {
               "color": {
-                "mode": "thresholds"
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 1
+          },
+          "id": 204,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "rate(pg_exporter_collector_scrape_duration_seconds_sum{job=\"$job\", instance=\"$instance\"}[5m]) / rate(pg_exporter_collector_scrape_duration_seconds_count{job=\"$job\", instance=\"$instance\"}[5m])",
+              "legendFormat": "{{collector}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Collector Scrape Duration",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "CPU usage of pg_exporter process per-core (0-100%).\n\nMetric is cumulative across all cores (like node_exporter).\nDashboard divides by cpu_cores to show per-core percentage.\n\nGOAL: < 5% per core under normal load\n\nCALCULATION:\n- rate(cpu_seconds_total) = cores in use\n- rate(cpu_seconds_total) / cpu_cores * 100 = % per core (0-100%)\n- rate(cpu_seconds_total) * 100 = total % (0-1200% on 12-core)",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
               },
               "mappings": [],
               "max": 100,
@@ -97,166 +223,7 @@
                   },
                   {
                     "color": "yellow",
-                    "value": 50
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              },
-              "unit": "percent"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 4,
-            "w": 4,
-            "x": 0,
-            "y": 1
-          },
-          "id": 201,
-          "options": {
-            "orientation": "auto",
-            "reduceOptions": {
-              "values": false,
-              "calcs": [
-                "lastNotNull"
-              ],
-              "fields": ""
-            },
-            "showThresholdLabels": false,
-            "showThresholdMarkers": true,
-            "text": {}
-          },
-          "pluginVersion": "10.0.0",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
-              },
-              "expr": "rate(pg_exporter_process_cpu_seconds_total{job=\"$job\", instance=\"$instance\"}[5m]) * 100",
-              "refId": "A"
-            }
-          ],
-          "title": "CPU Usage",
-          "type": "gauge"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "description": "CPU cores available to the system.\n\nUse with CPU % to calculate total cores in use:\n- CPU % \u00d7 Cores = Cores utilized\n- Example: 50% \u00d7 12 = 6 cores",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "thresholds"
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "blue",
-                    "value": null
-                  }
-                ]
-              },
-              "unit": "short"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 4,
-            "w": 4,
-            "x": 4,
-            "y": 1
-          },
-          "id": 2011,
-          "options": {
-            "reduceOptions": {
-              "values": false,
-              "calcs": [
-                "lastNotNull"
-              ],
-              "fields": ""
-            },
-            "orientation": "auto",
-            "textMode": "value_and_name",
-            "colorMode": "background",
-            "graphMode": "none",
-            "justifyMode": "auto"
-          },
-          "pluginVersion": "10.0.0",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
-              },
-              "expr": "pg_exporter_process_cpu_cores{job=\"$job\", instance=\"$instance\"}",
-              "refId": "A"
-            }
-          ],
-          "title": "CPU Cores",
-          "type": "stat"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "description": "CPU usage trend over time (normalized per-core).\n\nMETRIC INTERPRETATION:\n- Values show CPU% per core (0-100%)\n- 100% = fully using 1 CPU core\n- On 12-core system: 50% = using 6 cores fully\n- CPU time is normalized to make multi-core usage intuitive\n\nGOAL: Low CPU usage (< 5% per core on normal scrape intervals)\n\nACTIONS IF HIGH:\n1. Reduce scrape frequency in Prometheus (default 15s \u2192 30s or 60s)\n2. Disable expensive collectors (--collector.stat, --collector.statements)\n3. Check slow collectors: pg_exporter_collector_scrape_duration_seconds\n4. Verify database connection pool isn't saturated",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "drawStyle": "line",
-                "fillOpacity": 20,
-                "gradientMode": "opacity",
-                "hideFrom": {
-                  "tooltip": false,
-                  "viz": false,
-                  "legend": false
-                },
-                "lineInterpolation": "smooth",
-                "lineWidth": 2,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "never",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "area"
-                }
-              },
-              "mappings": [],
-              "max": 100,
-              "min": 0,
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "transparent",
-                    "value": null
-                  },
-                  {
-                    "color": "yellow",
-                    "value": 50
+                    "value": 40
                   },
                   {
                     "color": "red",
@@ -270,11 +237,11 @@
           },
           "gridPos": {
             "h": 8,
-            "w": 16,
-            "x": 8,
+            "w": 12,
+            "x": 12,
             "y": 1
           },
-          "id": 2012,
+          "id": 201,
           "options": {
             "legend": {
               "calcs": [
@@ -298,13 +265,167 @@
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "rate(pg_exporter_process_cpu_seconds_total{job=\"$job\", instance=\"$instance\"}[5m]) * 100",
+              "expr": "rate(pg_exporter_process_cpu_seconds_total{job=\"$job\", instance=\"$instance\"}[5m]) / on(job,instance) pg_exporter_process_cpu_cores{job=\"$job\", instance=\"$instance\"} * 100",
               "legendFormat": "CPU %",
               "refId": "A"
             }
           ],
-          "title": "CPU Usage Trend",
+          "title": "Exporter Process CPU Usage",
           "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Collector health status. Green = OK, Red = Failed.\n\nShows last scrape success for each collector.\n\nACTIONS IF RED:\n1. Check pg_exporter logs\n2. Verify database connectivity\n3. Check collector requirements (extensions, permissions)",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [
+                {
+                  "options": {
+                    "0": {
+                      "text": "FAILED",
+                      "color": "red"
+                    }
+                  },
+                  "type": "value"
+                },
+                {
+                  "options": {
+                    "1": {
+                      "text": "OK",
+                      "color": "green"
+                    }
+                  },
+                  "type": "value"
+                }
+              ],
+              "max": 1,
+              "min": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 0,
+            "y": 9
+          },
+          "id": 206,
+          "options": {
+            "displayMode": "basic",
+            "minVizWidth": 0,
+            "minVizHeight": 10,
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "values": false,
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": ""
+            },
+            "showUnfilled": true
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_exporter_collector_last_scrape_success{job=\"$job\", instance=\"$instance\"}",
+              "legendFormat": "{{collector}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Exporter Scrape",
+          "type": "bargauge"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Total number of metrics currently exported by pg_exporter.\n\nGOAL: Keep cardinality under your monitoring platform limits\n- Cortex/Mimir: Often have strict series limits\n- Prometheus: High cardinality = high memory usage\n\nACTIONS IF TOO HIGH:\n1. Disable unnecessary collectors\n2. Filter databases (use PG_EXPORTER_EXCLUDE_DATABASES)\n3. Review metric labels for high cardinality\n4. Check for label explosion (many tables/databases)",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 5000
+                  },
+                  {
+                    "color": "red",
+                    "value": 10000
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 8,
+            "y": 9
+          },
+          "id": 203,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "values": false,
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": ""
+            },
+            "textMode": "value"
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_exporter_metrics_total{job=\"$job\", instance=\"$instance\"}",
+              "refId": "A"
+            }
+          ],
+          "title": "Total Metrics Exported",
+          "type": "stat"
         },
         {
           "datasource": {
@@ -354,6 +475,10 @@
                   {
                     "color": "green",
                     "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 524288000
                   }
                 ]
               },
@@ -364,8 +489,8 @@
           "gridPos": {
             "h": 8,
             "w": 8,
-            "x": 8,
-            "y": 5
+            "x": 16,
+            "y": 9
           },
           "id": 202,
           "options": {
@@ -392,7 +517,7 @@
                 "uid": "${DS_PROMETHEUS}"
               },
               "expr": "pg_exporter_process_resident_memory_bytes{job=\"$job\", instance=\"$instance\"}",
-              "legendFormat": "Resident Memory (RSS)",
+              "legendFormat": "RSS",
               "refId": "A"
             },
             {
@@ -401,600 +526,11 @@
                 "uid": "${DS_PROMETHEUS}"
               },
               "expr": "pg_exporter_process_virtual_memory_bytes{job=\"$job\", instance=\"$instance\"}",
-              "legendFormat": "Virtual Memory (VSZ)",
+              "legendFormat": "VSZ",
               "refId": "B"
             }
           ],
           "title": "Exporter Memory Usage",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "description": "Total number of metrics currently exported by pg_exporter.\n\nGOAL: Keep cardinality under your monitoring platform limits\n- Cortex/Mimir: Often have strict series limits\n- Prometheus: High cardinality = high memory usage\n\nACTIONS IF TOO HIGH:\n1. Disable unnecessary collectors\n2. Filter databases (use PG_EXPORTER_EXCLUDE_DATABASES)\n3. Review metric labels for high cardinality\n4. Check for label explosion (many tables/databases)",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "thresholds"
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  },
-                  {
-                    "color": "yellow",
-                    "value": 5000
-                  },
-                  {
-                    "color": "red",
-                    "value": 10000
-                  }
-                ]
-              },
-              "unit": "short"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 8,
-            "x": 16,
-            "y": 1
-          },
-          "id": 203,
-          "options": {
-            "reduceOptions": {
-              "values": false,
-              "fields": "",
-              "calcs": [
-                "lastNotNull"
-              ]
-            },
-            "orientation": "auto",
-            "textMode": "value",
-            "colorMode": "background",
-            "graphMode": "area",
-            "justifyMode": "auto"
-          },
-          "pluginVersion": "10.0.0",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
-              },
-              "expr": "pg_exporter_metrics_total{job=\"$job\", instance=\"$instance\"}",
-              "refId": "A"
-            }
-          ],
-          "title": "Total Metrics Exported",
-          "type": "stat"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "description": "Scrape duration per collector - identify slow collectors.\n\nGOAL: All collectors scrape in <500ms\n\nACTIONS IF SLOW:\n1. Check specific collector (see legend)\n2. Optimize queries for slow collector\n3. Check database performance\n4. Consider disabling expensive collectors\n\nUSE: histogram_quantile for percentiles (p50, p95, p99)",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "drawStyle": "line",
-                "fillOpacity": 10,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "tooltip": false,
-                  "viz": false,
-                  "legend": false
-                },
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "never",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  },
-                  {
-                    "color": "yellow",
-                    "value": 0.5
-                  },
-                  {
-                    "color": "red",
-                    "value": 1
-                  }
-                ]
-              },
-              "unit": "s"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 0,
-            "y": 9
-          },
-          "id": 204,
-          "options": {
-            "legend": {
-              "calcs": [
-                "last",
-                "mean",
-                "max"
-              ],
-              "displayMode": "table",
-              "placement": "right",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            }
-          },
-          "pluginVersion": "10.0.0",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
-              },
-              "expr": "histogram_quantile(0.99, rate(pg_exporter_collector_scrape_duration_seconds_bucket{job=\"$job\", instance=\"$instance\"}[5m]))",
-              "legendFormat": "{{collector}} - p99",
-              "refId": "A"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
-              },
-              "expr": "histogram_quantile(0.95, rate(pg_exporter_collector_scrape_duration_seconds_bucket{job=\"$job\", instance=\"$instance\"}[5m]))",
-              "legendFormat": "{{collector}} - p95",
-              "refId": "B"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
-              },
-              "expr": "histogram_quantile(0.50, rate(pg_exporter_collector_scrape_duration_seconds_bucket{job=\"$job\", instance=\"$instance\"}[5m]))",
-              "legendFormat": "{{collector}} - p50",
-              "refId": "C"
-            }
-          ],
-          "title": "Collector Scrape Duration (Percentiles)",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "description": "Collector health status with error rates. Green = successful scrape, Red = failed scrape.\n\nSHOWS:\n- Last scrape success (1 = success, 0 = failed)\n- Error rate (errors per second)\n\nGOAL: All collectors green with 0 errors/sec\n\nACTIONS IF RED:\n1. Check pg_exporter logs for specific collector errors\n2. Verify database connectivity and permissions\n3. Check collector requirements (extensions like pg_stat_statements)\n4. Review collector-specific configuration\n\nNOTE: Some collectors require --collector.<name> flag to be enabled",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "thresholds"
-              },
-              "mappings": [
-                {
-                  "options": {
-                    "0": {
-                      "text": "FAILED",
-                      "color": "dark-red"
-                    }
-                  },
-                  "type": "value"
-                },
-                {
-                  "options": {
-                    "1": {
-                      "text": "OK",
-                      "color": "dark-green"
-                    }
-                  },
-                  "type": "value"
-                }
-              ],
-              "max": 1,
-              "min": 0,
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "red",
-                    "value": null
-                  },
-                  {
-                    "color": "green",
-                    "value": 1
-                  }
-                ]
-              },
-              "unit": "short"
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "/.*errors.*/"
-                },
-                "properties": [
-                  {
-                    "id": "unit",
-                    "value": "ops"
-                  },
-                  {
-                    "id": "max",
-                    "value": 10
-                  },
-                  {
-                    "id": "min",
-                    "value": 0
-                  },
-                  {
-                    "id": "mappings",
-                    "value": []
-                  },
-                  {
-                    "id": "thresholds",
-                    "value": {
-                      "mode": "absolute",
-                      "steps": [
-                        {
-                          "color": "green",
-                          "value": null
-                        },
-                        {
-                          "color": "yellow",
-                          "value": 0.1
-                        },
-                        {
-                          "color": "red",
-                          "value": 1
-                        }
-                      ]
-                    }
-                  }
-                ]
-              }
-            ]
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 0,
-            "y": 17
-          },
-          "id": 206,
-          "options": {
-            "reduceOptions": {
-              "values": false,
-              "fields": "",
-              "calcs": [
-                "lastNotNull"
-              ]
-            },
-            "orientation": "horizontal",
-            "displayMode": "gradient",
-            "showUnfilled": true,
-            "minVizWidth": 0,
-            "minVizHeight": 10
-          },
-          "pluginVersion": "10.0.0",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
-              },
-              "expr": "pg_exporter_collector_last_scrape_success{job=\"$job\", instance=\"$instance\"}",
-              "legendFormat": "{{collector}} - status",
-              "refId": "A"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
-              },
-              "expr": "rate(pg_exporter_collector_scrape_errors_total{job=\"$job\", instance=\"$instance\"}[5m])",
-              "legendFormat": "{{collector}} - errors/sec",
-              "refId": "B"
-            }
-          ],
-          "title": "Collector Health & Errors",
-          "type": "bargauge"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "description": "Last scrape timestamp for each collector. Detect stale collectors.\n\nGOAL: All collectors scraped recently (< 2 minutes ago)\n\nACTIONS IF STALE:\n1. Check if collector is stuck\n2. Review pg_exporter logs\n3. Verify Prometheus is scraping regularly",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "thresholds"
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "red",
-                    "value": null
-                  },
-                  {
-                    "color": "yellow",
-                    "value": -300
-                  },
-                  {
-                    "color": "green",
-                    "value": -120
-                  }
-                ]
-              },
-              "unit": "dateTimeFromNow"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 12,
-            "y": 17
-          },
-          "id": 207,
-          "options": {
-            "reduceOptions": {
-              "values": false,
-              "fields": "",
-              "calcs": [
-                "lastNotNull"
-              ]
-            },
-            "orientation": "auto",
-            "textMode": "value_and_name",
-            "colorMode": "background",
-            "graphMode": "none",
-            "justifyMode": "auto"
-          },
-          "pluginVersion": "10.0.0",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
-              },
-              "expr": "pg_exporter_collector_last_scrape_timestamp_seconds{job=\"$job\", instance=\"$instance\"} * 1000",
-              "legendFormat": "{{collector}}",
-              "refId": "A"
-            }
-          ],
-          "title": "Last Scrape Time",
-          "type": "stat"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "description": "Total scrapes performed since exporter start. Validates exporter is active.\n\nGOAL: Steadily increasing\n\nACTIONS IF FLAT:\n1. Check Prometheus is scraping the endpoint\n2. Verify pg_exporter is running\n3. Check network connectivity",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "drawStyle": "line",
-                "fillOpacity": 10,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "tooltip": false,
-                  "viz": false,
-                  "legend": false
-                },
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "never",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              },
-              "unit": "short"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 6,
-            "x": 12,
-            "y": 17
-          },
-          "id": 208,
-          "options": {
-            "legend": {
-              "calcs": [
-                "last",
-                "mean"
-              ],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": false
-            },
-            "tooltip": {
-              "mode": "single",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "10.0.0",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
-              },
-              "expr": "pg_exporter_scrapes_total{job=\"$job\", instance=\"$instance\"}",
-              "legendFormat": "Total Scrapes",
-              "refId": "A"
-            }
-          ],
-          "title": "Total Scrapes",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "description": "Process resource metrics: threads, file descriptors, uptime.\n\nGOAL: Stable values\n\nACTIONS IF INCREASING:\n- File descriptors: Check for connection leaks\n- Threads: Normal if using thread pools",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "drawStyle": "line",
-                "fillOpacity": 10,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "tooltip": false,
-                  "viz": false,
-                  "legend": false
-                },
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "never",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              },
-              "unit": "short"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 6,
-            "x": 18,
-            "y": 17
-          },
-          "id": 209,
-          "options": {
-            "legend": {
-              "calcs": [
-                "last",
-                "max"
-              ],
-              "displayMode": "table",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "10.0.0",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
-              },
-              "expr": "pg_exporter_process_threads{job=\"$job\", instance=\"$instance\"}",
-              "legendFormat": "Threads",
-              "refId": "A"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
-              },
-              "expr": "pg_exporter_process_open_fds{job=\"$job\", instance=\"$instance\"}",
-              "legendFormat": "File Descriptors",
-              "refId": "B"
-            }
-          ],
-          "title": "Process Resources",
           "type": "timeseries"
         }
       ],
@@ -4688,146 +4224,6 @@
       ],
       "title": "Total Index Size",
       "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "description": "Collector health status with error rates. Green = successful scrape, Red = failed scrape.\n\nSHOWS:\n- Last scrape success (1 = success, 0 = failed)\n- Error rate (errors per second)\n\nGOAL: All collectors green with 0 errors/sec\n\nACTIONS IF RED:\n1. Check pg_exporter logs for specific collector errors\n2. Verify database connectivity and permissions\n3. Check collector requirements (extensions like pg_stat_statements)\n4. Review collector-specific configuration\n\nNOTE: Some collectors require --collector.<name> flag to be enabled",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [
-            {
-              "options": {
-                "0": {
-                  "text": "FAILED",
-                  "color": "dark-red"
-                }
-              },
-              "type": "value"
-            },
-            {
-              "options": {
-                "1": {
-                  "text": "OK",
-                  "color": "dark-green"
-                }
-              },
-              "type": "value"
-            }
-          ],
-          "max": 1,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "unit": "short"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": "/.*errors.*/"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "ops"
-              },
-              {
-                "id": "max",
-                "value": 10
-              },
-              {
-                "id": "min",
-                "value": 0
-              },
-              {
-                "id": "mappings",
-                "value": []
-              },
-              {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    {
-                      "color": "green",
-                      "value": null
-                    },
-                    {
-                      "color": "yellow",
-                      "value": 0.1
-                    },
-                    {
-                      "color": "red",
-                      "value": 1
-                    }
-                  ]
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 17
-      },
-      "id": 206,
-      "options": {
-        "reduceOptions": {
-          "values": false,
-          "fields": "",
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "orientation": "horizontal",
-        "displayMode": "gradient",
-        "showUnfilled": true,
-        "minVizWidth": 0,
-        "minVizHeight": 10
-      },
-      "pluginVersion": "10.0.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "pg_exporter_collector_last_scrape_success{job=\"$job\", instance=\"$instance\"}",
-          "legendFormat": "{{collector}} - status",
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "rate(pg_exporter_collector_scrape_errors_total{job=\"$job\", instance=\"$instance\"}[5m])",
-          "legendFormat": "{{collector}} - errors/sec",
-          "refId": "B"
-        }
-      ],
-      "title": "Collector Health & Errors",
-      "type": "bargauge"
     }
   ],
   "refresh": "30s",
