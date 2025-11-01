@@ -79,43 +79,15 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "description": "CPU usage of the pg_exporter process itself. Monitor exporter resource consumption.\n\nGOAL: Low CPU usage (< 5% on dedicated scrape intervals)\n\nACTIONS IF HIGH:\n1. Reduce scrape frequency in Prometheus\n2. Disable expensive collectors\n3. Optimize database queries\n4. Check for slow collectors in scrape duration metrics",
+          "description": "Current CPU usage (normalized per-core).\n\n100% = 1 CPU core fully utilized\n\nOn 12-core system: 50% = using 6 cores\n\nGOAL: < 5% under normal load\n\nThresholds:\n- Green: < 50%\n- Yellow: 50-80%\n- Red: > 80%",
           "fieldConfig": {
             "defaults": {
               "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "drawStyle": "line",
-                "fillOpacity": 10,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "tooltip": false,
-                  "viz": false,
-                  "legend": false
-                },
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "never",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
+                "mode": "thresholds"
               },
               "mappings": [],
+              "max": 100,
+              "min": 0,
               "thresholds": {
                 "mode": "absolute",
                 "steps": [
@@ -138,12 +110,171 @@
             "overrides": []
           },
           "gridPos": {
-            "h": 8,
-            "w": 8,
+            "h": 4,
+            "w": 4,
             "x": 0,
             "y": 1
           },
           "id": 201,
+          "options": {
+            "orientation": "auto",
+            "reduceOptions": {
+              "values": false,
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": ""
+            },
+            "showThresholdLabels": false,
+            "showThresholdMarkers": true,
+            "text": {}
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "rate(pg_exporter_process_cpu_seconds_total{job=\"$job\", instance=\"$instance\"}[5m]) * 100",
+              "refId": "A"
+            }
+          ],
+          "title": "CPU Usage",
+          "type": "gauge"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "CPU cores available to the system.\n\nUse with CPU % to calculate total cores in use:\n- CPU % \u00d7 Cores = Cores utilized\n- Example: 50% \u00d7 12 = 6 cores",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "blue",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 4,
+            "x": 4,
+            "y": 1
+          },
+          "id": 2011,
+          "options": {
+            "reduceOptions": {
+              "values": false,
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": ""
+            },
+            "orientation": "auto",
+            "textMode": "value_and_name",
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto"
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_exporter_process_cpu_cores{job=\"$job\", instance=\"$instance\"}",
+              "refId": "A"
+            }
+          ],
+          "title": "CPU Cores",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "CPU usage trend over time (normalized per-core).\n\nMETRIC INTERPRETATION:\n- Values show CPU% per core (0-100%)\n- 100% = fully using 1 CPU core\n- On 12-core system: 50% = using 6 cores fully\n- CPU time is normalized to make multi-core usage intuitive\n\nGOAL: Low CPU usage (< 5% per core on normal scrape intervals)\n\nACTIONS IF HIGH:\n1. Reduce scrape frequency in Prometheus (default 15s \u2192 30s or 60s)\n2. Disable expensive collectors (--collector.stat, --collector.statements)\n3. Check slow collectors: pg_exporter_collector_scrape_duration_seconds\n4. Verify database connection pool isn't saturated",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 20,
+                "gradientMode": "opacity",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "area"
+                }
+              },
+              "mappings": [],
+              "max": 100,
+              "min": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "transparent",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 50
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              },
+              "unit": "percent"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 16,
+            "x": 8,
+            "y": 1
+          },
+          "id": 2012,
           "options": {
             "legend": {
               "calcs": [
@@ -167,12 +298,12 @@
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "rate(pg_exporter_process_cpu_seconds_total{instance=\"$instance\"}[5m]) * 100",
-              "legendFormat": "CPU Usage %",
+              "expr": "rate(pg_exporter_process_cpu_seconds_total{job=\"$job\", instance=\"$instance\"}[5m]) * 100",
+              "legendFormat": "CPU %",
               "refId": "A"
             }
           ],
-          "title": "Exporter CPU Usage",
+          "title": "CPU Usage Trend",
           "type": "timeseries"
         },
         {
@@ -234,7 +365,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 1
+            "y": 5
           },
           "id": 202,
           "options": {
@@ -260,7 +391,7 @@
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "pg_exporter_process_resident_memory_bytes{instance=\"$instance\"}",
+              "expr": "pg_exporter_process_resident_memory_bytes{job=\"$job\", instance=\"$instance\"}",
               "legendFormat": "Resident Memory (RSS)",
               "refId": "A"
             },
@@ -269,7 +400,7 @@
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "pg_exporter_process_virtual_memory_bytes{instance=\"$instance\"}",
+              "expr": "pg_exporter_process_virtual_memory_bytes{job=\"$job\", instance=\"$instance\"}",
               "legendFormat": "Virtual Memory (VSZ)",
               "refId": "B"
             }
@@ -326,7 +457,7 @@
               ]
             },
             "orientation": "auto",
-            "textMode": "value_and_name",
+            "textMode": "value",
             "colorMode": "background",
             "graphMode": "area",
             "justifyMode": "auto"
@@ -338,7 +469,7 @@
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "pg_exporter_metrics_total{instance=\"$instance\"}",
+              "expr": "pg_exporter_metrics_total{job=\"$job\", instance=\"$instance\"}",
               "refId": "A"
             }
           ],
@@ -438,7 +569,7 @@
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "histogram_quantile(0.99, rate(pg_exporter_collector_scrape_duration_seconds_bucket{instance=\"$instance\"}[5m]))",
+              "expr": "histogram_quantile(0.99, rate(pg_exporter_collector_scrape_duration_seconds_bucket{job=\"$job\", instance=\"$instance\"}[5m]))",
               "legendFormat": "{{collector}} - p99",
               "refId": "A"
             },
@@ -447,7 +578,7 @@
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "histogram_quantile(0.95, rate(pg_exporter_collector_scrape_duration_seconds_bucket{instance=\"$instance\"}[5m]))",
+              "expr": "histogram_quantile(0.95, rate(pg_exporter_collector_scrape_duration_seconds_bucket{job=\"$job\", instance=\"$instance\"}[5m]))",
               "legendFormat": "{{collector}} - p95",
               "refId": "B"
             },
@@ -456,7 +587,7 @@
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "histogram_quantile(0.50, rate(pg_exporter_collector_scrape_duration_seconds_bucket{instance=\"$instance\"}[5m]))",
+              "expr": "histogram_quantile(0.50, rate(pg_exporter_collector_scrape_duration_seconds_bucket{job=\"$job\", instance=\"$instance\"}[5m]))",
               "legendFormat": "{{collector}} - p50",
               "refId": "C"
             }
@@ -469,103 +600,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "description": "Failed collector scrapes over time. Should always be zero.\n\nGOAL: Zero errors\n\nACTIONS IF > 0:\n1. Check pg_exporter logs for errors\n2. Verify database connectivity\n3. Check collector-specific requirements (extensions, permissions)\n4. Review error pattern per collector",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "drawStyle": "line",
-                "fillOpacity": 10,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "tooltip": false,
-                  "viz": false,
-                  "legend": false
-                },
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "auto",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "normal"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  },
-                  {
-                    "color": "red",
-                    "value": 1
-                  }
-                ]
-              },
-              "unit": "short"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 12,
-            "y": 9
-          },
-          "id": 205,
-          "options": {
-            "legend": {
-              "calcs": [
-                "last",
-                "sum"
-              ],
-              "displayMode": "table",
-              "placement": "right",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            }
-          },
-          "pluginVersion": "10.0.0",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
-              },
-              "expr": "rate(pg_exporter_collector_scrape_errors_total{instance=\"$instance\"}[5m])",
-              "legendFormat": "{{collector}} errors/sec",
-              "refId": "A"
-            }
-          ],
-          "title": "Collector Scrape Errors",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "description": "Success/failure status of last scrape per collector.\n\nGOAL: All collectors showing 1 (success)\n\nACTIONS IF 0:\n1. Check pg_exporter logs\n2. Verify database connectivity\n3. Check collector requirements (extensions, permissions)",
+          "description": "Collector health status with error rates. Green = successful scrape, Red = failed scrape.\n\nSHOWS:\n- Last scrape success (1 = success, 0 = failed)\n- Error rate (errors per second)\n\nGOAL: All collectors green with 0 errors/sec\n\nACTIONS IF RED:\n1. Check pg_exporter logs for specific collector errors\n2. Verify database connectivity and permissions\n3. Check collector requirements (extensions like pg_stat_statements)\n4. Review collector-specific configuration\n\nNOTE: Some collectors require --collector.<name> flag to be enabled",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -576,7 +611,7 @@
                   "options": {
                     "0": {
                       "text": "FAILED",
-                      "color": "red"
+                      "color": "dark-red"
                     }
                   },
                   "type": "value"
@@ -584,13 +619,15 @@
                 {
                   "options": {
                     "1": {
-                      "text": "SUCCESS",
-                      "color": "green"
+                      "text": "OK",
+                      "color": "dark-green"
                     }
                   },
                   "type": "value"
                 }
               ],
+              "max": 1,
+              "min": 0,
               "thresholds": {
                 "mode": "absolute",
                 "steps": [
@@ -603,13 +640,59 @@
                     "value": 1
                   }
                 ]
-              }
+              },
+              "unit": "short"
             },
-            "overrides": []
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "/.*errors.*/"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "ops"
+                  },
+                  {
+                    "id": "max",
+                    "value": 10
+                  },
+                  {
+                    "id": "min",
+                    "value": 0
+                  },
+                  {
+                    "id": "mappings",
+                    "value": []
+                  },
+                  {
+                    "id": "thresholds",
+                    "value": {
+                      "mode": "absolute",
+                      "steps": [
+                        {
+                          "color": "green",
+                          "value": null
+                        },
+                        {
+                          "color": "yellow",
+                          "value": 0.1
+                        },
+                        {
+                          "color": "red",
+                          "value": 1
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
           },
           "gridPos": {
             "h": 8,
-            "w": 6,
+            "w": 12,
             "x": 0,
             "y": 17
           },
@@ -622,11 +705,11 @@
                 "lastNotNull"
               ]
             },
-            "orientation": "auto",
-            "textMode": "value_and_name",
-            "colorMode": "background",
-            "graphMode": "none",
-            "justifyMode": "auto"
+            "orientation": "horizontal",
+            "displayMode": "gradient",
+            "showUnfilled": true,
+            "minVizWidth": 0,
+            "minVizHeight": 10
           },
           "pluginVersion": "10.0.0",
           "targets": [
@@ -635,13 +718,22 @@
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "pg_exporter_collector_last_scrape_success{instance=\"$instance\"}",
-              "legendFormat": "{{collector}}",
+              "expr": "pg_exporter_collector_last_scrape_success{job=\"$job\", instance=\"$instance\"}",
+              "legendFormat": "{{collector}} - status",
               "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "rate(pg_exporter_collector_scrape_errors_total{job=\"$job\", instance=\"$instance\"}[5m])",
+              "legendFormat": "{{collector}} - errors/sec",
+              "refId": "B"
             }
           ],
-          "title": "Collector Health Status",
-          "type": "stat"
+          "title": "Collector Health & Errors",
+          "type": "bargauge"
         },
         {
           "datasource": {
@@ -678,8 +770,8 @@
           },
           "gridPos": {
             "h": 8,
-            "w": 6,
-            "x": 6,
+            "w": 12,
+            "x": 12,
             "y": 17
           },
           "id": 207,
@@ -704,7 +796,7 @@
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "pg_exporter_collector_last_scrape_timestamp_seconds{instance=\"$instance\"} * 1000",
+              "expr": "pg_exporter_collector_last_scrape_timestamp_seconds{job=\"$job\", instance=\"$instance\"} * 1000",
               "legendFormat": "{{collector}}",
               "refId": "A"
             }
@@ -796,7 +888,7 @@
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "pg_exporter_scrapes_total{instance=\"$instance\"}",
+              "expr": "pg_exporter_scrapes_total{job=\"$job\", instance=\"$instance\"}",
               "legendFormat": "Total Scrapes",
               "refId": "A"
             }
@@ -888,7 +980,7 @@
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "pg_exporter_process_threads{instance=\"$instance\"}",
+              "expr": "pg_exporter_process_threads{job=\"$job\", instance=\"$instance\"}",
               "legendFormat": "Threads",
               "refId": "A"
             },
@@ -897,7 +989,7 @@
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "pg_exporter_process_open_fds{instance=\"$instance\"}",
+              "expr": "pg_exporter_process_open_fds{job=\"$job\", instance=\"$instance\"}",
               "legendFormat": "File Descriptors",
               "refId": "B"
             }
@@ -975,7 +1067,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_version_info{instance=\"$instance\"}",
+          "expr": "pg_version_info{job=\"$job\", instance=\"$instance\"}",
           "format": "table",
           "instant": true,
           "refId": "A"
@@ -1036,7 +1128,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_postmaster_start_time_seconds{instance=\"$instance\"} * 1000",
+          "expr": "pg_postmaster_start_time_seconds{job=\"$job\", instance=\"$instance\"} * 1000",
           "instant": true,
           "refId": "A"
         }
@@ -1095,7 +1187,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_settings_max_connections{instance=\"$instance\"}",
+          "expr": "pg_settings_max_connections{job=\"$job\", instance=\"$instance\"}",
           "instant": true,
           "refId": "A"
         }
@@ -1177,7 +1269,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_settings_autovacuum{instance=\"$instance\"}",
+          "expr": "pg_settings_autovacuum{job=\"$job\", instance=\"$instance\"}",
           "instant": true,
           "refId": "A"
         }
@@ -1259,7 +1351,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_settings_fsync{instance=\"$instance\"}",
+          "expr": "pg_settings_fsync{job=\"$job\", instance=\"$instance\"}",
           "instant": true,
           "refId": "A"
         }
@@ -1341,7 +1433,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_settings_synchronous_commit{instance=\"$instance\"}",
+          "expr": "pg_settings_synchronous_commit{job=\"$job\", instance=\"$instance\"}",
           "instant": true,
           "refId": "A"
         }
@@ -1400,7 +1492,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_settings_shared_buffers_bytes{instance=\"$instance\"}",
+          "expr": "pg_settings_shared_buffers_bytes{job=\"$job\", instance=\"$instance\"}",
           "instant": true,
           "refId": "A"
         }
@@ -1460,7 +1552,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_settings_work_mem_bytes{instance=\"$instance\"}",
+          "expr": "pg_settings_work_mem_bytes{job=\"$job\", instance=\"$instance\"}",
           "instant": true,
           "refId": "A"
         }
@@ -1519,7 +1611,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_settings_maintenance_work_mem_bytes{instance=\"$instance\"}",
+          "expr": "pg_settings_maintenance_work_mem_bytes{job=\"$job\", instance=\"$instance\"}",
           "instant": true,
           "refId": "A"
         }
@@ -1602,7 +1694,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_stat_activity_utilization_ratio{instance=\"$instance\"}",
+          "expr": "pg_stat_activity_utilization_ratio{job=\"$job\", instance=\"$instance\"}",
           "refId": "A"
         }
       ],
@@ -1693,7 +1785,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_stat_activity_idle_in_transaction{instance=\"$instance\"}",
+          "expr": "pg_stat_activity_idle_in_transaction{job=\"$job\", instance=\"$instance\"}",
           "legendFormat": "{{datname}} - idle_in_transaction",
           "refId": "A"
         },
@@ -1702,7 +1794,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_stat_activity_idle_in_transaction_aborted{instance=\"$instance\"}",
+          "expr": "pg_stat_activity_idle_in_transaction_aborted{job=\"$job\", instance=\"$instance\"}",
           "legendFormat": "{{datname}} - idle_in_transaction_aborted",
           "refId": "B"
         }
@@ -1794,7 +1886,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_stat_activity_max_connections{instance=\"$instance\"}",
+          "expr": "pg_stat_activity_max_connections{job=\"$job\", instance=\"$instance\"}",
           "legendFormat": "Max Connections",
           "refId": "A"
         },
@@ -1803,7 +1895,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_stat_activity_used_connections{instance=\"$instance\"}",
+          "expr": "pg_stat_activity_used_connections{job=\"$job\", instance=\"$instance\"}",
           "legendFormat": "Used Connections",
           "refId": "B"
         },
@@ -1812,7 +1904,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_stat_activity_available_connections{instance=\"$instance\"}",
+          "expr": "pg_stat_activity_available_connections{job=\"$job\", instance=\"$instance\"}",
           "legendFormat": "Available Connections",
           "refId": "C"
         }
@@ -1918,7 +2010,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_stat_activity_connections_by_application{instance=\"$instance\", datname=~\"$database\"}",
+          "expr": "pg_stat_activity_connections_by_application{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}",
           "legendFormat": "{{datname}} - {{application_name}}",
           "refId": "A"
         }
@@ -2010,7 +2102,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_stat_activity_idle_age_1m{instance=\"$instance\", datname=~\"$database\"}",
+          "expr": "pg_stat_activity_idle_age_1m{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}",
           "legendFormat": "{{datname}} - <1min (normal)",
           "refId": "A"
         },
@@ -2019,7 +2111,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_stat_activity_idle_age_5m{instance=\"$instance\", datname=~\"$database\"}",
+          "expr": "pg_stat_activity_idle_age_5m{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}",
           "legendFormat": "{{datname}} - 1-5min (ok)",
           "refId": "B"
         },
@@ -2028,7 +2120,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_stat_activity_idle_age_15m{instance=\"$instance\", datname=~\"$database\"}",
+          "expr": "pg_stat_activity_idle_age_15m{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}",
           "legendFormat": "{{datname}} - 5-15min (investigate)",
           "refId": "C"
         },
@@ -2037,7 +2129,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_stat_activity_idle_age_1h{instance=\"$instance\", datname=~\"$database\"}",
+          "expr": "pg_stat_activity_idle_age_1h{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}",
           "legendFormat": "{{datname}} - 15min-1h (leak?)",
           "refId": "D"
         },
@@ -2046,7 +2138,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_stat_activity_idle_age_old{instance=\"$instance\", datname=~\"$database\"}",
+          "expr": "pg_stat_activity_idle_age_old{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}",
           "legendFormat": "{{datname}} - >1h (LEAK!)",
           "refId": "E"
         }
@@ -2146,7 +2238,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_stat_activity_max_query_duration_seconds{instance=\"$instance\", datname=~\"$database\"}",
+          "expr": "pg_stat_activity_max_query_duration_seconds{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}",
           "legendFormat": "{{datname}} - max transaction duration",
           "refId": "A"
         },
@@ -2155,7 +2247,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_stat_activity_max_query_duration{instance=\"$instance\", datname=~\"$database\"}",
+          "expr": "pg_stat_activity_max_query_duration_seconds{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}",
           "legendFormat": "{{datname}} - max query duration",
           "refId": "B"
         }
@@ -2246,7 +2338,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_wait_event_type{instance=\"$instance\"}",
+          "expr": "pg_wait_event_type{job=\"$job\", instance=\"$instance\"}",
           "legendFormat": "{{type}}",
           "refId": "A"
         }
@@ -2352,7 +2444,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "topk(10, postgres_pg_stat_statements_total_exec_time_seconds{instance=\"$instance\", datname=~\"$database\"})",
+          "expr": "topk(10, postgres_pg_stat_statements_total_exec_time_seconds{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
           "legendFormat": "{{query_short}}",
           "refId": "A"
         }
@@ -2444,7 +2536,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "topk(10, postgres_pg_stat_statements_mean_exec_time_seconds{instance=\"$instance\", datname=~\"$database\"})",
+          "expr": "topk(10, postgres_pg_stat_statements_mean_exec_time_seconds{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
           "legendFormat": "{{query_short}}",
           "refId": "A"
         }
@@ -2535,7 +2627,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "topk(10, rate(postgres_pg_stat_statements_calls_total{instance=\"$instance\", datname=~\"$database\"}[5m]))",
+          "expr": "topk(10, rate(postgres_pg_stat_statements_calls_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m]))",
           "legendFormat": "{{query_short}}",
           "refId": "A"
         }
@@ -2627,7 +2719,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "postgres_pg_stat_statements_cache_hit_ratio{instance=\"$instance\", datname=~\"$database\"} < 0.9",
+          "expr": "postgres_pg_stat_statements_cache_hit_ratio{job=\"$job\", instance=\"$instance\", datname=~\"$database\"} < 0.9",
           "legendFormat": "{{query_short}}",
           "refId": "A"
         }
@@ -2719,7 +2811,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "topk(10, postgres_pg_stat_statements_temp_blks_written_total{instance=\"$instance\", datname=~\"$database\"})",
+          "expr": "topk(10, postgres_pg_stat_statements_temp_blks_written_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
           "legendFormat": "{{query_short}} - temp writes",
           "refId": "A"
         },
@@ -2728,7 +2820,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "topk(10, postgres_pg_stat_statements_temp_blks_read_total{instance=\"$instance\", datname=~\"$database\"})",
+          "expr": "topk(10, postgres_pg_stat_statements_temp_blks_read_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
           "legendFormat": "{{query_short}} - temp reads",
           "refId": "B"
         }
@@ -2820,7 +2912,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "topk(10, postgres_pg_stat_statements_wal_bytes_total{instance=\"$instance\", datname=~\"$database\"})",
+          "expr": "topk(10, postgres_pg_stat_statements_wal_bytes_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
           "legendFormat": "{{query_short}}",
           "refId": "A"
         }
@@ -2847,7 +2939,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Checkpoint frequency and timing.\n\nGOAL: Checkpoints spread evenly, meeting checkpoint_completion_target\n- Too frequent: Tune checkpoint_timeout, increase max_wal_size\n- Too slow: Increase shared_buffers\n\nACTIONS TO IMPROVE:\n1. Tune checkpoint_timeout (5min-30min typical)\n2. Set checkpoint_completion_target = 0.9\n3. Increase max_wal_size for write-heavy workloads\n4. Monitor checkpoint_warning in logs\n5. Balance I/O load distribution\n\nMETRICS: Timed vs requested checkpoints",
+      "description": "Checkpoint frequency and timing.\n\nREQUIRES: PostgreSQL 17+ (uses pg_stat_checkpointer)\nFor PostgreSQL 16 and earlier, this panel will show no data.\n\nGOAL: Checkpoints spread evenly, meeting checkpoint_completion_target\n- Too frequent: Tune checkpoint_timeout, increase max_wal_size\n- Too slow: Increase shared_buffers\n\nACTIONS TO IMPROVE:\n1. Tune checkpoint_timeout (5min-30min typical)\n2. Set checkpoint_completion_target = 0.9\n3. Increase max_wal_size for write-heavy workloads\n4. Monitor checkpoint_warning in logs\n5. Balance I/O load distribution\n\nMETRICS: Timed vs requested checkpoints (from pg_stat_checkpointer)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2925,7 +3017,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "rate(pg_stat_bgwriter_checkpoints_timed{instance=\"$instance\"}[5m])",
+          "expr": "rate(pg_stat_checkpointer_timed_total{job=\"$job\", instance=\"$instance\"}[5m])",
           "legendFormat": "Timed checkpoints",
           "refId": "A"
         },
@@ -2934,7 +3026,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "rate(pg_stat_bgwriter_checkpoints_req{instance=\"$instance\"}[5m])",
+          "expr": "rate(pg_stat_checkpointer_requested_total{job=\"$job\", instance=\"$instance\"}[5m])",
           "legendFormat": "Requested checkpoints",
           "refId": "B"
         }
@@ -3029,7 +3121,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "rate(pg_stat_archiver_archived_count{instance=\"$instance\"}[5m])",
+          "expr": "rate(pg_stat_archiver_archived_total{job=\"$job\", instance=\"$instance\"}[5m])",
           "legendFormat": "Archived",
           "refId": "A"
         },
@@ -3038,7 +3130,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "rate(pg_stat_archiver_failed_count{instance=\"$instance\"}[5m])",
+          "expr": "rate(pg_stat_archiver_failed_total{job=\"$job\", instance=\"$instance\"}[5m])",
           "legendFormat": "Failed",
           "refId": "B"
         }
@@ -3167,7 +3259,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_stat_database_numbackends{instance=\"$instance\", datname=~\"$database\"}",
+          "expr": "pg_stat_database_numbackends{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}",
           "legendFormat": "{{datname}} - backends",
           "refId": "A"
         },
@@ -3176,7 +3268,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "rate(pg_stat_database_xact_commit{instance=\"$instance\", datname=~\"$database\"}[5m]) + rate(pg_stat_database_xact_rollback{instance=\"$instance\", datname=~\"$database\"}[5m])",
+          "expr": "rate(pg_stat_database_xact_commit{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m]) + rate(pg_stat_database_xact_rollback{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m])",
           "legendFormat": "{{datname}} - queries/sec",
           "refId": "B"
         }
@@ -3268,7 +3360,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_stat_activity_count{instance=\"$instance\", datname=~\"$database\"}",
+          "expr": "pg_stat_activity_count{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}",
           "legendFormat": "{{datname}} - {{state}}",
           "refId": "A"
         }
@@ -3360,7 +3452,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_stat_activity_waiting_connections{instance=\"$instance\", datname=~\"$database\"}",
+          "expr": "pg_stat_activity_waiting_connections{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}",
           "legendFormat": "{{datname}} - waiting",
           "refId": "A"
         },
@@ -3369,7 +3461,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_stat_activity_blocked_connections{instance=\"$instance\", datname=~\"$database\"}",
+          "expr": "pg_stat_activity_blocked_connections{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}",
           "legendFormat": "{{datname}} - blocked",
           "refId": "B"
         }
@@ -3461,7 +3553,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "rate(pg_stat_database_blks_read{instance=\"$instance\", datname=~\"$database\"}[5m]) * 8192",
+          "expr": "rate(pg_stat_database_blks_read{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m]) * 8192",
           "legendFormat": "{{datname}} - disk reads",
           "refId": "A"
         }
@@ -3553,7 +3645,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "rate(pg_stat_database_tup_inserted{instance=\"$instance\", datname=~\"$database\"}[5m])",
+          "expr": "rate(pg_stat_database_tup_inserted{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m])",
           "legendFormat": "{{datname}} - inserts",
           "refId": "A"
         },
@@ -3562,7 +3654,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "rate(pg_stat_database_tup_updated{instance=\"$instance\", datname=~\"$database\"}[5m])",
+          "expr": "rate(pg_stat_database_tup_updated{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m])",
           "legendFormat": "{{datname}} - updates",
           "refId": "B"
         },
@@ -3571,7 +3663,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "rate(pg_stat_database_tup_deleted{instance=\"$instance\", datname=~\"$database\"}[5m])",
+          "expr": "rate(pg_stat_database_tup_deleted{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m])",
           "legendFormat": "{{datname}} - deletes",
           "refId": "C"
         }
@@ -3677,7 +3769,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_locks_count{instance=\"$instance\", datname=~\"$database\"}",
+          "expr": "pg_locks_count{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}",
           "legendFormat": "{{datname}} - {{mode}}",
           "refId": "A"
         }
@@ -3782,7 +3874,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_vacuum_heap_progress{instance=\"$instance\"}",
+          "expr": "pg_vacuum_heap_progress{job=\"$job\", instance=\"$instance\"}",
           "legendFormat": "{{table}}",
           "refId": "A"
         }
@@ -3873,7 +3965,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_vacuum_heap_vacuumed{instance=\"$instance\"}",
+          "expr": "pg_vacuum_heap_vacuumed{job=\"$job\", instance=\"$instance\"}",
           "legendFormat": "{{table}}",
           "refId": "A"
         }
@@ -3979,7 +4071,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "rate(pg_stat_bgwriter_buffers_alloc_total{instance=\"$instance\"}[5m]) * 8192",
+          "expr": "rate(pg_stat_bgwriter_buffers_alloc_total{job=\"$job\", instance=\"$instance\"}[5m]) * 8192",
           "legendFormat": "Buffer allocation rate",
           "refId": "A"
         }
@@ -4071,7 +4163,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "rate(pg_stat_bgwriter_buffers_clean_total{instance=\"$instance\"}[5m]) * 8192",
+          "expr": "rate(pg_stat_bgwriter_buffers_clean_total{job=\"$job\", instance=\"$instance\"}[5m]) * 8192",
           "legendFormat": "Bgwriter clean rate",
           "refId": "A"
         }
@@ -4089,16 +4181,16 @@
       },
       "id": 107,
       "panels": [],
-      "title": "Table Statistics",
+      "title": "Table Statistics (requires --collector.stat)",
       "type": "row",
-      "description": "Table-level DML activity and statistics. Identify hot tables and optimization candidates."
+      "description": "Table-level DML activity and statistics. Identify hot tables and optimization candidates. REQUIRES --collector.stat flag."
     },
     {
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Rate of INSERT, UPDATE, DELETE operations per second.\n\nGOAL: Monitor for patterns, optimize high-activity tables\n- High INSERT rate: Consider bulk loading, COPY\n- High UPDATE rate: May cause bloat, check HOT updates\n- High DELETE rate: Triggers vacuum, monitor bloat\n\nACTIONS TO IMPROVE:\n1. Batch operations when possible\n2. Use COPY instead of INSERT for bulk data\n3. Enable HOT updates (avoid updating indexed columns)\n4. Partition high-activity tables\n5. Tune autovacuum for write-heavy tables\n6. Monitor table_size growth\n\nWHY SHOWING NOTHING:\n- No write activity in selected databases\n- Check database filter ($database variable)\n- Metrics are rate(counter[5m]) - needs sustained activity\n- Try running: INSERT/UPDATE/DELETE on test tables",
+      "description": "Rate of INSERT, UPDATE, DELETE operations per second.\n\n\u26a0\ufe0f REQUIRES: --collector.stat flag to be enabled\n\nGOAL: Monitor for patterns, optimize high-activity tables\n- High INSERT rate: Consider bulk loading, COPY\n- High UPDATE rate: May cause bloat, check HOT updates\n- High DELETE rate: Triggers vacuum, monitor bloat\n\nACTIONS TO IMPROVE:\n1. Batch operations when possible\n2. Use COPY instead of INSERT for bulk data\n3. Enable HOT updates (avoid updating indexed columns)\n4. Partition high-activity tables\n5. Tune autovacuum for write-heavy tables\n6. Monitor table_size growth\n\nWHY SHOWING 'No Data':\n1. \u274c --collector.stat NOT enabled (most common cause)\n2. No write activity in selected databases\n3. Check database filter ($database variable)\n4. Metrics are rate(counter[5m]) - needs sustained activity over 5 minutes\n\nTO FIX: Start pg_exporter with --collector.stat flag",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -4177,7 +4269,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "rate(pg_stat_user_tables_n_tup_ins{instance=\"$instance\", datname=~\"$database\"}[5m])",
+          "expr": "rate(pg_stat_user_tables_n_tup_ins{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m])",
           "legendFormat": "{{datname}}.{{schemaname}}.{{relname}} - inserts",
           "refId": "A"
         },
@@ -4186,7 +4278,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "rate(pg_stat_user_tables_n_tup_upd{instance=\"$instance\", datname=~\"$database\"}[5m])",
+          "expr": "rate(pg_stat_user_tables_n_tup_upd{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m])",
           "legendFormat": "{{datname}}.{{schemaname}}.{{relname}} - updates",
           "refId": "B"
         },
@@ -4195,7 +4287,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "rate(pg_stat_user_tables_n_tup_del{instance=\"$instance\", datname=~\"$database\"}[5m])",
+          "expr": "rate(pg_stat_user_tables_n_tup_del{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m])",
           "legendFormat": "{{datname}}.{{schemaname}}.{{relname}} - deletes",
           "refId": "C"
         }
@@ -4300,7 +4392,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_database_size_bytes{instance=\"$instance\", datname=~\"$database\"}",
+          "expr": "pg_database_size_bytes{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}",
           "legendFormat": "{{datname}}",
           "refId": "A"
         }
@@ -4392,7 +4484,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "rate(pg_database_size_bytes{instance=\"$instance\", datname=~\"$database\"}[1h])",
+          "expr": "rate(pg_database_size_bytes{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[1h])",
           "legendFormat": "{{datname}} - growth rate",
           "refId": "A"
         }
@@ -4419,7 +4511,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Total index scans across all user indexes.\n\nGOAL: Indicates index usage health\n- Growing: Indexes are being used\n- Flat/low: May indicate missing or unused indexes\n\nACTIONS TO IMPROVE:\n1. Identify tables with high sequential scans\n2. Analyze query patterns with EXPLAIN\n3. Create missing indexes\n4. Run ANALYZE to update statistics\n5. Monitor after index creation\n\nNOTE: This is an aggregate metric. Enable --collector.index to get this metric.",
+      "description": "Cumulative total of index scans since PostgreSQL started.\n\nGOAL: Should be steadily increasing\n- Growing: Indexes are being used\n- Flat/zero: Unused indexes (candidates for removal)\n\nACTIONS TO IMPROVE:\n1. Identify tables with high sequential scans\n2. Analyze query patterns with EXPLAIN\n3. Create missing indexes for tables with seq scans\n4. Drop unused indexes to reduce write overhead\n\nNOTE: This is a cumulative counter, not a rate. Resets on PostgreSQL restart. Enable --collector.index to get this metric.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -4465,7 +4557,7 @@
               }
             ]
           },
-          "unit": "ops"
+          "unit": "short"
         },
         "overrides": []
       },
@@ -4498,7 +4590,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_index_scans_total{instance=\"$instance\"}",
+          "expr": "pg_index_scans_total{job=\"$job\", instance=\"$instance\"}",
           "legendFormat": "Total index scans",
           "refId": "A"
         }
@@ -4515,7 +4607,7 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "thresholds"
+            "mode": "palette-classic"
           },
           "custom": {
             "axisCenteredZero": false,
@@ -4557,7 +4649,7 @@
               }
             ]
           },
-          "unit": "percentunit"
+          "unit": "bytes"
         },
         "overrides": []
       },
@@ -4589,13 +4681,153 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_index_size_bytes{instance=\"$instance\"}",
+          "expr": "pg_index_size_bytes{job=\"$job\", instance=\"$instance\"}",
           "legendFormat": "Total index size",
           "refId": "A"
         }
       ],
       "title": "Total Index Size",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Collector health status with error rates. Green = successful scrape, Red = failed scrape.\n\nSHOWS:\n- Last scrape success (1 = success, 0 = failed)\n- Error rate (errors per second)\n\nGOAL: All collectors green with 0 errors/sec\n\nACTIONS IF RED:\n1. Check pg_exporter logs for specific collector errors\n2. Verify database connectivity and permissions\n3. Check collector requirements (extensions like pg_stat_statements)\n4. Review collector-specific configuration\n\nNOTE: Some collectors require --collector.<name> flag to be enabled",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "text": "FAILED",
+                  "color": "dark-red"
+                }
+              },
+              "type": "value"
+            },
+            {
+              "options": {
+                "1": {
+                  "text": "OK",
+                  "color": "dark-green"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "max": 1,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/.*errors.*/"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ops"
+              },
+              {
+                "id": "max",
+                "value": 10
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "mappings",
+                "value": []
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 0.1
+                    },
+                    {
+                      "color": "red",
+                      "value": 1
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 17
+      },
+      "id": 206,
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "fields": "",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "minVizWidth": 0,
+        "minVizHeight": 10
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "pg_exporter_collector_last_scrape_success{job=\"$job\", instance=\"$instance\"}",
+          "legendFormat": "{{collector}} - status",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "rate(pg_exporter_collector_scrape_errors_total{job=\"$job\", instance=\"$instance\"}[5m])",
+          "legendFormat": "{{collector}} - errors/sec",
+          "refId": "B"
+        }
+      ],
+      "title": "Collector Health & Errors",
+      "type": "bargauge"
     }
   ],
   "refresh": "30s",
@@ -4638,7 +4870,34 @@
           "type": "prometheus",
           "uid": "${DS_PROMETHEUS}"
         },
-        "definition": "label_values(pg_up, instance)",
+        "definition": "label_values(pg_up, job)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Job",
+        "multi": false,
+        "name": "job",
+        "options": [],
+        "query": {
+          "query": "label_values(pg_up, job)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "",
+          "value": ""
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "definition": "label_values(pg_up{job=\"$job\"}, instance)",
         "hide": 0,
         "includeAll": false,
         "label": "Instance",
@@ -4646,7 +4905,7 @@
         "name": "instance",
         "options": [],
         "query": {
-          "query": "label_values(pg_up, instance)",
+          "query": "label_values(pg_up{job=\"$job\"}, instance)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 1,
@@ -4666,7 +4925,7 @@
           "type": "prometheus",
           "uid": "${DS_PROMETHEUS}"
         },
-        "definition": "label_values(pg_stat_activity_count{instance=\"$instance\"}, datname)",
+        "definition": "label_values(pg_stat_activity_count{job=\"$job\", instance=\"$instance\"}, datname)",
         "hide": 0,
         "includeAll": true,
         "label": "Database",
@@ -4674,7 +4933,7 @@
         "name": "database",
         "options": [],
         "query": {
-          "query": "label_values(pg_stat_activity_count{instance=\"$instance\"}, datname)",
+          "query": "label_values(pg_stat_activity_count{job=\"$job\", instance=\"$instance\"}, datname)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 1,

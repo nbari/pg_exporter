@@ -285,3 +285,74 @@ Found a bug or have a suggestion? Please open an issue or PR in the `pg_exporter
 ## License
 
 Same as `pg_exporter` - see main repository LICENSE file.
+
+## Dashboard Validation
+
+### Automated Testing for Dashboard Metrics
+
+The dashboard includes automated validation to ensure all panels use metrics that pg_exporter actually exports. This prevents "No Data" errors from metric name mismatches.
+
+#### Quick Start
+
+```bash
+# Validate dashboard
+just validate-dashboard
+
+# Or run directly
+./scripts/validate-dashboard.sh
+```
+
+#### What It Checks
+
+✅ All dashboard metrics exist in collector code  
+✅ Handles histogram metrics (_bucket, _sum, _count)  
+✅ JSON syntax is valid  
+✅ Variable dependencies (job → instance → database)  
+✅ All queries use job filter  
+
+#### Example Output
+
+```
+🔍 Dashboard Validation
+=======================
+
+Step 1: Finding exported metrics...
+  Found: 207 exported metrics
+
+Step 2: Finding dashboard metrics...
+  Found: 67 dashboard metrics
+
+Step 3: Checking for invalid metrics...
+  ✅ All dashboard metrics are valid!
+
+Step 4: Validating JSON...
+  ✅ JSON is valid
+
+Step 5: Checking variables...
+  ✅ Job variable exists
+  ✅ Instance depends on job
+  ✅ Database depends on job+instance
+  ✅ 70/70 queries use job filter
+
+=======================
+✅ PASSED - Dashboard is valid!
+```
+
+#### When to Run
+
+- Before committing dashboard changes
+- After adding new metrics to collectors
+- Before releasing new versions
+- When troubleshooting "No Data" panels
+
+#### Integration
+
+The validation can be added to CI/CD:
+
+```yaml
+# GitHub Actions example
+- name: Validate Dashboard
+  run: ./scripts/validate-dashboard.sh
+```
+
+See `scripts/validate-dashboard.sh` for implementation details.

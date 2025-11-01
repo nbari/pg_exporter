@@ -18,8 +18,14 @@ use tracing::{debug, instrument, warn};
 /// ## CPU Usage
 /// - `pg_exporter_process_cpu_seconds_total` (Counter)
 ///   - Total CPU time (user + system) since process start
-///   - Use `rate()` in Prometheus to get CPU percentage
-///   - Example: `rate(pg_exporter_process_cpu_seconds_total[5m]) * 100`
+///   - **Value is normalized per-core** (100% = 1.0, not N cores × 100%)
+///   - Use `rate()` in Prometheus to get CPU percentage per core
+///   - Example: `rate(pg_exporter_process_cpu_seconds_total[5m]) * 100` gives 0-100% per core
+///
+/// - `pg_exporter_process_cpu_cores` (IntGauge)
+///   - Number of CPU cores available to the system
+///   - Use to calculate total CPU capacity
+///   - Example: Max CPU% = `cpu_cores * 100`
 ///
 /// ## Memory Usage  
 /// - `pg_exporter_process_resident_memory_bytes` (IntGauge)
@@ -46,9 +52,22 @@ use tracing::{debug, instrument, warn};
 ///   - Use to calculate uptime or detect restarts
 ///   - Example: `time() - pg_exporter_process_start_time_seconds`
 ///
+/// # CPU Percentage Calculation
+///
+/// **Before (confusing):**
+/// - On 12-core system: 100% per core = 1200% total
+/// - Dashboard shows 1200% CPU when using all cores
+///
+/// **After (normalized):**
+/// - CPU time is divided by number of cores
+/// - 100% = fully using 1 core
+/// - 1200% = fully using all 12 cores  
+/// - PromQL: `rate(pg_exporter_process_cpu_seconds_total[5m]) * 100` = % per core (0-100%)
+/// - Total %: `rate(pg_exporter_process_cpu_seconds_total[5m]) * pg_exporter_process_cpu_cores * 100`
+///
 /// # Implementation Details
 ///
-/// Uses the `sysinfo` crate to read process information from the OS:
+/// Uses the `sysinfo` crate (v0.37) to read process information from the OS:
 /// - Linux: Reads `/proc/$PID/stat`, `/proc/$PID/status`, `/proc/$PID/fd/`
 /// - macOS: Uses `proc_pidinfo()` system call
 /// - Windows: Uses Windows API
@@ -76,12 +95,14 @@ use tracing::{debug, instrument, warn};
 /// // After collection, metrics will be available:
 /// // pg_exporter_process_resident_memory_bytes ~45,000,000 (45MB)
 /// // pg_exporter_process_threads 8
+/// // pg_exporter_process_cpu_cores 12
 /// # Ok(())
 /// # }
 /// ```
 #[derive(Clone)]
 pub struct ProcessCollector {
     cpu_seconds_total: Counter,
+    cpu_cores: IntGauge,
     resident_memory_bytes: IntGauge,
     virtual_memory_bytes: IntGauge,
     open_fds: IntGauge,
@@ -102,6 +123,9 @@ pub struct ProcessCollector {
     
     /// Process ID of this exporter
     pid: Pid,
+    
+    /// Number of CPU cores (cached for normalization)
+    num_cores: usize,
 }
 
 impl Default for ProcessCollector {
@@ -114,9 +138,15 @@ impl ProcessCollector {
     pub fn new() -> Self {
         let cpu_seconds_total = Counter::with_opts(Opts::new(
             "pg_exporter_process_cpu_seconds_total",
-            "Total user and system CPU time spent in seconds",
+            "Total user and system CPU time spent in seconds (normalized per-core)",
         ))
         .expect("pg_exporter_process_cpu_seconds_total");
+
+        let cpu_cores = IntGauge::with_opts(Opts::new(
+            "pg_exporter_process_cpu_cores",
+            "Number of CPU cores available to the system",
+        ))
+        .expect("pg_exporter_process_cpu_cores");
 
         let resident_memory_bytes = IntGauge::with_opts(Opts::new(
             "pg_exporter_process_resident_memory_bytes",
@@ -148,8 +178,13 @@ impl ProcessCollector {
         ))
         .expect("pg_exporter_process_start_time_seconds");
 
-        let system = Arc::new(Mutex::new(System::new_all()));
+        let system = System::new_all();
+        let num_cores = system.cpus().len().max(1); // At least 1 core
+        let system = Arc::new(Mutex::new(system));
         let pid = Pid::from(std::process::id() as usize);
+
+        // Set CPU cores count (doesn't change)
+        cpu_cores.set(num_cores as i64);
 
         // Set start time once (doesn't change)
         let start_time = SystemTime::now()
@@ -160,6 +195,7 @@ impl ProcessCollector {
 
         Self {
             cpu_seconds_total,
+            cpu_cores,
             resident_memory_bytes,
             virtual_memory_bytes,
             open_fds,
@@ -167,6 +203,7 @@ impl ProcessCollector {
             start_time_seconds,
             system,
             pid,
+            num_cores,
         }
     }
 
@@ -180,10 +217,11 @@ impl ProcessCollector {
     /// This method:
     /// 1. Acquires a lock on the cached System object (~0.1ms)
     /// 2. Handles PoisonError if a previous panic occurred
-    /// 3. Refreshes process data from OS (~1-5ms)
+    /// 3. Refreshes process data from OS (~1-5ms) using sysinfo 0.37 API
     /// 4. Extracts metrics (memory, CPU, threads, FDs)
-    /// 5. Updates Prometheus gauges/counters
-    /// 6. Releases lock
+    /// 5. Normalizes CPU time by number of cores
+    /// 6. Updates Prometheus gauges/counters
+    /// 7. Releases lock
     ///
     /// Total execution time: ~1-5ms on Linux, may be slower on other platforms.
     fn collect_stats(&self) {
@@ -197,30 +235,33 @@ impl ProcessCollector {
             }
         };
         
-        // Refresh only our process (more efficient than refresh_all)
-        // sysinfo 0.32 API: refresh_processes(processes_to_update, refresh_kind)
-        // ProcessesToUpdate::Some(&[pid]) = only refresh this PID
-        // true = refresh all process info (CPU, memory, threads)
-        system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[self.pid]), true);
+        // Refresh process data (sysinfo 0.37 API)
+        // Note: refresh_all() is simpler and works across all versions
+        system.refresh_all();
 
         if let Some(process) = system.process(self.pid) {
-            // Memory metrics (sysinfo 0.32 returns bytes directly)
+            // Memory metrics (sysinfo 0.37 returns bytes directly)
             let rss = process.memory();
             let vsz = process.virtual_memory();
             
             self.resident_memory_bytes.set(rss as i64);
             self.virtual_memory_bytes.set(vsz as i64);
 
-            // CPU time (cumulative, so we use Counter)
-            // sysinfo gives us total CPU time in seconds since process start
-            // Prometheus rate() will calculate CPU% from the counter
+            // CPU time (cumulative, normalized per-core)
+            // sysinfo 0.37: cpu_usage() returns total CPU time in seconds
+            // We normalize by dividing by number of cores so:
+            // - 100% = fully using 1 core
+            // - Not 1200% on a 12-core system
             let cpu_time = process.run_time() as f64;
             
+            // Normalize by number of cores
+            // This makes rate(cpu_seconds_total[5m]) * 100 give 0-100% per core
+            let normalized_cpu_time = cpu_time / self.num_cores as f64;
+            
             // Counter must be monotonically increasing
-            // Only increment if CPU time increased (it should always increase)
             let current_cpu = self.cpu_seconds_total.get();
-            if cpu_time > current_cpu {
-                self.cpu_seconds_total.inc_by(cpu_time - current_cpu);
+            if normalized_cpu_time > current_cpu {
+                self.cpu_seconds_total.inc_by(normalized_cpu_time - current_cpu);
             }
 
             // Thread count (Linux-specific via /proc)
@@ -259,7 +300,8 @@ impl ProcessCollector {
             debug!(
                 rss_mb = rss / 1024 / 1024,
                 vsz_mb = vsz / 1024 / 1024,
-                cpu_seconds = cpu_time,
+                cpu_seconds_normalized = normalized_cpu_time,
+                cpu_cores = self.num_cores,
                 threads = self.threads.get(),
                 fds = self.open_fds.get(),
                 "collected process metrics"
@@ -275,6 +317,7 @@ impl Collector for ProcessCollector {
 
     fn register_metrics(&self, registry: &Registry) -> Result<()> {
         registry.register(Box::new(self.cpu_seconds_total.clone()))?;
+        registry.register(Box::new(self.cpu_cores.clone()))?;
         registry.register(Box::new(self.resident_memory_bytes.clone()))?;
         registry.register(Box::new(self.virtual_memory_bytes.clone()))?;
         registry.register(Box::new(self.open_fds.clone()))?;

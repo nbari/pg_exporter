@@ -19,17 +19,26 @@ The internal collector consists of two sub-collectors:
 Monitors the exporter's process resource consumption.
 
 **Metrics:**
-- `pg_exporter_process_cpu_seconds_total` - Total CPU time (Counter)
-- `pg_exporter_process_resident_memory_bytes` - RAM usage (Gauge)
-- `pg_exporter_process_virtual_memory_bytes` - Virtual memory size (Gauge)
-- `pg_exporter_process_threads` - Thread count (Gauge)
-- `pg_exporter_process_open_fds` - Open file descriptors, Linux only (Gauge)
+- `pg_exporter_process_cpu_seconds_total` - Total CPU time, **normalized per-core** (Counter)
+  - Uses `rate()` to get CPU% per core (0-100%)
+  - Example: `rate(pg_exporter_process_cpu_seconds_total[5m]) * 100` = % per core
+  - For total CPU%: multiply by `pg_exporter_process_cpu_cores`
+- `pg_exporter_process_cpu_cores` - Number of CPU cores available (IntGauge)
+- `pg_exporter_process_resident_memory_bytes` - RAM usage / RSS (IntGauge)
+- `pg_exporter_process_virtual_memory_bytes` - Virtual memory size / VSZ (IntGauge)
+- `pg_exporter_process_threads` - Thread count (IntGauge)
+- `pg_exporter_process_open_fds` - Open file descriptors, Linux only (IntGauge)
 - `pg_exporter_process_start_time_seconds` - Process start time (Gauge)
 
+**CPU Normalization:**
+- **Before:** On 12-core system, 100% per core = 1200% total (confusing)
+- **After:** CPU time divided by core count, so 100% = 1 core fully used
+- This matches standard CPU percentage expectations
+
 **Implementation:**
-- Uses the `sysinfo` crate to read process info from the OS
+- Uses the `sysinfo` crate (v0.37) to read process info from the OS
 - Linux: Reads `/proc/$PID/stat`, `/proc/$PID/status`, `/proc/$PID/fd/`
-- Cached `System` object protected by `parking_lot::Mutex`
+- Cached `System` object protected by `std::sync::Mutex`
 - Collection time: ~1-5ms
 
 ### 2. ScraperCollector (`scraper.rs`)
@@ -37,7 +46,10 @@ Monitors the exporter's process resource consumption.
 Tracks scrape performance and health across all collectors.
 
 **Metrics:**
-- `pg_exporter_collector_scrape_duration_seconds{collector}` - Histogram with percentiles
+- `pg_exporter_collector_scrape_duration_seconds{collector}` - Histogram with buckets
+  - Buckets: 1ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s
+  - Automatically creates `_bucket`, `_sum`, `_count` metrics
+  - Use `histogram_quantile()` for percentiles (p50, p95, p99)
 - `pg_exporter_collector_scrape_errors_total{collector}` - Error counter per collector
 - `pg_exporter_collector_last_scrape_timestamp_seconds{collector}` - Last scrape timestamp
 - `pg_exporter_collector_last_scrape_success{collector}` - Success indicator (1/0)
@@ -46,8 +58,8 @@ Tracks scrape performance and health across all collectors.
 
 **Implementation:**
 - RAII `ScrapeTimer` for automatic duration recording
-- `parking_lot::RwLock` for concurrent read access
-- Histogram buckets: 1ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s
+- `std::sync::RwLock` for concurrent read access (handles PoisonError)
+- Histogram automatically exports `_bucket`, `_sum`, `_count` suffixes
 
 ## Why Standard Library Instead of parking_lot?
 
@@ -93,11 +105,12 @@ Since internal metrics are supplementary (not core PostgreSQL monitoring):
 
 ## Usage
 
-The internal collector is **disabled by default**. Enable it explicitly:
+The exporter collector is **disabled by default**. Enable it explicitly:
 
 ```bash
-pg_exporter --dsn postgresql://localhost/postgres --collector.internal
+pg_exporter --dsn postgresql://localhost/postgres --collector.exporter
 # Automatically exports pg_exporter_process_* and pg_exporter_collector_* metrics
+```
 ```
 
 Disable with:

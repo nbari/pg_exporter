@@ -221,3 +221,11 @@ stop-containers:
   @for c in pg_exporter_postgres jaeger; do \
         podman stop $$c 2>/dev/null || true; \
   done
+
+# Validate Grafana dashboard
+validate-dashboard:
+  @./scripts/validate-dashboard.sh
+
+# Run all validations (tests + dashboard)
+validate-all: test validate-dashboard
+  @echo "✅ All validations passed!"
