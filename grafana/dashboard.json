@@ -2146,7 +2146,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_stat_activity_max_tx_duration{instance=\"$instance\", datname=~\"$database\"}",
+          "expr": "pg_stat_activity_max_query_duration_seconds{instance=\"$instance\", datname=~\"$database\"}",
           "legendFormat": "{{datname}} - max transaction duration",
           "refId": "A"
         },
@@ -2246,8 +2246,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_stat_activity_wait_events{instance=\"$instance\", datname=~\"$database\"}",
-          "legendFormat": "{{datname}} - {{wait_event_type}}",
+          "expr": "pg_wait_event_type{instance=\"$instance\"}",
+          "legendFormat": "{{type}}",
           "refId": "A"
         }
       ],
@@ -4419,7 +4419,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Index scan rate vs sequential scan rate.\n\nGOAL: High index scan rate for OLTP workloads\n- Many sequential scans: Missing indexes\n- Small tables: Sequential scans acceptable\n\nACTIONS TO IMPROVE:\n1. Identify tables with high seq_scan: SELECT relname, seq_scan, idx_scan FROM pg_stat_user_tables WHERE seq_scan > 1000;\n2. Analyze query patterns with EXPLAIN\n3. Create missing indexes\n4. Run ANALYZE to update statistics\n5. Monitor index usage after creation\n\nFORMULA: rate(pg_stat_user_indexes_idx_scan[5m])",
+      "description": "Total index scans across all user indexes.\n\nGOAL: Indicates index usage health\n- Growing: Indexes are being used\n- Flat/low: May indicate missing or unused indexes\n\nACTIONS TO IMPROVE:\n1. Identify tables with high sequential scans\n2. Analyze query patterns with EXPLAIN\n3. Create missing indexes\n4. Run ANALYZE to update statistics\n5. Monitor after index creation\n\nNOTE: This is an aggregate metric. Enable --collector.index to get this metric.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -4498,12 +4498,12 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "rate(pg_stat_user_indexes_idx_scan{instance=\"$instance\", datname=~\"$database\"}[5m])",
-          "legendFormat": "{{datname}}.{{schemaname}}.{{indexrelname}}",
+          "expr": "pg_index_scans_total{instance=\"$instance\"}",
+          "legendFormat": "Total index scans",
           "refId": "A"
         }
       ],
-      "title": "Index Scan Rate",
+      "title": "Total Index Scans",
       "type": "timeseries"
     },
     {
@@ -4511,7 +4511,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Index cache hit ratio - percentage of index reads from memory.\n\nGOAL: >95% for active indexes\n- Low ratio: Index not in cache\n- May indicate undersized shared_buffers\n\nACTIONS TO IMPROVE:\n1. Increase shared_buffers (25-40% of RAM)\n2. Increase effective_cache_size\n3. Identify cold indexes (rarely used)\n4. Drop unused indexes to free cache\n5. Monitor pg_statio_user_indexes\n\nFORMULA: idx_blks_hit / (idx_blks_hit + idx_blks_read)",
+      "description": "Total size of all user indexes in bytes.\n\nGOAL: Monitor index storage usage\n- Growing: Normal with data growth\n- Large size: May indicate bloat or unused indexes\n\nACTIONS TO IMPROVE:\n1. Identify and drop unused indexes\n2. REINDEX bloated indexes (maintenance window)\n3. Review duplicate or redundant indexes\n4. Monitor after index changes\n\nNOTE: This is an aggregate metric. Enable --collector.index to get this metric.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -4548,22 +4548,12 @@
             }
           },
           "mappings": [],
-          "max": 1,
-          "min": 0,
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 0.9
-              },
-              {
                 "color": "green",
-                "value": 0.95
+                "value": null
               }
             ]
           },
@@ -4599,12 +4589,12 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_statio_user_indexes_idx_blks_hit{instance=\"$instance\", datname=~\"$database\"} / (pg_statio_user_indexes_idx_blks_hit{instance=\"$instance\", datname=~\"$database\"} + pg_statio_user_indexes_idx_blks_read{instance=\"$instance\", datname=~\"$database\"})",
-          "legendFormat": "{{datname}}.{{indexrelname}}",
+          "expr": "pg_index_size_bytes{instance=\"$instance\"}",
+          "legendFormat": "Total index size",
           "refId": "A"
         }
       ],
-      "title": "Index Cache Hit Ratio",
+      "title": "Total Index Size",
       "type": "timeseries"
     }
   ],
