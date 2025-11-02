@@ -16,24 +16,24 @@ The internal collector consists of two sub-collectors:
 
 ### 1. ProcessCollector (`process.rs`)
 
-Monitors the exporter's process resource consumption.
+Monitors the exporter's process resource consumption. Matches output from `scripts/monitor-exporter.sh`.
 
 **Metrics:**
-- `pg_exporter_process_cpu_seconds_total` - Total CPU time, **normalized per-core** (Counter)
-  - Uses `rate()` to get CPU% per core (0-100%)
-  - Example: `rate(pg_exporter_process_cpu_seconds_total[5m]) * 100` = % per core
-  - For total CPU%: multiply by `pg_exporter_process_cpu_cores`
-- `pg_exporter_process_cpu_cores` - Number of CPU cores available (IntGauge)
+- `pg_exporter_process_cpu_percent` - Current CPU usage percentage (Gauge)
+  - Matches `ps %cpu` output - instantaneous CPU usage
+  - Range: 0-100% (percentage of one CPU core)
+  - Example: 2.5 = using 2.5% of one core
+  - No rate() needed - value is already a percentage
 - `pg_exporter_process_resident_memory_bytes` - RAM usage / RSS (IntGauge)
 - `pg_exporter_process_virtual_memory_bytes` - Virtual memory size / VSZ (IntGauge)
-- `pg_exporter_process_threads` - Thread count (IntGauge)
 - `pg_exporter_process_open_fds` - Open file descriptors, Linux only (IntGauge)
 - `pg_exporter_process_start_time_seconds` - Process start time (Gauge)
 
-**CPU Normalization:**
-- **Before:** On 12-core system, 100% per core = 1200% total (confusing)
-- **After:** CPU time divided by core count, so 100% = 1 core fully used
-- This matches standard CPU percentage expectations
+**Simple Approach:**
+- Reads current CPU% directly from kernel (via sysinfo)
+- No complex delta tracking or counters
+- Matches what `ps %cpu` and monitor-exporter.sh show
+- Easy to understand and troubleshoot
 
 **Implementation:**
 - Uses the `sysinfo` crate (v0.37) to read process info from the OS
@@ -124,7 +124,7 @@ pg_exporter --dsn postgresql://localhost/postgres
 
 ### CPU Usage (%)
 ```promql
-rate(pg_exporter_process_cpu_seconds_total[5m]) * 100
+pg_exporter_process_cpu_percent
 ```
 
 ### Memory Usage (MB)
