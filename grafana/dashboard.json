@@ -83,6 +83,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
+      "description": "PostgreSQL version. Goal: Stay current with latest stable versions for security and performance. Action: Plan upgrades annually, test in staging first.",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -104,7 +105,7 @@
       },
       "gridPos": {
         "h": 2,
-        "w": 2,
+        "w": 3,
         "x": 0,
         "y": 1
       },
@@ -136,14 +137,14 @@
         }
       ],
       "title": "Version",
-      "type": "stat",
-      "description": "PostgreSQL version. Goal: Stay current with latest stable versions for security and performance. Action: Plan upgrades annually, test in staging first."
+      "type": "stat"
     },
     {
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
+      "description": "Database uptime in days. Goal: High uptime with planned maintenance windows. Action: If uptime is very low, investigate recent crashes or restarts.",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -166,8 +167,8 @@
       "gridPos": {
         "h": 2,
         "w": 3,
-        "x": 2,
-        "y": 3
+        "x": 3,
+        "y": 1
       },
       "id": 27,
       "options": {
@@ -196,14 +197,14 @@
         }
       ],
       "title": "Uptime",
-      "type": "stat",
-      "description": "Database uptime in days. Goal: High uptime with planned maintenance windows. Action: If uptime is very low, investigate recent crashes or restarts."
+      "type": "stat"
     },
     {
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
+      "description": "Maximum allowed connections. Goal: Set appropriately for workload without over-provisioning. Action: If nearing limit, increase or investigate connection pooling.",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -224,9 +225,9 @@
       },
       "gridPos": {
         "h": 2,
-        "w": 2,
-        "x": 5,
-        "y": 5
+        "w": 3,
+        "x": 6,
+        "y": 1
       },
       "id": 28,
       "options": {
@@ -255,31 +256,24 @@
         }
       ],
       "title": "Max Connections",
-      "type": "stat",
-      "description": "Maximum allowed connections from postgresql.conf. Goal: Right-sized for workload. Action: If nearing limit, increase max_connections or implement connection pooling (PgBouncer)."
+      "type": "stat"
     },
     {
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
+      "description": "Autovacuum enabled/disabled. Goal: Should be ON for production. Action: If OFF, enable immediately unless you have custom vacuum strategy.",
       "fieldConfig": {
         "defaults": {
           "mappings": [
             {
               "options": {
                 "0": {
-                  "text": "OFF",
-                  "color": "red"
-                }
-              },
-              "type": "value"
-            },
-            {
-              "options": {
+                  "text": "OFF"
+                },
                 "1": {
-                  "text": "ON",
-                  "color": "green"
+                  "text": "ON"
                 }
               },
               "type": "value"
@@ -306,9 +300,9 @@
       },
       "gridPos": {
         "h": 2,
-        "w": 2,
-        "x": 7,
-        "y": 7
+        "w": 3,
+        "x": 9,
+        "y": 1
       },
       "id": 29,
       "options": {
@@ -337,31 +331,24 @@
         }
       ],
       "title": "Autovacuum",
-      "type": "stat",
-      "description": "Autovacuum enabled status (1=on, 0=off). Goal: Always enabled. Action: If off, enable immediately to prevent bloat and wraparound."
+      "type": "stat"
     },
     {
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
+      "description": "Fsync forces writes to disk. Goal: Should be ON for data safety. Action: If OFF, enable immediately unless you understand the risks.",
       "fieldConfig": {
         "defaults": {
           "mappings": [
             {
               "options": {
                 "0": {
-                  "text": "OFF",
-                  "color": "red"
-                }
-              },
-              "type": "value"
-            },
-            {
-              "options": {
+                  "text": "OFF"
+                },
                 "1": {
-                  "text": "ON",
-                  "color": "green"
+                  "text": "ON"
                 }
               },
               "type": "value"
@@ -388,9 +375,9 @@
       },
       "gridPos": {
         "h": 2,
-        "w": 2,
-        "x": 9,
-        "y": 9
+        "w": 3,
+        "x": 12,
+        "y": 1
       },
       "id": 30,
       "options": {
@@ -419,31 +406,24 @@
         }
       ],
       "title": "Fsync",
-      "type": "stat",
-      "description": "Fsync enabled status (1=on, 0=off). Goal: Always enabled for data durability. Action: Never disable in production - data loss risk."
+      "type": "stat"
     },
     {
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
+      "description": "Synchronous commit enabled/disabled. Goal: Should be ON for data safety. Action: If OFF, understand performance vs durability tradeoff.",
       "fieldConfig": {
         "defaults": {
           "mappings": [
             {
               "options": {
                 "0": {
-                  "text": "OFF",
-                  "color": "red"
-                }
-              },
-              "type": "value"
-            },
-            {
-              "options": {
+                  "text": "OFF"
+                },
                 "1": {
-                  "text": "ON",
-                  "color": "green"
+                  "text": "ON"
                 }
               },
               "type": "value"
@@ -471,8 +451,8 @@
       "gridPos": {
         "h": 2,
         "w": 3,
-        "x": 11,
-        "y": 11
+        "x": 15,
+        "y": 1
       },
       "id": 31,
       "options": {
@@ -508,6 +488,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
+      "description": "Shared buffer cache size. Goal: 25% of RAM for dedicated DB server. Action: Tune based on working set size and available memory.",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -523,15 +504,15 @@
           "color": {
             "mode": "thresholds"
           },
-          "unit": "bytes"
+          "unit": "decbytes"
         },
         "overrides": []
       },
       "gridPos": {
         "h": 2,
         "w": 3,
-        "x": 14,
-        "y": 13
+        "x": 0,
+        "y": 3
       },
       "id": 32,
       "options": {
@@ -560,14 +541,14 @@
         }
       ],
       "title": "Shared Buffers",
-      "type": "stat",
-      "description": "PostgreSQL shared buffer pool size in bytes.\n\nGOAL: 25-40% of system RAM for dedicated servers\n- Too low: Poor cache hit ratio, high disk I/O\n- Too high: Less RAM for OS cache, can hurt performance\n\nACTIONS TO IMPROVE:\n1. Increase shared_buffers if cache hit ratio is low\n2. Monitor pg_stat_bgwriter for buffer allocation\n3. Balance with effective_cache_size setting\n4. For 16GB RAM: set shared_buffers = 4-6GB"
+      "type": "stat"
     },
     {
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
+      "description": "Work memory per query operation. Goal: Balance between parallelism and memory usage. Action: Increase for complex queries, monitor for memory pressure.",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -583,15 +564,15 @@
           "color": {
             "mode": "thresholds"
           },
-          "unit": "bytes"
+          "unit": "decbytes"
         },
         "overrides": []
       },
       "gridPos": {
         "h": 2,
         "w": 3,
-        "x": 17,
-        "y": 15
+        "x": 3,
+        "y": 3
       },
       "id": 33,
       "options": {
@@ -627,6 +608,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
+      "description": "Maintenance work memory for vacuuming. Goal: Higher than work_mem for faster maintenance. Action: Increase if VACUUM/CREATE INDEX are slow.",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -642,15 +624,15 @@
           "color": {
             "mode": "thresholds"
           },
-          "unit": "bytes"
+          "unit": "decbytes"
         },
         "overrides": []
       },
       "gridPos": {
         "h": 2,
-        "w": 4,
-        "x": 20,
-        "y": 17
+        "w": 3,
+        "x": 6,
+        "y": 3
       },
       "id": 34,
       "options": {
@@ -679,6 +661,185 @@
         }
       ],
       "title": "Maint Work Mem",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "WAL buffer size. Goal: -1 (auto) or 1/32 of shared_buffers. Action: Usually default is fine, increase if high WAL write activity.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "unit": "decbytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 2,
+        "w": 3,
+        "x": 9,
+        "y": 3
+      },
+      "id": 121,
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "fields": "",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "none",
+        "graphMode": "none"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "pg_settings_wal_buffers_bytes{job=\"$job\", instance=\"$instance\"}",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "title": "WAL Buffers",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Checkpoint timeout in seconds. Goal: 5-15 minutes for OLTP. Action: Increase if checkpoints too frequent, decrease if recovery time concerns.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 2,
+        "w": 3,
+        "x": 18,
+        "y": 1
+      },
+      "id": 122,
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "fields": "",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "none",
+        "graphMode": "none"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "pg_settings_checkpoint_timeout_seconds{job=\"$job\", instance=\"$instance\"}",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Checkpoint Timeout",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Autovacuum max workers. Goal: 3-6 for most workloads. Action: Increase if tables not vacuumed frequently enough, monitor CPU usage.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 2,
+        "w": 3,
+        "x": 12,
+        "y": 3
+      },
+      "id": 123,
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "fields": "",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "none",
+        "graphMode": "none"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "pg_settings_autovacuum_max_workers{job=\"$job\", instance=\"$instance\"}",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "title": "AV Max Workers",
       "type": "stat"
     },
     {
@@ -972,228 +1133,6 @@
         }
       ],
       "title": "Connection Pool Status",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "description": "PostgreSQL performance degrades with **100+ ACTIVE connections**, regardless of max_connections setting.\n\n**Common K8s Problem:**\n- Pods autoscale -> connection pools multiply\n- Result: Massive IDLE connections flooding the database\n- Even with low active, total connections exhaust resources\n\n**What to watch:**\n- ACTIVE = Actual queries running (alert when >100)\n- IDLE = Wasted connections from pod scaling\n- IDLE IN TRANSACTION = Critical (holding locks)\n\n**Solution:** Use PgBouncer for connection pooling in K8s\n\n**Alert on:** Active > 100, NOT percentage utilization!",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "Connections",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "tooltip": false,
-              "viz": false,
-              "legend": false
-            },
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 75
-              },
-              {
-                "color": "red",
-                "value": 100
-              }
-            ]
-          },
-          "unit": "short"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Active Connections"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#73BF69",
-                  "mode": "fixed"
-                }
-              },
-              {
-                "id": "custom.lineWidth",
-                "value": 3
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Idle Connections"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#FF9830",
-                  "mode": "fixed"
-                }
-              },
-              {
-                "id": "custom.lineWidth",
-                "value": 2
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Idle in Transaction"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "orange",
-                  "mode": "fixed"
-                }
-              },
-              {
-                "id": "custom.lineWidth",
-                "value": 3
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Max Connections"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#B0B0B0",
-                  "mode": "fixed"
-                }
-              },
-              {
-                "id": "custom.lineWidth",
-                "value": 1
-              },
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              },
-              {
-                "id": "custom.axisLabel",
-                "value": "Max Connections"
-              },
-              {
-                "id": "custom.lineStyle",
-                "value": {
-                  "dash": [
-                    10,
-                    10
-                  ],
-                  "fill": "dash"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 44
-      },
-      "id": 999,
-      "options": {
-        "legend": {
-          "calcs": [
-            "last",
-            "max"
-          ],
-          "displayMode": "table",
-          "placement": "right",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "sum(pg_stat_activity_active_connections{instance=~\"$instance\"})",
-          "legendFormat": "Active Connections",
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "sum(pg_stat_activity_idle_connections{instance=~\"$instance\"})",
-          "legendFormat": "Idle Connections",
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "sum(pg_stat_activity_count{instance=~\"$instance\", state=\"idle in transaction\"})",
-          "legendFormat": "Idle in Transaction",
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "pg_stat_activity_max_connections{instance=~\"$instance\"}",
-          "legendFormat": "Max Connections",
-          "refId": "D",
-          "yAxisIndex": 1
-        }
-      ],
-      "title": "Active vs Idle Connections",
       "type": "timeseries"
     },
     {
@@ -4438,6 +4377,468 @@
       "title": "Index Performance & Unused Indexes (requires --collector.index)",
       "type": "row",
       "description": "Index usage statistics and unused index detection. Optimize by adding missing indexes and dropping unused ones."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Autovacuum naptime (sleep interval). Goal: 60s default is fine for most. Action: Reduce if tables need more frequent vacuuming.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 2,
+        "w": 3,
+        "x": 15,
+        "y": 3
+      },
+      "id": 124,
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "fields": "",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "none",
+        "graphMode": "none"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "pg_settings_autovacuum_naptime_seconds{job=\"$job\", instance=\"$instance\"}",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "title": "AV Naptime",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Minimum tuple insertions before analyze. Goal: 50 for small tables, higher for large. Action: Tune based on table size and update patterns.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 2,
+        "w": 3,
+        "x": 18,
+        "y": 3
+      },
+      "id": 125,
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "fields": "",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "none",
+        "graphMode": "none"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "pg_settings_autovacuum_analyze_threshold{job=\"$job\", instance=\"$instance\"}",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "title": "AV Analyze Threshold",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Minimum tuple updates/deletes before vacuum. Goal: 50 for small tables, higher for large. Action: Tune based on bloat tolerance.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 2,
+        "w": 3,
+        "x": 21,
+        "y": 3
+      },
+      "id": 126,
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "fields": "",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "none",
+        "graphMode": "none"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "pg_settings_autovacuum_vacuum_threshold{job=\"$job\", instance=\"$instance\"}",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "title": "AV Vacuum Threshold",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Max locks per transaction. Goal: 64 default, increase for DDL-heavy workloads. Action: If hitting limit, increase and monitor memory usage.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 2,
+        "w": 3,
+        "x": 21,
+        "y": 1
+      },
+      "id": 128,
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "fields": "",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "none",
+        "graphMode": "none"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "pg_settings_max_locks_per_transaction{job=\"$job\", instance=\"$instance\"}",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Max Locks/Tx",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "PostgreSQL performance degrades with **100+ ACTIVE connections**, regardless of max_connections setting.\n\n**Common K8s Problem:**\n- Pods autoscale -> connection pools multiply\n- Result: Massive IDLE connections flooding the database\n- Even with low active, total connections exhaust resources\n\n**What to watch:**\n- ACTIVE = Actual queries running (alert when >100)\n- IDLE = Wasted connections from pod scaling\n- IDLE IN TRANSACTION = Critical (holding locks)\n\n**Solution:** Use PgBouncer for connection pooling in K8s\n\n**Alert on:** Active > 100, NOT percentage utilization!",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "Connections",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 75
+              },
+              {
+                "color": "red",
+                "value": 100
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Active Connections"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#73BF69",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Idle Connections"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FF9830",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Idle in Transaction"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Max Connections"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#B0B0B0",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "Max Connections"
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    10,
+                    10
+                  ],
+                  "fill": "dash"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 44
+      },
+      "id": 999,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(pg_stat_activity_active_connections{instance=~\"$instance\"})",
+          "legendFormat": "Active Connections",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(pg_stat_activity_idle_connections{instance=~\"$instance\"})",
+          "legendFormat": "Idle Connections",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(pg_stat_activity_count{instance=~\"$instance\", state=\"idle in transaction\"})",
+          "legendFormat": "Idle in Transaction",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "pg_stat_activity_max_connections{instance=~\"$instance\"}",
+          "legendFormat": "Max Connections",
+          "refId": "D",
+          "yAxisIndex": 1
+        }
+      ],
+      "title": "Active vs Idle Connections",
+      "type": "timeseries"
     },
     {
       "collapsed": true,
