@@ -62,10 +62,10 @@ async fn test_version_collector_queries_database() -> Result<()> {
     let metric = &version_num.get_metric()[0];
     let gauge_value = metric.get_gauge().value() as i64;
 
-    // server_version_num should be >= 160000 (PostgreSQL 16+) based on our test matrix
+    // server_version_num should be >= 140000 (PostgreSQL 14+) based on our test matrix
     assert!(
-        gauge_value >= 160000,
-        "server_version_num should be >= 160000, got {}",
+        gauge_value >= 140000,
+        "server_version_num should be >= 140000, got {}",
         gauge_value
     );
 

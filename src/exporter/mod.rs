@@ -3,7 +3,7 @@ use crate::{
     collectors::{
         config::CollectorConfig,
         registry::CollectorRegistry,
-        util::{get_excluded_databases, set_base_connect_options_from_dsn},
+        util::{get_excluded_databases, set_base_connect_options_from_dsn, set_pg_version},
     },
 };
 use anyhow::{Context, Result, anyhow};
@@ -64,6 +64,19 @@ pub async fn new(
     };
 
     info!("Connected to database");
+
+    // Get PostgreSQL version
+    let version_num: String = sqlx::query_scalar("SHOW server_version_num")
+        .fetch_one(&pool)
+        .await
+        .context("Failed to get PostgreSQL version")?;
+
+    let version: i32 = version_num
+        .parse()
+        .context("Failed to parse PostgreSQL version")?;
+    set_pg_version(version);
+
+    info!(version, "PostgreSQL version detected");
 
     // Initialize base connect options for cross-DB collectors (idempotent).
     let _ = set_base_connect_options_from_dsn(&dsn);

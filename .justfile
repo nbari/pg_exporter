@@ -222,6 +222,87 @@ stop-containers:
         podman stop $$c 2>/dev/null || true; \
   done
 
+# Test against all PostgreSQL versions (14-18)
+test-all-pg:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    
+    VERSIONS=(14 15 16 17 18)
+    FAILED=()
+    
+    echo "🚀 Starting all PostgreSQL versions..."
+    for v in "${VERSIONS[@]}"; do
+        PORT="54${v}"
+        podman run -d --name pg${v} \
+            -e POSTGRES_PASSWORD=postgres \
+            -e POSTGRES_USER=postgres \
+            -p ${PORT}:5432 \
+            postgres:${v}-alpine >/dev/null 2>&1 || true
+    done
+    
+    echo "⏳ Waiting for PostgreSQL instances to be ready..."
+    sleep 5
+    
+    for v in "${VERSIONS[@]}"; do
+        PORT="54${v}"
+        timeout 30 bash -c "until podman exec pg${v} pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done" || true
+    done
+    
+    echo ""
+    for v in "${VERSIONS[@]}"; do
+        PORT="54${v}"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "🐘 Testing PostgreSQL ${v} (port ${PORT})"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        
+        if PG_EXPORTER_DSN="postgresql://postgres:postgres@localhost:${PORT}/postgres" \
+           cargo test --quiet 2>&1 | tail -5; then
+            echo "✅ PostgreSQL ${v} passed"
+        else
+            echo "❌ PostgreSQL ${v} failed"
+            FAILED+=("${v}")
+        fi
+        echo ""
+    done
+    
+    echo "🧹 Cleaning up containers..."
+    for v in "${VERSIONS[@]}"; do
+        podman stop pg${v} >/dev/null 2>&1 || true
+        podman rm pg${v} >/dev/null 2>&1 || true
+    done
+    
+    if [ ${#FAILED[@]} -eq 0 ]; then
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "✅ All PostgreSQL versions passed!"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    else
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "❌ Failed versions: ${FAILED[*]}"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        exit 1
+    fi
+
+# Test against specific PostgreSQL version
+test-pg version:
+    #!/usr/bin/env bash
+    PORT="54{{version}}"
+    echo "🐘 Starting PostgreSQL {{version}} on port ${PORT}..."
+    podman run -d --name pg{{version}} \
+        -e POSTGRES_PASSWORD=postgres \
+        -e POSTGRES_USER=postgres \
+        -p ${PORT}:5432 \
+        postgres:{{version}}-alpine
+    
+    echo "⏳ Waiting for PostgreSQL to be ready..."
+    sleep 3
+    timeout 30 bash -c "until podman exec pg{{version}} pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done"
+    
+    echo "🧪 Running tests..."
+    PG_EXPORTER_DSN="postgresql://postgres:postgres@localhost:${PORT}/postgres" cargo test
+    
+    echo "🧹 Cleaning up..."
+    podman stop pg{{version}} && podman rm pg{{version}}
+
 # Validate Grafana dashboard
 validate-dashboard:
   @./scripts/validate-dashboard.sh

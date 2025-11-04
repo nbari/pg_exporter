@@ -1,4 +1,5 @@
 use crate::collectors::Collector;
+use crate::collectors::util::is_pg_version_at_least;
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{IntCounter, Opts, Registry};
@@ -97,6 +98,12 @@ impl Collector for CheckpointerCollector {
     )]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            // pg_stat_checkpointer was introduced in PostgreSQL 17
+            if !is_pg_version_at_least(170000) {
+                debug!("Skipping checkpointer collector (requires PostgreSQL 17+)");
+                return Ok(());
+            }
+
             let query_span = info_span!(
                 "db.query",
                 otel.kind = "client",
@@ -106,7 +113,7 @@ impl Collector for CheckpointerCollector {
                 db.sql.table = "pg_stat_checkpointer"
             );
 
-            let row_result = sqlx::query(
+            let row = sqlx::query(
                 r#"
                 SELECT
                     num_timed,
@@ -119,19 +126,7 @@ impl Collector for CheckpointerCollector {
             )
             .fetch_one(pool)
             .instrument(query_span)
-            .await;
-
-            let row = match row_result {
-                Ok(row) => row,
-                Err(e) => {
-                    // pg_stat_checkpointer was introduced in PostgreSQL 17
-                    if e.to_string().contains("pg_stat_checkpointer") {
-                        debug!("pg_stat_checkpointer view not found (requires PostgreSQL 17+)");
-                        return Ok(());
-                    }
-                    return Err(e.into());
-                }
-            };
+            .await?;
 
             let num_timed: i64 = row.try_get("num_timed")?;
             let num_requested: i64 = row.try_get("num_requested")?;

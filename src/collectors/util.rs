@@ -23,6 +23,9 @@ static DEFAULT_DB: OnceCell<String> = OnceCell::new();
 /// Cache of per-database tiny pools (only for non-default DBs).
 static POOLS: OnceCell<RwLock<HashMap<String, PgPool>>> = OnceCell::new();
 
+/// PostgreSQL version number (e.g., 140000 for v14.0, 170000 for v17.0).
+static PG_VERSION: OnceCell<i32> = OnceCell::new();
+
 /// Set the excluded databases from CLI/env. Call this once during startup.
 pub fn set_excluded_databases(list: Vec<String>) {
     let mut cleaned: Vec<String> = list
@@ -47,6 +50,24 @@ pub fn get_excluded_databases() -> &'static [String] {
 #[inline]
 pub fn is_database_excluded(datname: &str) -> bool {
     get_excluded_databases().iter().any(|d| d == datname)
+}
+
+/// Set the PostgreSQL version. Call this once during startup after connecting.
+pub fn set_pg_version(version: i32) {
+    let _ = PG_VERSION.set(version);
+}
+
+/// Get the PostgreSQL version number.
+/// Returns 0 if not set (should never happen in production).
+#[inline]
+pub fn get_pg_version() -> i32 {
+    PG_VERSION.get().copied().unwrap_or(0)
+}
+
+/// Check if PostgreSQL version is at least the specified minimum.
+#[inline]
+pub fn is_pg_version_at_least(min_version: i32) -> bool {
+    get_pg_version() >= min_version
 }
 
 /// Initialize (idempotent) the base connect options from the provided DSN (SecretString).
@@ -139,5 +160,19 @@ mod tests {
         assert_eq!(got, &["postgres".to_string(), "template0".to_string()]);
         assert!(is_database_excluded("postgres"));
         assert!(!is_database_excluded("not_there"));
+    }
+
+    #[test]
+    fn test_pg_version_utilities() {
+        // Test default (not set)
+        assert_eq!(get_pg_version(), 0);
+        assert!(!is_pg_version_at_least(140000));
+
+        // Test setting version
+        set_pg_version(160000); // PostgreSQL 16
+        assert_eq!(get_pg_version(), 160000);
+        assert!(is_pg_version_at_least(140000)); // >= 14
+        assert!(is_pg_version_at_least(160000)); // >= 16
+        assert!(!is_pg_version_at_least(170000)); // < 17
     }
 }
