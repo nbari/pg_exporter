@@ -7,12 +7,12 @@ use tracing::{debug, info_span, instrument};
 use tracing_futures::Instrument as _;
 
 /// Tracks replication metrics for standby/replica servers
-/// Compatible with postgres_exporter's pg_replication namespace
+/// Compatible with `postgres_exporter`'s `pg_replication` namespace
 ///
 /// Metrics:
-/// - pg_replication_lag_seconds (Gauge)
-/// - pg_replication_is_replica (Gauge)
-/// - pg_replication_last_replay_seconds (Gauge)
+/// - `pg_replication_lag_seconds` (`Gauge`)
+/// - `pg_replication_is_replica` (`Gauge`)
+/// - `pg_replication_last_replay_seconds` (`Gauge`)
 #[derive(Clone)]
 pub struct ReplicaCollector {
     lag_seconds: Gauge,
@@ -27,6 +27,13 @@ impl Default for ReplicaCollector {
 }
 
 impl ReplicaCollector {
+    /// Creates a new `ReplicaSubCollector`
+    ///
+    /// # Panics
+    ///
+    /// Panics if metric creation fails (should never happen with valid metric names)
+    #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new() -> Self {
         let lag_seconds = Gauge::with_opts(Opts::new(
             "pg_replication_lag_seconds",
@@ -91,7 +98,7 @@ impl Collector for ReplicaCollector {
 
             // Query compatible with postgres_exporter
             let row = sqlx::query(
-                r#"
+                r"
                 SELECT
                     CASE
                         WHEN NOT pg_is_in_recovery() THEN 0
@@ -103,7 +110,7 @@ impl Collector for ReplicaCollector {
                         ELSE 0
                     END AS is_replica,
                     GREATEST(0, EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()))) AS last_replay
-                "#,
+                ",
             )
             .fetch_one(pool)
             .instrument(query_span)
@@ -114,7 +121,7 @@ impl Collector for ReplicaCollector {
             let last_replay: f64 = row.try_get("last_replay").unwrap_or(0.0);
 
             self.lag_seconds.set(lag);
-            self.is_replica.set(replica as f64);
+            self.is_replica.set(f64::from(replica));
             self.last_replay_seconds.set(last_replay);
 
             debug!(
@@ -140,6 +147,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn test_replica_collector_registers_without_error() {
         let collector = ReplicaCollector::new();
         let registry = Registry::new();
@@ -147,9 +155,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::expect_used)]
     async fn test_replica_collector_metrics_on_primary() {
         let database_url =
-            std::env::var("DATABASE_URL").unwrap_or_else(|_| "".to_string());
+            std::env::var("DATABASE_URL").unwrap_or_else(|_| String::new());
 
         if database_url.is_empty() {
             eprintln!("Skipping test: DATABASE_URL not set");
@@ -169,10 +178,13 @@ mod tests {
 
         // On a primary, is_replica should be 0
         let is_replica_val = collector.is_replica.get();
-        assert!(
-            is_replica_val == 0.0 || is_replica_val == 1.0,
-            "is_replica should be 0 or 1"
-        );
+        #[allow(clippy::float_cmp)]
+        {
+            assert!(
+                is_replica_val == 0.0 || is_replica_val == 1.0,
+                "is_replica should be 0 or 1"
+            );
+        }
 
         // Lag should be non-negative
         let lag_val = collector.lag_seconds.get();

@@ -34,7 +34,10 @@ async fn test_database_catalog_has_metrics_after_collection() -> Result<()> {
             families.iter().any(|m| m.name() == name),
             "Metric {} should exist. Found: {:?}",
             name,
-            families.iter().map(|m| m.name()).collect::<Vec<_>>()
+            families
+                .iter()
+                .map(prometheus::proto::MetricFamily::name)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -94,8 +97,8 @@ async fn test_database_size_and_connection_limit_values_reasonable() -> Result<(
         .find(|m| m.name() == "pg_database_size_bytes")
     {
         for m in size_fam.get_metric() {
-            let v = m.get_gauge().value() as i64;
-            assert!(v >= 0, "pg_database_size_bytes should be >= 0, got {}", v);
+            let v = common::metric_value_to_i64(m.get_gauge().value());
+            assert!(v >= 0, "pg_database_size_bytes should be >= 0, got {v}");
         }
         // If we find 'postgres', assert > 0
         if let Some(m) = size_fam.get_metric().iter().find(|m| {
@@ -116,11 +119,10 @@ async fn test_database_size_and_connection_limit_values_reasonable() -> Result<(
         .find(|m| m.name() == "pg_database_connection_limit")
     {
         for m in limit_fam.get_metric() {
-            let v = m.get_gauge().value() as i64;
+            let v = common::metric_value_to_i64(m.get_gauge().value());
             assert!(
                 v == -1 || v >= 0,
-                "connection limit should be -1 or >= 0, got {}",
-                v
+                "connection limit should be -1 or >= 0, got {v}"
             );
         }
     }
@@ -140,7 +142,10 @@ async fn test_database_collector_runs_both_subcollectors() -> Result<()> {
     collector.collect(&pool).await?;
 
     let families = registry.gather();
-    let names: Vec<_> = families.iter().map(|m| m.name()).collect();
+    let names: Vec<_> = families
+        .iter()
+        .map(prometheus::proto::MetricFamily::name)
+        .collect();
 
     // From catalog sub-collector
     assert!(

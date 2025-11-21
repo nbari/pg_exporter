@@ -1,4 +1,4 @@
-use crate::collectors::Collector;
+use crate::collectors::{Collector, i64_to_f64};
 use crate::collectors::util::{
     get_default_database, get_excluded_databases, get_or_create_pool_for_db,
 };
@@ -11,8 +11,8 @@ use tokio::task::JoinSet;
 use tracing::{debug, error, info_span, instrument};
 use tracing_futures::Instrument as _;
 
-/// Mirrors postgres_exporter's pg_stat_user_tables collector:
-/// Metrics are exported as pg_stat_user_tables_* with labels {datname, schemaname, relname}.
+/// Mirrors `postgres_exporter`'s `pg_stat_user_tables` collector:
+/// Metrics are exported as `pg_stat_user_tables`_* with labels {`datname`, schemaname, relname}.
 #[derive(Clone)]
 pub struct StatUserTablesCollector {
     // Scan counts (cumulative)
@@ -58,8 +58,8 @@ pub struct StatUserTablesCollector {
     // Time-based metrics (easier for alerting than epoch timestamps)
     last_autovacuum_seconds_ago: GaugeVec,   // Alert when >86400 (24h) - table not being maintained
     last_autoanalyze_seconds_ago: GaugeVec,  // Track analyze freshness
-    
-    // ⭐ GOLD METRICS - Predict autovacuum triggers BEFORE they happen
+
+    // GOLD METRICS - Predict autovacuum triggers BEFORE they happen
     // Ratio: n_dead_tup / (threshold + scale_factor * n_live_tup)
     // Values: 0.0=clean, 0.8=warning, 1.0=trigger point, >1.0=overdue
     // Use these to prevent transaction ID wraparound emergencies!
@@ -74,273 +74,58 @@ impl Default for StatUserTablesCollector {
 }
 
 impl StatUserTablesCollector {
+    /// Creates a new `UserTablesCollector`
+    ///
+    /// # Panics
+    ///
+    /// Panics if metric creation fails (should never happen with valid metric names)
+    #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new() -> Self {
-        let labels = &["datname", "schemaname", "relname"];
-
-        let seq_scan = IntGaugeVec::new(
-            Opts::new(
-                "pg_stat_user_tables_seq_scan",
-                "Number of sequential scans initiated on this table",
-            ),
-            labels,
-        )
-        .expect("pg_stat_user_tables_seq_scan");
-
-        let seq_tup_read = IntGaugeVec::new(
-            Opts::new(
-                "pg_stat_user_tables_seq_tup_read",
-                "Number of live rows fetched by sequential scans",
-            ),
-            labels,
-        )
-        .expect("pg_stat_user_tables_seq_tup_read");
-
-        let idx_scan = IntGaugeVec::new(
-            Opts::new(
-                "pg_stat_user_tables_idx_scan",
-                "Number of index scans initiated on this table",
-            ),
-            labels,
-        )
-        .expect("pg_stat_user_tables_idx_scan");
-
-        let idx_tup_fetch = IntGaugeVec::new(
-            Opts::new(
-                "pg_stat_user_tables_idx_tup_fetch",
-                "Number of live rows fetched by index scans",
-            ),
-            labels,
-        )
-        .expect("pg_stat_user_tables_idx_tup_fetch");
-
-        let n_tup_ins = IntGaugeVec::new(
-            Opts::new("pg_stat_user_tables_n_tup_ins", "Number of rows inserted"),
-            labels,
-        )
-        .expect("pg_stat_user_tables_n_tup_ins");
-
-        let n_tup_upd = IntGaugeVec::new(
-            Opts::new("pg_stat_user_tables_n_tup_upd", "Number of rows updated"),
-            labels,
-        )
-        .expect("pg_stat_user_tables_n_tup_upd");
-
-        let n_tup_del = IntGaugeVec::new(
-            Opts::new("pg_stat_user_tables_n_tup_del", "Number of rows deleted"),
-            labels,
-        )
-        .expect("pg_stat_user_tables_n_tup_del");
-
-        let n_tup_hot_upd = IntGaugeVec::new(
-            Opts::new(
-                "pg_stat_user_tables_n_tup_hot_upd",
-                "Number of rows HOT updated",
-            ),
-            labels,
-        )
-        .expect("pg_stat_user_tables_n_tup_hot_upd");
-
-        let n_live_tup = IntGaugeVec::new(
-            Opts::new(
-                "pg_stat_user_tables_n_live_tup",
-                "Estimated number of live rows",
-            ),
-            labels,
-        )
-        .expect("pg_stat_user_tables_n_live_tup");
-
-        let n_dead_tup = IntGaugeVec::new(
-            Opts::new(
-                "pg_stat_user_tables_n_dead_tup",
-                "Estimated number of dead rows",
-            ),
-            labels,
-        )
-        .expect("pg_stat_user_tables_n_dead_tup");
-
-        let n_mod_since_analyze = IntGaugeVec::new(
-            Opts::new(
-                "pg_stat_user_tables_n_mod_since_analyze",
-                "Estimated number of rows changed since last analyze",
-            ),
-            labels,
-        )
-        .expect("pg_stat_user_tables_n_mod_since_analyze");
-
-        let last_vacuum = IntGaugeVec::new(
-            Opts::new(
-                "pg_stat_user_tables_last_vacuum",
-                "Last manual vacuum time (epoch seconds)",
-            ),
-            labels,
-        )
-        .expect("pg_stat_user_tables_last_vacuum");
-
-        let last_autovacuum = IntGaugeVec::new(
-            Opts::new(
-                "pg_stat_user_tables_last_autovacuum",
-                "Last autovacuum time (epoch seconds)",
-            ),
-            labels,
-        )
-        .expect("pg_stat_user_tables_last_autovacuum");
-
-        let last_analyze = IntGaugeVec::new(
-            Opts::new(
-                "pg_stat_user_tables_last_analyze",
-                "Last manual analyze time (epoch seconds)",
-            ),
-            labels,
-        )
-        .expect("pg_stat_user_tables_last_analyze");
-
-        let last_autoanalyze = IntGaugeVec::new(
-            Opts::new(
-                "pg_stat_user_tables_last_autoanalyze",
-                "Last autoanalyze time (epoch seconds)",
-            ),
-            labels,
-        )
-        .expect("pg_stat_user_tables_last_autoanalyze");
-
-        let vacuum_count = IntGaugeVec::new(
-            Opts::new(
-                "pg_stat_user_tables_vacuum_count",
-                "Number of times manually vacuumed",
-            ),
-            labels,
-        )
-        .expect("pg_stat_user_tables_vacuum_count");
-
-        let autovacuum_count = IntGaugeVec::new(
-            Opts::new(
-                "pg_stat_user_tables_autovacuum_count",
-                "Number of times vacuumed by autovacuum",
-            ),
-            labels,
-        )
-        .expect("pg_stat_user_tables_autovacuum_count");
-
-        let analyze_count = IntGaugeVec::new(
-            Opts::new(
-                "pg_stat_user_tables_analyze_count",
-                "Number of times manually analyzed",
-            ),
-            labels,
-        )
-        .expect("pg_stat_user_tables_analyze_count");
-
-        let autoanalyze_count = IntGaugeVec::new(
-            Opts::new(
-                "pg_stat_user_tables_autoanalyze_count",
-                "Number of times analyzed by autovacuum",
-            ),
-            labels,
-        )
-        .expect("pg_stat_user_tables_autoanalyze_count");
-
-        let index_size_bytes = IntGaugeVec::new(
-            Opts::new(
-                "pg_stat_user_tables_index_size_bytes",
-                "Total disk space used by indexes on this table, in bytes",
-            ),
-            labels,
-        )
-        .expect("pg_stat_user_tables_index_size_bytes");
-
-        let table_size_bytes = IntGaugeVec::new(
-            Opts::new(
-                "pg_stat_user_tables_table_size_bytes",
-                "Total disk space used by this table, in bytes",
-            ),
-            labels,
-        )
-        .expect("pg_stat_user_tables_table_size_bytes");
-
-        let bloat_ratio = GaugeVec::new(
-            Opts::new(
-                "pg_stat_user_tables_bloat_ratio",
-                "Ratio of dead tuples to total tuples (0.0-1.0). High values indicate need for VACUUM",
-            ),
-            labels,
-        )
-        .expect("pg_stat_user_tables_bloat_ratio");
-
-        let dead_tuple_size_bytes = GaugeVec::new(
-            Opts::new(
-                "pg_stat_user_tables_dead_tuple_size_bytes",
-                "Estimated size of dead tuples in bytes. Indicates reclaimable space after VACUUM",
-            ),
-            labels,
-        )
-        .expect("pg_stat_user_tables_dead_tuple_size_bytes");
-
-        let last_autovacuum_seconds_ago = GaugeVec::new(
-            Opts::new(
-                "pg_stat_user_tables_last_autovacuum_seconds_ago",
-                "Seconds since last autovacuum (easier for alerting than timestamps)",
-            ),
-            labels,
-        )
-        .expect("pg_stat_user_tables_last_autovacuum_seconds_ago");
-
-        let last_autoanalyze_seconds_ago = GaugeVec::new(
-            Opts::new(
-                "pg_stat_user_tables_last_autoanalyze_seconds_ago",
-                "Seconds since last autoanalyze (easier for alerting than timestamps)",
-            ),
-            labels,
-        )
-        .expect("pg_stat_user_tables_last_autoanalyze_seconds_ago");
-
-        let autovacuum_threshold_ratio = GaugeVec::new(
-            Opts::new(
-                "pg_stat_user_tables_autovacuum_threshold_ratio",
-                "Ratio of dead tuples to autovacuum threshold (0.0=clean, 1.0=at threshold, >1.0=overdue)",
-            ),
-            labels,
-        )
-        .expect("pg_stat_user_tables_autovacuum_threshold_ratio");
-
-        let autoanalyze_threshold_ratio = GaugeVec::new(
-            Opts::new(
-                "pg_stat_user_tables_autoanalyze_threshold_ratio",
-                "Ratio of modified tuples to autoanalyze threshold (0.0=clean, 1.0=at threshold, >1.0=overdue)",
-            ),
-            labels,
-        )
-        .expect("pg_stat_user_tables_autoanalyze_threshold_ratio");
-
         Self {
-            seq_scan,
-            seq_tup_read,
-            idx_scan,
-            idx_tup_fetch,
-            n_tup_ins,
-            n_tup_upd,
-            n_tup_del,
-            n_tup_hot_upd,
-            n_live_tup,
-            n_dead_tup,
-            n_mod_since_analyze,
-            last_vacuum,
-            last_autovacuum,
-            last_analyze,
-            last_autoanalyze,
-            vacuum_count,
-            autovacuum_count,
-            analyze_count,
-            autoanalyze_count,
-            index_size_bytes,
-            table_size_bytes,
-            bloat_ratio,
-            dead_tuple_size_bytes,
-            last_autovacuum_seconds_ago,
-            last_autoanalyze_seconds_ago,
-            autovacuum_threshold_ratio,
-            autoanalyze_threshold_ratio,
+            seq_scan: int_metric("pg_stat_user_tables_seq_scan", "Number of sequential scans initiated on this table"),
+            seq_tup_read: int_metric("pg_stat_user_tables_seq_tup_read", "Number of live rows fetched by sequential scans"),
+            idx_scan: int_metric("pg_stat_user_tables_idx_scan", "Number of index scans initiated on this table"),
+            idx_tup_fetch: int_metric("pg_stat_user_tables_idx_tup_fetch", "Number of live rows fetched by index scans"),
+            n_tup_ins: int_metric("pg_stat_user_tables_n_tup_ins", "Number of rows inserted"),
+            n_tup_upd: int_metric("pg_stat_user_tables_n_tup_upd", "Number of rows updated"),
+            n_tup_del: int_metric("pg_stat_user_tables_n_tup_del", "Number of rows deleted"),
+            n_tup_hot_upd: int_metric("pg_stat_user_tables_n_tup_hot_upd", "Number of rows HOT updated"),
+            n_live_tup: int_metric("pg_stat_user_tables_n_live_tup", "Estimated number of live rows"),
+            n_dead_tup: int_metric("pg_stat_user_tables_n_dead_tup", "Estimated number of dead rows"),
+            n_mod_since_analyze: int_metric("pg_stat_user_tables_n_mod_since_analyze", "Estimated number of rows changed since last analyze"),
+            last_vacuum: int_metric("pg_stat_user_tables_last_vacuum", "Last manual vacuum time (epoch seconds)"),
+            last_autovacuum: int_metric("pg_stat_user_tables_last_autovacuum", "Last autovacuum time (epoch seconds)"),
+            last_analyze: int_metric("pg_stat_user_tables_last_analyze", "Last manual analyze time (epoch seconds)"),
+            last_autoanalyze: int_metric("pg_stat_user_tables_last_autoanalyze", "Last autoanalyze time (epoch seconds)"),
+            vacuum_count: int_metric("pg_stat_user_tables_vacuum_count", "Number of times manually vacuumed"),
+            autovacuum_count: int_metric("pg_stat_user_tables_autovacuum_count", "Number of times vacuumed by autovacuum"),
+            analyze_count: int_metric("pg_stat_user_tables_analyze_count", "Number of times manually analyzed"),
+            autoanalyze_count: int_metric("pg_stat_user_tables_autoanalyze_count", "Number of times analyzed by autovacuum"),
+            index_size_bytes: int_metric("pg_stat_user_tables_index_size_bytes", "Total disk space used by indexes on this table, in bytes"),
+            table_size_bytes: int_metric("pg_stat_user_tables_table_size_bytes", "Total disk space used by this table, in bytes"),
+            bloat_ratio: gauge_metric("pg_stat_user_tables_bloat_ratio", "Estimated bloat ratio (dead tuples / total tuples)"),
+            dead_tuple_size_bytes: gauge_metric("pg_stat_user_tables_dead_tuple_size_bytes", "Estimated disk space used by dead tuples"),
+            last_autovacuum_seconds_ago: gauge_metric("pg_stat_user_tables_last_autovacuum_seconds_ago", "Seconds since last autovacuum (alert when > 86400)"),
+            last_autoanalyze_seconds_ago: gauge_metric("pg_stat_user_tables_last_autoanalyze_seconds_ago", "Seconds since last autoanalyze (alert when > 86400)"),
+            autovacuum_threshold_ratio: gauge_metric("pg_stat_user_tables_autovacuum_threshold_ratio", "Ratio of dead tuples to autovacuum threshold (0.0 clean, 1.0 trigger, >1.0 overdue)"),
+            autoanalyze_threshold_ratio: gauge_metric("pg_stat_user_tables_autoanalyze_threshold_ratio", "Ratio of modified tuples to autoanalyze threshold (0.0 clean, 1.0 trigger, >1.0 overdue)"),
         }
     }
+}
+
+const USER_TABLE_LABELS: [&str; 3] = ["datname", "schemaname", "relname"];
+
+#[allow(clippy::expect_used)]
+fn int_metric(name: &str, help: &str) -> IntGaugeVec {
+    IntGaugeVec::new(Opts::new(name, help), &USER_TABLE_LABELS)
+        .expect("pg_stat_user_tables metric")
+}
+
+#[allow(clippy::expect_used)]
+fn gauge_metric(name: &str, help: &str) -> GaugeVec {
+    GaugeVec::new(Opts::new(name, help), &USER_TABLE_LABELS)
+        .expect("pg_stat_user_tables metric")
 }
 
 impl Collector for StatUserTablesCollector {
@@ -393,14 +178,14 @@ impl Collector for StatUserTablesCollector {
                 db.sql.table = "pg_database"
             );
             let dbs: Vec<String> = sqlx::query_scalar(
-                r#"
+                r"
                 SELECT datname
                 FROM pg_database
                 WHERE datallowconn
                   AND NOT datistemplate
                   AND NOT (datname = ANY($1))
                 ORDER BY datname
-                "#,
+                ",
             )
             .bind(&excluded)
             .fetch_all(pool)
@@ -408,7 +193,7 @@ impl Collector for StatUserTablesCollector {
             .await?;
 
             let shared_pool = pool.clone();
-            let default_db = get_default_database().map(|s| s.to_string());
+            let default_db = get_default_database().map(std::string::ToString::to_string);
 
             // 2) Spawn one task per DB (no semaphore), reuse shared pool for default DB, tiny pool for others
             let this = Arc::new(self.clone());
@@ -435,7 +220,7 @@ impl Collector for StatUserTablesCollector {
 
                     let rows_res = if use_shared {
                         sqlx::query(
-                            r#"
+                            r"
                             SELECT
                                 current_database() AS datname,
                                 schemaname,
@@ -478,7 +263,7 @@ impl Collector for StatUserTablesCollector {
                                     ELSE 0
                                 END AS autoanalyze_threshold_ratio
                             FROM pg_stat_user_tables
-                            "#,
+                            ",
                         )
                         .fetch_all(&shared_pool)
                         .instrument(query_span)
@@ -487,7 +272,7 @@ impl Collector for StatUserTablesCollector {
                         match get_or_create_pool_for_db(&datname).await {
                             Ok(per_db_pool) => {
                                 sqlx::query(
-                                    r#"
+                                    r"
                                     SELECT
                                         current_database() AS datname,
                                         schemaname,
@@ -530,7 +315,7 @@ impl Collector for StatUserTablesCollector {
                                             ELSE 0
                                         END AS autoanalyze_threshold_ratio
                                     FROM pg_stat_user_tables
-                                    "#,
+                                    ",
                                 )
                                 .fetch_all(&per_db_pool)
                                 .instrument(query_span)
@@ -592,13 +377,13 @@ impl Collector for StatUserTablesCollector {
                         
                         let total_tuples = n_live + n_dead;
                         let bloat_ratio = if total_tuples > 0 {
-                            n_dead as f64 / total_tuples as f64
+                            i64_to_f64(n_dead) / i64_to_f64(total_tuples)
                         } else {
                             0.0
                         };
-                        
+
                         let dead_size_estimate = if tbl_size > 0 {
-                            tbl_size as f64 * bloat_ratio
+                            i64_to_f64(tbl_size) * bloat_ratio
                         } else {
                             0.0
                         };
@@ -612,8 +397,8 @@ impl Collector for StatUserTablesCollector {
                         // Time-based metrics - easier for alerting than epoch timestamps
                         let last_autovac_seconds_ago: f64 = row.try_get("last_autovacuum_seconds_ago").unwrap_or(0.0);
                         let last_autoanalyze_seconds_ago: f64 = row.try_get("last_autoanalyze_seconds_ago").unwrap_or(0.0);
-                        
-                        // ⭐ GOLD METRICS - Predict autovacuum triggers BEFORE they happen
+
+                        // GOLD METRICS - Predict autovacuum triggers BEFORE they happen
                         // Ratio of dead/modified tuples to autovacuum threshold
                         // Values: 0.0=clean, 0.8=warning, 1.0=trigger, >1.0=overdue
                         // These prevent transaction ID wraparound emergencies!

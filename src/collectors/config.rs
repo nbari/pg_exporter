@@ -7,17 +7,20 @@ pub struct CollectorConfig {
 
 impl CollectorConfig {
     /// Create an empty config
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Enable collectors by name
+    #[must_use]
     pub fn with_enabled(mut self, collectors: &[String]) -> Self {
         self.enabled_collectors = collectors.iter().cloned().collect();
         self
     }
 
     /// Check if a collector is enabled
+    #[must_use]
     pub fn is_enabled(&self, name: &str) -> bool {
         self.enabled_collectors.contains(name)
     }

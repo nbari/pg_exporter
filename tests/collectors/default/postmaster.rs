@@ -2,6 +2,7 @@ use super::super::common;
 use anyhow::Result;
 use pg_exporter::collectors::{Collector, default::postmaster::PostmasterCollector};
 use prometheus::Registry;
+use std::convert::TryInto;
 
 #[tokio::test]
 async fn test_postmaster_collector_returns_start_time() -> Result<()> {
@@ -25,37 +26,34 @@ async fn test_postmaster_collector_returns_start_time() -> Result<()> {
     );
 
     let metric = &postmaster_start.get_metric()[0];
-    let start_time = metric.get_gauge().value() as i64;
+    let start_time = common::metric_value_to_i64(metric.get_gauge().value());
 
     // Should be a valid Unix timestamp
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_secs() as i64;
+        .as_secs()
+        .try_into()
+        .expect("system time should fit in i64");
 
     // Basic sanity checks:
     // 1. Should be positive
     assert!(
         start_time > 0,
-        "start_time should be positive, got: {}",
-        start_time
+        "start_time should be positive, got: {start_time}"
     );
 
     // 2. Should not be in the future
     assert!(
         start_time <= now,
-        "start_time should not be in the future. start_time: {}, now: {}",
-        start_time,
-        now
+        "start_time should not be in the future. start_time: {start_time}, now: {now}"
     );
 
     // 3. Should be a reasonable Unix timestamp (after year 2000)
-    let year_2000 = 946684800; // 2000-01-01 00:00:00 UTC
+    let year_2000 = 946_684_800; // 2000-01-01 00:00:00 UTC
     assert!(
         start_time >= year_2000,
-        "start_time should be after year 2000 ({}), got: {}",
-        year_2000,
-        start_time
+        "start_time should be after year 2000 ({year_2000}), got: {start_time}"
     );
 
     pool.close().await;
@@ -79,7 +77,7 @@ async fn test_postmaster_collector_is_idempotent() -> Result<()> {
             .iter()
             .find(|m| m.name() == "pg_postmaster_start_time_seconds")
             .unwrap();
-        metric.get_metric()[0].get_gauge().value() as i64
+        common::metric_value_to_i64(metric.get_metric()[0].get_gauge().value())
     };
 
     // Small delay
@@ -92,7 +90,7 @@ async fn test_postmaster_collector_is_idempotent() -> Result<()> {
             .iter()
             .find(|m| m.name() == "pg_postmaster_start_time_seconds")
             .unwrap();
-        metric.get_metric()[0].get_gauge().value() as i64
+        common::metric_value_to_i64(metric.get_metric()[0].get_gauge().value())
     };
 
     // Start time should be the same (PostgreSQL didn't restart)

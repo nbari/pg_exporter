@@ -168,7 +168,7 @@ async fn test_stat_user_tables_collector_counts_are_non_negative() -> Result<()>
     for family in &metric_families {
         if family.name().starts_with("pg_stat_user_tables_") {
             for metric in family.get_metric() {
-                let value = metric.get_gauge().value() as i64;
+                let value = common::metric_value_to_i64(metric.get_gauge().value());
                 assert!(
                     value >= 0,
                     "Metric {} should be non-negative, got: {}",
@@ -200,7 +200,7 @@ async fn test_stat_user_tables_collector_tracks_inserts() -> Result<()> {
     // Insert some rows
     for i in 1..=5 {
         sqlx::query("INSERT INTO test_inserts (data) VALUES ($1)")
-            .bind(format!("test_{}", i))
+            .bind(format!("test_{i}"))
             .execute(&pool)
             .await?;
     }
@@ -227,8 +227,8 @@ async fn test_stat_user_tables_collector_tracks_inserts() -> Result<()> {
         });
 
         if let Some(metric) = our_table {
-            let value = metric.get_gauge().value() as i64;
-            assert!(value >= 5, "Should have at least 5 inserts, got: {}", value);
+            let value = common::metric_value_to_i64(metric.get_gauge().value());
+            assert!(value >= 5, "Should have at least 5 inserts, got: {value}");
         }
     }
 
@@ -297,7 +297,7 @@ async fn test_stat_user_tables_collector_handles_empty_database() -> Result<()> 
     for family in user_table_metrics {
         // If metrics exist, they should be well-formed
         for metric in family.get_metric() {
-            let value = metric.get_gauge().value() as i64;
+            let value = common::metric_value_to_i64(metric.get_gauge().value());
             assert!(value >= 0, "Values should be non-negative");
         }
     }
@@ -330,8 +330,8 @@ async fn test_stat_user_tables_collector_timestamp_values_are_reasonable() -> Re
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
+        .unwrap();
+    let now = i64::try_from(now.as_secs()).expect("current timestamp fits in i64");
 
     // Check that timestamp metrics are reasonable (0 or valid timestamp)
     let timestamp_metrics = vec![
@@ -344,16 +344,14 @@ async fn test_stat_user_tables_collector_timestamp_values_are_reasonable() -> Re
     for metric_name in timestamp_metrics {
         if let Some(family) = metric_families.iter().find(|m| m.name() == metric_name) {
             for metric in family.get_metric() {
-                let value = metric.get_gauge().value() as i64;
+                let value = common::metric_value_to_i64(metric.get_gauge().value());
 
                 // Value should be 0 (never run) or a reasonable Unix timestamp
                 if value > 0 {
-                    let year_2000 = 946684800;
+                    let year_2000 = 946_684_800;
                     assert!(
                         value >= year_2000 && value <= now,
-                        "Timestamp {} should be between year 2000 and now, got {}",
-                        metric_name,
-                        value
+                        "Timestamp {metric_name} should be between year 2000 and now, got {value}"
                     );
                 }
             }
@@ -375,19 +373,18 @@ async fn test_stat_user_tables_collector_tracks_table_size() -> Result<()> {
 
     // Create a test table with some data using unique name
     let table_name = format!("test_size_{}", std::process::id());
-    sqlx::query(&format!("DROP TABLE IF EXISTS {}", table_name))
+    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
         .execute(&pool)
         .await?;
 
-    sqlx::query(&format!("CREATE TABLE {} (id INT, data TEXT)", table_name))
+    sqlx::query(&format!("CREATE TABLE {table_name} (id INT, data TEXT)"))
         .execute(&pool)
         .await?;
 
     // Insert some data to ensure table has size
     for i in 1..=100 {
         sqlx::query(&format!(
-            "INSERT INTO {} (id, data) VALUES ($1, $2)",
-            table_name
+            "INSERT INTO {table_name} (id, data) VALUES ($1, $2)"
         ))
         .bind(i)
         .bind("x".repeat(100))
@@ -418,17 +415,16 @@ async fn test_stat_user_tables_collector_tracks_table_size() -> Result<()> {
         });
 
         if let Some(metric) = our_table {
-            let value = metric.get_gauge().value() as i64;
+            let value = common::metric_value_to_i64(metric.get_gauge().value());
             assert!(
                 value > 0,
-                "Table with data should have size > 0, got: {}",
-                value
+                "Table with data should have size > 0, got: {value}"
             );
         }
     }
 
     // Cleanup
-    sqlx::query(&format!("DROP TABLE IF EXISTS {}", table_name))
+    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
         .execute(&pool)
         .await?;
 
@@ -448,13 +444,12 @@ async fn test_stat_user_tables_collector_bloat_metrics() -> Result<()> {
 
     // Create a table and collect data with unique name to avoid conflicts
     let table_name = format!("test_bloat_{}", std::process::id());
-    sqlx::query(&format!("DROP TABLE IF EXISTS {}", table_name))
+    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
         .execute(&pool)
         .await?;
 
     sqlx::query(&format!(
-        "CREATE TABLE {} (id INT PRIMARY KEY, data TEXT)",
-        table_name
+        "CREATE TABLE {table_name} (id INT PRIMARY KEY, data TEXT)"
     ))
     .execute(&pool)
     .await?;
@@ -462,8 +457,7 @@ async fn test_stat_user_tables_collector_bloat_metrics() -> Result<()> {
     // Insert data
     for i in 1..=100 {
         sqlx::query(&format!(
-            "INSERT INTO {} (id, data) VALUES ($1, $2)",
-            table_name
+            "INSERT INTO {table_name} (id, data) VALUES ($1, $2)"
         ))
         .bind(i)
         .bind("x".repeat(100))
@@ -472,7 +466,7 @@ async fn test_stat_user_tables_collector_bloat_metrics() -> Result<()> {
     }
 
     // Update rows to create dead tuples
-    sqlx::query(&format!("UPDATE {} SET data = 'updated'", table_name))
+    sqlx::query(&format!("UPDATE {table_name} SET data = 'updated'"))
         .execute(&pool)
         .await?;
 
@@ -488,8 +482,7 @@ async fn test_stat_user_tables_collector_bloat_metrics() -> Result<()> {
                 let value = metric.get_gauge().value();
                 assert!(
                     (0.0..=1.0).contains(&value),
-                    "Bloat ratio should be between 0.0 and 1.0, got: {}",
-                    value
+                    "Bloat ratio should be between 0.0 and 1.0, got: {value}"
                 );
             }
         }
@@ -499,15 +492,14 @@ async fn test_stat_user_tables_collector_bloat_metrics() -> Result<()> {
                 let value = metric.get_gauge().value();
                 assert!(
                     value >= 0.0,
-                    "Dead tuple size should be non-negative, got: {}",
-                    value
+                    "Dead tuple size should be non-negative, got: {value}"
                 );
             }
         }
     }
 
     // Cleanup
-    sqlx::query(&format!("DROP TABLE IF EXISTS {}", table_name))
+    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
         .execute(&pool)
         .await?;
 
@@ -522,14 +514,13 @@ async fn test_stat_user_tables_collector_captures_all_tuple_operations() -> Resu
     let table_name = format!("test_tuple_ops_{}", std::process::id());
 
     // Drop table if exists
-    sqlx::query(&format!("DROP TABLE IF EXISTS {}", table_name))
+    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
         .execute(&pool)
         .await?;
 
     // Create table
     sqlx::query(&format!(
-        "CREATE TABLE {} (id SERIAL PRIMARY KEY, data TEXT, value INT)",
-        table_name
+        "CREATE TABLE {table_name} (id SERIAL PRIMARY KEY, data TEXT, value INT)"
     ))
     .execute(&pool)
     .await?;
@@ -539,10 +530,9 @@ async fn test_stat_user_tables_collector_captures_all_tuple_operations() -> Resu
     let insert_count = 50;
     for i in 1..=insert_count {
         sqlx::query(&format!(
-            "INSERT INTO {} (data, value) VALUES ($1, $2)",
-            table_name
+            "INSERT INTO {table_name} (data, value) VALUES ($1, $2)"
         ))
-        .bind(format!("data_{}", i))
+        .bind(format!("data_{i}"))
         .bind(i)
         .execute(&pool)
         .await?;
@@ -551,8 +541,7 @@ async fn test_stat_user_tables_collector_captures_all_tuple_operations() -> Resu
     // UPDATE
     let update_count = 10;
     sqlx::query(&format!(
-        "UPDATE {} SET data = 'updated' WHERE value <= $1",
-        table_name
+        "UPDATE {table_name} SET data = 'updated' WHERE value <= $1"
     ))
     .bind(update_count)
     .execute(&pool)
@@ -560,13 +549,13 @@ async fn test_stat_user_tables_collector_captures_all_tuple_operations() -> Resu
 
     // DELETE
     let delete_count = 5;
-    sqlx::query(&format!("DELETE FROM {} WHERE value <= $1", table_name))
+    sqlx::query(&format!("DELETE FROM {table_name} WHERE value <= $1"))
         .bind(delete_count)
         .execute(&pool)
         .await?;
 
     // SEQ SCAN - ensure table is scanned
-    sqlx::query(&format!("SELECT * FROM {}", table_name))
+    sqlx::query(&format!("SELECT * FROM {table_name}"))
         .fetch_all(&pool)
         .await?;
 
@@ -603,7 +592,9 @@ async fn test_stat_user_tables_collector_captures_all_tuple_operations() -> Resu
         .filter(|m| m.name().starts_with("pg_stat_user_tables_"))
         .collect();
 
-    if !user_tables_metrics.is_empty() {
+    if user_tables_metrics.is_empty() {
+        println!("ℹ No user tables metrics found (this is normal if stats haven't propagated)");
+    } else {
         println!(
             "✓ Found {} user tables metric families",
             user_tables_metrics.len()
@@ -621,29 +612,23 @@ async fn test_stat_user_tables_collector_captures_all_tuple_operations() -> Resu
                         .iter()
                         .any(|l| l.name() == "relname" && l.value() == table_name)
                 })
-                .map(|m| m.get_gauge().value() as i64)
+                .map(|m| common::metric_value_to_i64(m.get_gauge().value()))
         };
 
         // Check if our table's metrics are present
         if let Some(n_tup_ins) = find_metric_value("pg_stat_user_tables_n_tup_ins") {
-            println!("✓ n_tup_ins: {} (table found in metrics!)", n_tup_ins);
+            println!("✓ n_tup_ins: {n_tup_ins} (table found in metrics!)");
             assert!(
                 n_tup_ins >= 0,
-                "n_tup_ins should be non-negative, got {}",
-                n_tup_ins
+                "n_tup_ins should be non-negative, got {n_tup_ins}"
             );
         } else {
-            println!(
-                "ℹ Table {} not yet in pg_stat_user_tables (stats may be delayed)",
-                table_name
-            );
+            println!("ℹ Table {table_name} not yet in pg_stat_user_tables (stats may be delayed)");
         }
-    } else {
-        println!("ℹ No user tables metrics found (this is normal if stats haven't propagated)");
     }
 
     // Cleanup
-    sqlx::query(&format!("DROP TABLE IF EXISTS {}", table_name))
+    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
         .execute(&pool)
         .await?;
 
@@ -658,27 +643,26 @@ async fn test_stat_user_tables_collector_autovacuum_threshold_metrics() -> Resul
     let table_name = format!("test_autovac_threshold_{}", std::process::id());
 
     // Create table
-    sqlx::query(&format!("DROP TABLE IF EXISTS {}", table_name))
+    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
         .execute(&pool)
         .await?;
 
     sqlx::query(&format!(
-        "CREATE TABLE {} (id SERIAL PRIMARY KEY, data TEXT)",
-        table_name
+        "CREATE TABLE {table_name} (id SERIAL PRIMARY KEY, data TEXT)"
     ))
     .execute(&pool)
     .await?;
 
     // Insert rows
     for i in 1..=100 {
-        sqlx::query(&format!("INSERT INTO {} (data) VALUES ($1)", table_name))
-            .bind(format!("row_{}", i))
+        sqlx::query(&format!("INSERT INTO {table_name} (data) VALUES ($1)"))
+            .bind(format!("row_{i}"))
             .execute(&pool)
             .await?;
     }
 
     // Update to create dead tuples
-    sqlx::query(&format!("UPDATE {} SET data = 'modified'", table_name))
+    sqlx::query(&format!("UPDATE {table_name} SET data = 'modified'"))
         .execute(&pool)
         .await?;
 
@@ -703,11 +687,10 @@ async fn test_stat_user_tables_collector_autovacuum_threshold_metrics() -> Resul
 
         if let Some(metric) = our_table {
             let value = metric.get_gauge().value();
-            println!("✓ autovacuum_threshold_ratio: {} (should be >= 0.0)", value);
+            println!("✓ autovacuum_threshold_ratio: {value} (should be >= 0.0)");
             assert!(
                 value >= 0.0,
-                "Autovacuum threshold ratio should be non-negative, got {}",
-                value
+                "Autovacuum threshold ratio should be non-negative, got {value}"
             );
         }
     }
@@ -725,20 +708,16 @@ async fn test_stat_user_tables_collector_autovacuum_threshold_metrics() -> Resul
 
         if let Some(metric) = our_table {
             let value = metric.get_gauge().value();
-            println!(
-                "✓ autoanalyze_threshold_ratio: {} (should be >= 0.0)",
-                value
-            );
+            println!("✓ autoanalyze_threshold_ratio: {value} (should be >= 0.0)");
             assert!(
                 value >= 0.0,
-                "Autoanalyze threshold ratio should be non-negative, got {}",
-                value
+                "Autoanalyze threshold ratio should be non-negative, got {value}"
             );
         }
     }
 
     // Cleanup
-    sqlx::query(&format!("DROP TABLE IF EXISTS {}", table_name))
+    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
         .execute(&pool)
         .await?;
 

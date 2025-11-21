@@ -70,7 +70,7 @@ jobs:
 
       - name: Build Linux
         run: |
-          cargo build --release --target ${{ matrix.target }} --features musl
+          cargo build --release --target ${{ matrix.target }}
         if: matrix.build == 'linux'
 
       - name: Build

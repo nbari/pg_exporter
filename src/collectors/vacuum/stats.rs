@@ -8,10 +8,10 @@ use tracing::{debug, info_span, instrument};
 use tracing_futures::Instrument as _;
 
 /// Minimal vacuum stats (lightweight, single-connection):
-/// - pg_vacuum_database_freeze_age_xids{datname}
-/// - pg_vacuum_freeze_max_age_xids
-/// - pg_vacuum_database_freeze_age_pct_of_max{datname}
-/// - pg_vacuum_autovacuum_workers{datname}
+/// - `pg_vacuum_database_freeze_age_xids`{`datname`}
+/// - `pg_vacuum_freeze_max_age_xids`
+/// - `pg_vacuum_database_freeze_age_pct_of_max`{`datname`}
+/// - `pg_vacuum_autovacuum_workers`{`datname`}
 #[derive(Clone)]
 pub struct VacuumStatsCollector {
     // Per-database freeze age (age(datfrozenxid) in xids)
@@ -31,6 +31,13 @@ impl Default for VacuumStatsCollector {
 }
 
 impl VacuumStatsCollector {
+    /// Creates a new `VacuumStatsCollector`
+    ///
+    /// # Panics
+    ///
+    /// Panics if metric creation fails (should never happen with valid metric names)
+    #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new() -> Self {
         let db_freeze_age_xids = IntGaugeVec::new(
             Opts::new(
@@ -112,7 +119,7 @@ impl Collector for VacuumStatsCollector {
                 db.statement = "SELECT current_setting('autovacuum_freeze_max_age')",
             );
             let freeze_max_age_xids: i64 = sqlx::query_scalar(
-                r#"SELECT current_setting('autovacuum_freeze_max_age')::bigint"#,
+                r"SELECT current_setting('autovacuum_freeze_max_age')::bigint",
             )
             .fetch_one(pool)
             .instrument(q_freeze_max)
@@ -130,7 +137,7 @@ impl Collector for VacuumStatsCollector {
                 db.sql.table = "pg_database"
             );
             let rows = sqlx::query(
-                r#"
+                r"
                 SELECT
                     datname,
                     age(datfrozenxid)::bigint AS freeze_age
@@ -139,7 +146,7 @@ impl Collector for VacuumStatsCollector {
                   AND NOT datistemplate
                   AND NOT (datname = ANY($1))
                 ORDER BY datname
-                "#,
+                ",
             )
             .bind(&excluded)
             .fetch_all(pool)
@@ -162,9 +169,14 @@ impl Collector for VacuumStatsCollector {
 
                 // integer percent; cap to 100 (can exceed in theory; cap keeps dashboards sane)
                 let pct = if freeze_max_age_xids > 0 {
-                    let p =
-                        ((age_xids as f64) / (freeze_max_age_xids as f64) * 100.0).round() as i64;
-                    p.clamp(0, 100)
+                    let numerator = i128::from(age_xids).saturating_mul(100);
+                    let denominator = i128::from(freeze_max_age_xids);
+                    if denominator > 0 {
+                        let rounded = numerator.saturating_add(denominator / 2) / denominator;
+                        i64::try_from(rounded.clamp(0, 100)).unwrap_or(0)
+                    } else {
+                        0
+                    }
                 } else {
                     0
                 };
@@ -192,7 +204,7 @@ impl Collector for VacuumStatsCollector {
                 db.sql.table = "pg_stat_activity"
             );
             let worker_rows = sqlx::query(
-                r#"
+                r"
                 SELECT
                     datname,
                     COUNT(*)::bigint AS workers
@@ -201,7 +213,7 @@ impl Collector for VacuumStatsCollector {
                   AND NOT (COALESCE(datname,'') = ANY($1))
                 GROUP BY datname
                 ORDER BY datname
-                "#,
+                ",
             )
             .bind(&excluded)
             .fetch_all(pool)

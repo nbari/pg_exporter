@@ -1,10 +1,10 @@
-use crate::collectors::Collector;
+use crate::collectors::{Collector, i64_to_f64};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{Gauge, Opts, Registry};
 use sqlx::PgPool;
 
-/// Collector for index usage statistics from pg_stat_user_indexes
+/// Collector for index usage statistics from `pg_stat_user_indexes`
 ///
 /// **What it measures:**
 /// Tracks index usage patterns including scan counts, tuples read/fetched, and size metrics.
@@ -21,13 +21,13 @@ use sqlx::PgPool;
 /// - Low or zero scans indicate unused indexes that waste disk space and slow writes
 /// - Invalid indexes (from failed CREATE INDEX CONCURRENTLY) must be dropped and recreated
 /// - Large indexes with low usage suggest schema optimization opportunities
-/// - High tuples_read vs tuples_fetched ratio may indicate inefficient index usage
+/// - High `tuples_read` vs `tuples_fetched` ratio may indicate inefficient index usage
 ///
 /// **Diagnostic use cases:**
-/// - Identify indexes safe to drop (idx_scan = 0, not supporting constraints)
+/// - Identify indexes safe to drop (`idx_scan` = 0, not supporting constraints)
 /// - Detect failed concurrent index builds (indisvalid = false)
 /// - Calculate index bloat by comparing actual size to estimated optimal size
-/// - Monitor index usage patterns after query optimization changes
+/// - Monitor index usage patterns after `query` optimization changes
 #[derive(Clone)]
 pub struct IndexStatsCollector {
     scans: Gauge,
@@ -44,6 +44,13 @@ impl Default for IndexStatsCollector {
 }
 
 impl IndexStatsCollector {
+    /// Creates a new `IndexStatsCollector`
+    ///
+    /// # Panics
+    ///
+    /// Panics if metric creation fails (should never happen with valid metric names)
+    #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new() -> Self {
         Self {
             scans: Gauge::with_opts(Opts::new(
@@ -90,10 +97,19 @@ impl Collector for IndexStatsCollector {
     }
 
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+        #[derive(sqlx::FromRow)]
+        struct IndexStats {
+            total_scans: i64,
+            total_tup_read: i64,
+            total_tup_fetch: i64,
+            total_size_bytes: i64,
+            valid_count: i64,
+        }
+
         Box::pin(async move {
             // Query pg_stat_user_indexes joined with pg_class for size and pg_index for validity
             // Excludes system databases and tracks key index health metrics
-            let query = r#"
+            let query = r"
                 SELECT 
                     COALESCE(SUM(s.idx_scan), 0)::BIGINT as total_scans,
                     COALESCE(SUM(s.idx_tup_read), 0)::BIGINT as total_tup_read,
@@ -103,25 +119,16 @@ impl Collector for IndexStatsCollector {
                 FROM pg_stat_user_indexes s
                 JOIN pg_index i ON s.indexrelid = i.indexrelid
                 WHERE s.schemaname NOT IN ('pg_catalog', 'information_schema')
-            "#;
-
-            #[derive(sqlx::FromRow)]
-            struct IndexStats {
-                total_scans: i64,
-                total_tup_read: i64,
-                total_tup_fetch: i64,
-                total_size_bytes: i64,
-                valid_count: i64,
-            }
+            ";
 
             let stats: IndexStats = sqlx::query_as(query).fetch_one(pool).await?;
 
             // Update metrics
-            self.scans.set(stats.total_scans as f64);
-            self.tuples_read.set(stats.total_tup_read as f64);
-            self.tuples_fetched.set(stats.total_tup_fetch as f64);
-            self.size_bytes.set(stats.total_size_bytes as f64);
-            self.valid.set(stats.valid_count as f64);
+            self.scans.set(i64_to_f64(stats.total_scans));
+            self.tuples_read.set(i64_to_f64(stats.total_tup_read));
+            self.tuples_fetched.set(i64_to_f64(stats.total_tup_fetch));
+            self.size_bytes.set(i64_to_f64(stats.total_size_bytes));
+            self.valid.set(i64_to_f64(stats.valid_count));
 
             Ok(())
         })
@@ -137,8 +144,9 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[allow(clippy::expect_used)]
     async fn test_index_stats_collector_collects_from_database() {
-        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "".to_string());
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| String::new());
 
         if database_url.is_empty() {
             eprintln!("Skipping test: DATABASE_URL not set");
@@ -182,4 +190,3 @@ mod tests {
         assert_eq!(collector.name(), "index_stats");
     }
 }
-

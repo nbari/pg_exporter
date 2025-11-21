@@ -10,7 +10,10 @@ use opentelemetry_sdk::{
     trace::{SdkTracerProvider, Tracer},
 };
 use std::{collections::HashMap, env::var, time::Duration};
-use tonic::{metadata::*, transport::ClientTlsConfig};
+use tonic::{
+    metadata::{Ascii, Binary, MetadataKey, MetadataMap, MetadataValue},
+    transport::ClientTlsConfig,
+};
 use tracing::{Level, debug};
 use tracing_subscriber::{EnvFilter, Registry, fmt, layer::SubscriberExt};
 use ulid::Ulid;
@@ -41,20 +44,20 @@ fn headers_to_metadata(headers: &HashMap<String, String>) -> Result<MetadataMap>
         if key_str.ends_with("-bin") {
             let bytes = general_purpose::STANDARD
                 .decode(v.as_bytes())
-                .map_err(|e| anyhow!("failed to base64-decode value for key {}: {}", key_str, e))?;
+                .map_err(|e| anyhow!("failed to base64-decode value for key {key_str}: {e}"))?;
 
             let key = MetadataKey::<Binary>::from_bytes(key_str.as_bytes())
-                .map_err(|e| anyhow!("invalid binary metadata key {}: {}", key_str, e))?;
+                .map_err(|e| anyhow!("invalid binary metadata key {key_str}: {e}"))?;
 
             let val = MetadataValue::from_bytes(&bytes);
             meta.insert_bin(key, val);
         } else {
             let key = MetadataKey::<Ascii>::from_bytes(key_str.as_bytes())
-                .map_err(|e| anyhow!("invalid ASCII metadata key {}: {}", key_str, e))?;
+                .map_err(|e| anyhow!("invalid ASCII metadata key {key_str}: {e}"))?;
 
             let val: MetadataValue<_> = v
                 .parse()
-                .map_err(|e| anyhow!("invalid ASCII metadata value for key {}: {}", key_str, e))?;
+                .map_err(|e| anyhow!("invalid ASCII metadata value for key {key_str}: {e}"))?;
             meta.insert(key, val);
         }
     }
@@ -149,7 +152,11 @@ fn init_tracer() -> Result<Tracer> {
 }
 
 /// Initialize logging + (optional) tracing exporter
-/// Tracing is enabled if OTEL_EXPORTER_OTLP_ENDPOINT is set (gRPC only).
+/// Tracing is enabled if `OTEL_EXPORTER_OTLP_ENDPOINT` is set (gRPC only).
+///
+/// # Errors
+///
+/// Returns an error if tracer or subscriber initialization fails
 pub fn init(verbosity_level: Option<Level>) -> Result<()> {
     let verbosity_level = verbosity_level.unwrap_or(Level::ERROR);
 
@@ -199,6 +206,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_parse_headers_env_empty() {
         let result = parse_headers_env("");
         assert!(result.is_empty());
@@ -212,6 +220,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_parse_headers_env_multiple() {
         let result = parse_headers_env("key1=value1,key2=value2,key3=value3");
         assert_eq!(result.len(), 3);
@@ -221,6 +230,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_parse_headers_env_with_spaces() {
         let result = parse_headers_env("key1 = value1 , key2 = value2");
         assert_eq!(result.len(), 2);
@@ -229,6 +239,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_parse_headers_env_malformed() {
         // Missing values should be filtered out
         let result = parse_headers_env("key1=value1,malformed,key2=value2");
@@ -239,6 +250,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_headers_to_metadata_empty() {
         let headers = HashMap::new();
         let result = headers_to_metadata(&headers);
@@ -248,6 +260,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_headers_to_metadata_ascii() {
         let mut headers = HashMap::new();
         headers.insert("authorization".to_string(), "Bearer token123".to_string());
@@ -260,6 +273,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_headers_to_metadata_binary() {
         let mut headers = HashMap::new();
         // Base64 encoded "binary data"
@@ -272,6 +286,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_headers_to_metadata_invalid_base64() {
         let mut headers = HashMap::new();
         headers.insert("custom-bin".to_string(), "not-valid-base64!!!".to_string());
@@ -287,6 +302,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_headers_to_metadata_mixed() {
         let mut headers = HashMap::new();
         headers.insert("authorization".to_string(), "Bearer token123".to_string());

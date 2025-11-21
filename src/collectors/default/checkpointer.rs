@@ -7,12 +7,12 @@ use sqlx::{PgPool, Row};
 use tracing::{debug, info_span, instrument};
 use tracing_futures::Instrument as _;
 
-/// Exposes PostgreSQL checkpointer statistics from pg_stat_checkpointer:
-/// - pg_stat_checkpointer_timed_total (Counter)
-/// - pg_stat_checkpointer_requested_total (Counter)
-/// - pg_stat_checkpointer_buffers_written_total (Counter)
-/// - pg_stat_checkpointer_write_time_seconds_total (Counter)
-/// - pg_stat_checkpointer_sync_time_seconds_total (Counter)
+/// Exposes `PostgreSQL` checkpointer statistics from `pg_stat_checkpointer`:
+/// - `pg_stat_checkpointer_timed_total` (`Counter`)
+/// - `pg_stat_checkpointer_requested_total` (`Counter`)
+/// - `pg_stat_checkpointer_buffers_written_total` (`Counter`)
+/// - `pg_stat_checkpointer_write_time_seconds_total` (`Counter`)
+/// - `pg_stat_checkpointer_sync_time_seconds_total` (`Counter`)
 #[derive(Clone)]
 pub struct CheckpointerCollector {
     timed: IntCounter,           // pg_stat_checkpointer_timed_total
@@ -29,6 +29,13 @@ impl Default for CheckpointerCollector {
 }
 
 impl CheckpointerCollector {
+    /// Creates a new `CheckpointerCollector`
+    ///
+    /// # Panics
+    ///
+    /// Panics if metric creation fails (should never happen with valid metric names)
+    #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new() -> Self {
         let timed = IntCounter::with_opts(Opts::new(
             "pg_stat_checkpointer_timed_total",
@@ -99,7 +106,7 @@ impl Collector for CheckpointerCollector {
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             // pg_stat_checkpointer was introduced in PostgreSQL 17
-            if !is_pg_version_at_least(170000) {
+            if !is_pg_version_at_least(170_000) {
                 debug!("Skipping checkpointer collector (requires PostgreSQL 17+)");
                 return Ok(());
             }
@@ -114,15 +121,15 @@ impl Collector for CheckpointerCollector {
             );
 
             let row = sqlx::query(
-                r#"
+                r"
                 SELECT
                     num_timed,
                     num_requested,
                     buffers_written,
-                    write_time,
-                    sync_time
+                    ROUND(GREATEST(write_time, 0))::bigint AS write_time_ms,
+                    ROUND(GREATEST(sync_time, 0))::bigint AS sync_time_ms
                 FROM pg_stat_checkpointer
-                "#,
+                ",
             )
             .fetch_one(pool)
             .instrument(query_span)
@@ -131,8 +138,8 @@ impl Collector for CheckpointerCollector {
             let num_timed: i64 = row.try_get("num_timed")?;
             let num_requested: i64 = row.try_get("num_requested")?;
             let buffers_written: i64 = row.try_get("buffers_written")?;
-            let write_time: f64 = row.try_get("write_time")?;
-            let sync_time: f64 = row.try_get("sync_time")?;
+            let write_time_ms: i64 = row.try_get("write_time_ms")?;
+            let sync_time_ms: i64 = row.try_get("sync_time_ms")?;
 
             // Reset and set the counter values
             self.timed.reset();
@@ -141,18 +148,20 @@ impl Collector for CheckpointerCollector {
             self.write_time.reset();
             self.sync_time.reset();
 
-            self.timed.inc_by(num_timed as u64);
-            self.requested.inc_by(num_requested as u64);
-            self.buffers_written.inc_by(buffers_written as u64);
-            self.write_time.inc_by(write_time as u64);
-            self.sync_time.inc_by(sync_time as u64);
+            self.timed.inc_by(u64::try_from(num_timed).unwrap_or(0));
+            self.requested.inc_by(u64::try_from(num_requested).unwrap_or(0));
+            self.buffers_written.inc_by(u64::try_from(buffers_written).unwrap_or(0));
+            self.write_time
+                .inc_by(u64::try_from(write_time_ms).unwrap_or(0));
+            self.sync_time
+                .inc_by(u64::try_from(sync_time_ms).unwrap_or(0));
 
             debug!(
                 num_timed,
                 num_requested,
                 buffers_written,
-                write_time,
-                sync_time,
+                write_time_ms,
+                sync_time_ms,
                 "updated checkpointer metrics"
             );
 

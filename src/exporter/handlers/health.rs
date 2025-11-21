@@ -43,9 +43,9 @@ async fn check_database_health(pool: &PgPool) -> Result<(), StatusCode> {
 }
 
 // Create health struct based on database status
-fn create_health_response(db_result: &Result<(), StatusCode>) -> Health {
+fn create_health_response(db_result: Result<(), StatusCode>) -> Health {
     Health {
-        commit: GIT_COMMIT_HASH.map(|s| s.to_string()),
+        commit: GIT_COMMIT_HASH.map(std::string::ToString::to_string),
         name: env!("CARGO_PKG_NAME").to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         database: if db_result.is_ok() {
@@ -57,8 +57,8 @@ fn create_health_response(db_result: &Result<(), StatusCode>) -> Health {
 }
 
 // Create response body based on method
-fn create_response_body(method: Method, health: &Health) -> Body {
-    if method == Method::GET {
+fn create_response_body(method: &Method, health: &Health) -> Body {
+    if *method == Method::GET {
         Json(health).into_response().into_body()
     } else {
         Body::empty()
@@ -71,8 +71,7 @@ fn create_app_headers(health: &Health) -> HeaderMap {
         .commit
         .as_deref()
         .filter(|s| s.len() > 7)
-        .map(|s| &s[0..7])
-        .unwrap_or("");
+        .map_or("", |s| &s[0..7]);
 
     let header_value = if short_hash.is_empty() {
         format!("{}:{}", health.name, health.version)
@@ -98,8 +97,8 @@ fn create_app_headers(health: &Health) -> HeaderMap {
 #[instrument(skip(pool), fields(http.route="/health"))]
 pub async fn health(method: Method, pool: Extension<PgPool>) -> impl IntoResponse {
     let db_result = check_database_health(&pool.0).await;
-    let health = create_health_response(&db_result);
-    let body = create_response_body(method, &health);
+    let health = create_health_response(db_result);
+    let body = create_response_body(&method, &health);
     let headers = create_app_headers(&health);
 
     match db_result {
@@ -120,6 +119,7 @@ mod tests {
     use axum::http::Method;
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_health_struct_serialization_with_commit() {
         let health = Health {
             commit: Some("abc123".to_string()),
@@ -136,6 +136,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_health_struct_serialization_without_commit() {
         let health = Health {
             commit: None,
@@ -153,6 +154,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_health_struct_deserialization_with_commit() {
         let json = r#"{
             "commit": "def456",
@@ -169,6 +171,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_health_struct_deserialization_without_commit() {
         let json = r#"{
             "name": "my_app",
@@ -184,9 +187,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_create_health_response_ok() {
         let db_result: Result<(), StatusCode> = Ok(());
-        let health = create_health_response(&db_result);
+        let health = create_health_response(db_result);
 
         assert_eq!(health.database, "ok");
         assert_eq!(health.name, env!("CARGO_PKG_NAME"));
@@ -195,9 +199,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_create_health_response_error() {
         let db_result: Result<(), StatusCode> = Err(StatusCode::SERVICE_UNAVAILABLE);
-        let health = create_health_response(&db_result);
+        let health = create_health_response(db_result);
 
         assert_eq!(health.database, "error");
         assert_eq!(health.name, env!("CARGO_PKG_NAME"));
@@ -205,6 +210,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_create_response_body_get() {
         let health = Health {
             commit: Some("test".to_string()),
@@ -213,7 +219,7 @@ mod tests {
             database: "ok".to_string(),
         };
 
-        let body = create_response_body(Method::GET, &health);
+        let body = create_response_body(&Method::GET, &health);
 
         // Body should not be empty for GET
         // We can't easily check the contents without consuming it,
@@ -222,6 +228,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_create_response_body_options() {
         let health = Health {
             commit: Some("test".to_string()),
@@ -230,7 +237,7 @@ mod tests {
             database: "ok".to_string(),
         };
 
-        let body = create_response_body(Method::OPTIONS, &health);
+        let body = create_response_body(&Method::OPTIONS, &health);
 
         // For OPTIONS, body should be empty
         // This is harder to test without consuming the body
@@ -238,6 +245,8 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
+    #[allow(clippy::expect_used)]
     fn test_create_app_headers_full_hash() {
         let health = Health {
             commit: Some("abc123def456".to_string()),
@@ -259,6 +268,8 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
+    #[allow(clippy::expect_used)]
     fn test_create_app_headers_short_hash() {
         let health = Health {
             commit: Some("abc".to_string()),
@@ -277,6 +288,8 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
+    #[allow(clippy::expect_used)]
     fn test_create_app_headers_no_commit() {
         let health = Health {
             commit: None,

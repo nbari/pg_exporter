@@ -1,4 +1,4 @@
-use crate::collectors::{Collector, util::get_excluded_databases};
+use crate::collectors::{Collector, i64_to_f64, util::get_excluded_databases};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, Opts, Registry};
@@ -6,34 +6,34 @@ use sqlx::{PgPool, Row};
 use tracing::{debug, info_span, instrument};
 use tracing_futures::Instrument as _;
 
-/// Exposes pg_stat_database metrics with the same names/labels as postgres_exporter.
+/// Exposes `pg_stat_database` metrics with the same names/labels as `postgres_exporter`.
 ///
 /// **Metrics:**
-/// - pg_stat_database_numbackends               {datid,datname} (current)
-/// - pg_stat_database_xact_commit               {datid,datname}
-/// - pg_stat_database_xact_rollback             {datid,datname}
-/// - pg_stat_database_blks_read                 {datid,datname}
-/// - pg_stat_database_blks_hit                  {datid,datname}
-/// - pg_stat_database_tup_returned              {datid,datname}
-/// - pg_stat_database_tup_fetched               {datid,datname}
-/// - pg_stat_database_tup_inserted              {datid,datname}
-/// - pg_stat_database_tup_updated               {datid,datname}
-/// - pg_stat_database_tup_deleted               {datid,datname}
-/// - pg_stat_database_conflicts                 {datid,datname}
-/// - pg_stat_database_temp_files                {datid,datname}
-/// - pg_stat_database_temp_bytes                {datid,datname}
-/// - pg_stat_database_deadlocks                 {datid,datname}
-/// - pg_stat_database_blk_read_time             {datid,datname} (ms)
-/// - pg_stat_database_blk_write_time            {datid,datname} (ms)
-/// - pg_stat_database_stats_reset               {datid,datname} (epoch seconds)
-/// - pg_stat_database_active_time_seconds_total {datid,datname} (only PG >= 14; seconds)
+/// - `pg_stat_database_numbackends`               {datid,datname} (current)
+/// - `pg_stat_database_xact_commit`               {datid,datname}
+/// - `pg_stat_database_xact_rollback`             {datid,datname}
+/// - `pg_stat_database_blks_read`                 {datid,datname}
+/// - `pg_stat_database_blks_hit`                  {datid,datname}
+/// - `pg_stat_database_tup_returned`              {datid,datname}
+/// - `pg_stat_database_tup_fetched`               {datid,datname}
+/// - `pg_stat_database_tup_inserted`              {datid,datname}
+/// - `pg_stat_database_tup_updated`               {datid,datname}
+/// - `pg_stat_database_tup_deleted`               {datid,datname}
+/// - `pg_stat_database_conflicts`                 {datid,datname}
+/// - `pg_stat_database_temp_files`                {datid,datname}
+/// - `pg_stat_database_temp_bytes`                {datid,datname}
+/// - `pg_stat_database_deadlocks`                 {datid,datname}
+/// - `pg_stat_database_blk_read_time`             {datid,datname} (ms)
+/// - `pg_stat_database_blk_write_time`            {datid,datname} (ms)
+/// - `pg_stat_database_stats_reset`               {datid,datname} (epoch seconds)
+/// - `pg_stat_database_active_time_seconds_total` {datid,datname} (only PG >= 14; seconds)
 ///
 /// **NEW - Cache Hit Ratio Metrics (Critical for Performance):**
-/// - pg_stat_database_blks_hit_ratio ⭐ {datid,datname} - Buffer cache hit ratio (0.0-1.0)
+/// - `pg_stat_database_blks_hit_ratio` {datid,datname} - Buffer cache hit ratio (0.0-1.0)
 ///
 /// **Understanding Cache Hit Ratio:**
 ///
-/// The buffer cache hit ratio measures how often PostgreSQL finds data in memory (shared_buffers)
+/// The buffer cache hit ratio measures how often `PostgreSQL` finds data in memory (`shared_buffers`)
 /// versus reading from disk. This is one of the most critical performance metrics.
 ///
 /// **Formula:**
@@ -42,38 +42,38 @@ use tracing_futures::Instrument as _;
 /// ```
 ///
 /// **What the Values Mean:**
-/// - **>= 0.99 (99%)** - ✅ Excellent! Most data served from memory
-/// - **0.95-0.98 (95-98%)** - ✅ Good, but room for improvement
-/// - **0.90-0.94 (90-94%)** - ⚠️ Warning - Consider increasing shared_buffers
-/// - **< 0.90 (90%)** - 🔴 Critical - Severe memory pressure, disk I/O bottleneck
+/// - **>= 0.99 (99%)** - Excellent! Most data served from memory
+/// - **0.95-0.98 (95-98%)** - Good, but room for improvement
+/// - **0.90-0.94 (90-94%)** - Warning - Consider increasing `shared_buffers`
+/// - **< 0.90 (90%)** - Critical - Severe memory pressure, disk I/O bottleneck
 ///
 /// **Why It Matters:**
 /// - Memory access: ~100 nanoseconds
 /// - Disk access: ~10 milliseconds (100,000x slower!)
 /// - Low hit ratio = queries waiting on slow disk I/O
-/// - Causes: insufficient shared_buffers, poor query patterns, large sequential scans
+/// - Causes: insufficient `shared_buffers`, poor query patterns, large sequential scans
 ///
 /// **How to Fix Low Hit Ratio (<90%):**
 ///
-/// 1. **Increase shared_buffers:**
+/// 1. **Increase `shared_buffers`:**
 ///    ```sql
 ///    -- Check current setting
-///    SHOW shared_buffers;
-///    
+///    SHOW `shared_buffers`;
+///
 ///    -- Typical recommendations:
 ///    -- - Small DB (<1GB): 256MB
 ///    -- - Medium DB (1-10GB): 25% of RAM
 ///    -- - Large DB (>10GB): 25-40% of RAM
 ///    -- - Max practical: 8-16GB (diminishing returns)
-///    
+///
 ///    -- In postgresql.conf:
-///    shared_buffers = 4GB
+///    `shared_buffers` = 4GB
 ///    ```
 ///
 /// 2. **Identify problematic queries:**
 ///    ```sql
-///    -- Find tables with low hit ratios (if pg_statio_user_tables available)
-///    SELECT
+///    -- Find tables with low hit ratios (if `pg_statio_user_tables` available)
+///    `SELECT`
 ///        schemaname,
 ///        tablename,
 ///        heap_blks_read,
@@ -82,22 +82,22 @@ use tracing_futures::Instrument as _;
 ///            WHEN heap_blks_hit + heap_blks_read = 0 THEN NULL
 ///            ELSE heap_blks_hit::float / (heap_blks_hit + heap_blks_read)
 ///        END AS hit_ratio
-///    FROM pg_statio_user_tables
-///    WHERE heap_blks_read > 0
-///    ORDER BY hit_ratio NULLS LAST
+///    `FROM` `pg_statio_user_tables`
+///    `WHERE` heap_blks_read > 0
+///    `ORDER BY` hit_ratio NULLS LAST
 ///    LIMIT 20;
 ///    ```
 ///
 /// 3. **Optimize queries:**
 ///    - Add missing indexes
-///    - Avoid SELECT *
-///    - Use LIMIT when appropriate
+///    - Avoid `SELECT *`
+///    - Use `LIMIT` when appropriate
 ///    - Consider materialized views for complex aggregations
 ///
 /// 4. **Consider OS page cache:**
-///    - PostgreSQL relies on OS cache for data beyond shared_buffers
+///    - `PostgreSQL` relies on OS cache for data beyond `shared_buffers`
 ///    - Ensure sufficient free RAM for OS page cache
-///    - Rule of thumb: total_ram = shared_buffers + work_mem×connections + OS cache
+///    - Rule of thumb: `total_ram = shared_buffers + work_mem×connections + OS cache`
 ///
 /// **Alert Thresholds:**
 /// ```promql
@@ -112,11 +112,11 @@ use tracing_futures::Instrument as _;
 ///
 /// - **Sudden drop:** Check for new queries, sequential scans, or bulk operations
 /// - **Gradual decline:** Database growth exceeding available memory
-/// - **Always low:** shared_buffers too small, or application design issues
-/// - **High blks_read rate:** Use `rate(pg_stat_database_blks_read[5m])` to track disk I/O
+/// - **Always low:** `shared_buffers` too small, or application design issues
+/// - **High `blks_read` rate:** Use `rate(pg_stat_database_blks_read[5m])` to track disk I/O
 ///
 /// **Notes:**
-/// - We export absolute values as Gauges; use rate()/increase() in PromQL for cumulative series.
+/// - We export absolute values as Gauges; use `rate()/increase()` in `PromQL` for cumulative series.
 /// - Database exclusions are applied server-side using the global list set via CLI/env.
 /// - Cache hit ratio is calculated per collection cycle (not cumulative)
 #[derive(Clone)]
@@ -157,163 +157,80 @@ impl Default for DatabaseStatCollector {
 }
 
 impl DatabaseStatCollector {
+    /// Creates a new `DatabaseStatCollector` with all metrics initialized.
+    ///
+    /// # Panics
+    ///
+    /// Panics if metric registration fails (this should not happen in normal operation).
+    #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new() -> Self {
-        let labels = &["datid", "datname"];
-
-        let numbackends = GaugeVec::new(
-            Opts::new(
-                "pg_stat_database_numbackends",
-                "Number of backends currently connected to this database.",
-            ),
-            labels,
-        )
-        .expect("register pg_stat_database_numbackends");
-
-        let xact_commit = GaugeVec::new(
-            Opts::new(
-                "pg_stat_database_xact_commit",
-                "Number of transactions committed.",
-            ),
-            labels,
-        )
-        .expect("register pg_stat_database_xact_commit");
-
-        let xact_rollback = GaugeVec::new(
-            Opts::new(
-                "pg_stat_database_xact_rollback",
-                "Number of transactions rolled back.",
-            ),
-            labels,
-        )
-        .expect("register pg_stat_database_xact_rollback");
-
-        let blks_read = GaugeVec::new(
-            Opts::new("pg_stat_database_blks_read", "Number of disk blocks read."),
-            labels,
-        )
-        .expect("register pg_stat_database_blks_read");
-
-        let blks_hit = GaugeVec::new(
-            Opts::new(
-                "pg_stat_database_blks_hit",
-                "Number of buffer cache hits (PostgreSQL buffer cache).",
-            ),
-            labels,
-        )
-        .expect("register pg_stat_database_blks_hit");
-
-        let tup_returned = GaugeVec::new(
-            Opts::new("pg_stat_database_tup_returned", "Rows returned by queries."),
-            labels,
-        )
-        .expect("register pg_stat_database_tup_returned");
-
-        let tup_fetched = GaugeVec::new(
-            Opts::new("pg_stat_database_tup_fetched", "Rows fetched by queries."),
-            labels,
-        )
-        .expect("register pg_stat_database_tup_fetched");
-
-        let tup_inserted = GaugeVec::new(
-            Opts::new("pg_stat_database_tup_inserted", "Rows inserted by queries."),
-            labels,
-        )
-        .expect("register pg_stat_database_tup_inserted");
-
-        let tup_updated = GaugeVec::new(
-            Opts::new("pg_stat_database_tup_updated", "Rows updated by queries."),
-            labels,
-        )
-        .expect("register pg_stat_database_tup_updated");
-
-        let tup_deleted = GaugeVec::new(
-            Opts::new("pg_stat_database_tup_deleted", "Rows deleted by queries."),
-            labels,
-        )
-        .expect("register pg_stat_database_tup_deleted");
-
-        let conflicts = GaugeVec::new(
-            Opts::new(
-                "pg_stat_database_conflicts",
-                "Queries canceled due to conflicts with recovery.",
-            ),
-            labels,
-        )
-        .expect("register pg_stat_database_conflicts");
-
-        let temp_files = GaugeVec::new(
-            Opts::new(
-                "pg_stat_database_temp_files",
-                "Number of temporary files created by queries.",
-            ),
-            labels,
-        )
-        .expect("register pg_stat_database_temp_files");
-
-        let temp_bytes = GaugeVec::new(
-            Opts::new(
-                "pg_stat_database_temp_bytes",
-                "Total data written to temporary files by queries.",
-            ),
-            labels,
-        )
-        .expect("register pg_stat_database_temp_bytes");
-
-        let deadlocks = GaugeVec::new(
-            Opts::new(
-                "pg_stat_database_deadlocks",
-                "Number of deadlocks detected in this database.",
-            ),
-            labels,
-        )
-        .expect("register pg_stat_database_deadlocks");
-
-        let blk_read_time = GaugeVec::new(
-            Opts::new(
-                "pg_stat_database_blk_read_time",
-                "Time spent reading data file blocks (milliseconds).",
-            ),
-            labels,
-        )
-        .expect("register pg_stat_database_blk_read_time");
-
-        let blk_write_time = GaugeVec::new(
-            Opts::new(
-                "pg_stat_database_blk_write_time",
-                "Time spent writing data file blocks (milliseconds).",
-            ),
-            labels,
-        )
-        .expect("register pg_stat_database_blk_write_time");
-
-        let stats_reset = GaugeVec::new(
-            Opts::new(
-                "pg_stat_database_stats_reset",
-                "Time at which these statistics were last reset (epoch seconds).",
-            ),
-            labels,
-        )
-        .expect("register pg_stat_database_stats_reset");
-
-        let active_time_seconds_total = GaugeVec::new(
-            Opts::new(
-                "pg_stat_database_active_time_seconds_total",
-                "Time spent executing SQL statements (seconds, PG >= 14).",
-            ),
-            labels,
-        )
-        .expect("register pg_stat_database_active_time_seconds_total");
-
-        let blks_hit_ratio = GaugeVec::new(
-            Opts::new(
-                "pg_stat_database_blks_hit_ratio",
-                "Buffer cache hit ratio (0.0-1.0). Alert when < 0.90 (90%). \
-                 Formula: blks_hit / (blks_hit + blks_read). \
-                 >99% = excellent, 95-98% = good, 90-94% = warning, <90% = critical memory pressure.",
-            ),
-            labels,
-        )
-        .expect("register pg_stat_database_blks_hit_ratio");
+        let numbackends = db_gauge(
+            "pg_stat_database_numbackends",
+            "Number of backends currently connected to this database.",
+        );
+        let xact_commit = db_gauge(
+            "pg_stat_database_xact_commit",
+            "Number of transactions committed.",
+        );
+        let xact_rollback = db_gauge(
+            "pg_stat_database_xact_rollback",
+            "Number of transactions rolled back.",
+        );
+        let blks_read =
+            db_gauge("pg_stat_database_blks_read", "Number of disk blocks read.");
+        let blks_hit = db_gauge(
+            "pg_stat_database_blks_hit",
+            "Number of buffer cache hits (PostgreSQL buffer cache).",
+        );
+        let tup_returned =
+            db_gauge("pg_stat_database_tup_returned", "Rows returned by queries.");
+        let tup_fetched =
+            db_gauge("pg_stat_database_tup_fetched", "Rows fetched by queries.");
+        let tup_inserted =
+            db_gauge("pg_stat_database_tup_inserted", "Rows inserted by queries.");
+        let tup_updated =
+            db_gauge("pg_stat_database_tup_updated", "Rows updated by queries.");
+        let tup_deleted =
+            db_gauge("pg_stat_database_tup_deleted", "Rows deleted by queries.");
+        let conflicts = db_gauge(
+            "pg_stat_database_conflicts",
+            "Queries canceled due to conflicts with recovery.",
+        );
+        let temp_files = db_gauge(
+            "pg_stat_database_temp_files",
+            "Number of temporary files created by queries.",
+        );
+        let temp_bytes = db_gauge(
+            "pg_stat_database_temp_bytes",
+            "Total data written to temporary files by queries.",
+        );
+        let deadlocks = db_gauge(
+            "pg_stat_database_deadlocks",
+            "Number of deadlocks detected in this database.",
+        );
+        let blk_read_time = db_gauge(
+            "pg_stat_database_blk_read_time",
+            "Time spent reading data file blocks (milliseconds).",
+        );
+        let blk_write_time = db_gauge(
+            "pg_stat_database_blk_write_time",
+            "Time spent writing data file blocks (milliseconds).",
+        );
+        let stats_reset = db_gauge(
+            "pg_stat_database_stats_reset",
+            "Time at which these statistics were last reset (epoch seconds).",
+        );
+        let active_time_seconds_total = db_gauge(
+            "pg_stat_database_active_time_seconds_total",
+            "Time spent executing SQL statements (seconds, PG >= 14).",
+        );
+        let blks_hit_ratio = db_gauge(
+            "pg_stat_database_blks_hit_ratio",
+            "Buffer cache hit ratio (0.0-1.0). Alert when < 0.90 (90%). \
+             Formula: blks_hit / (blks_hit + blks_read). \
+             >99% = excellent, 95-98% = good, 90-94% = warning, <90% = critical memory pressure.",
+        );
 
         Self {
             numbackends,
@@ -337,6 +254,14 @@ impl DatabaseStatCollector {
             blks_hit_ratio,
         }
     }
+}
+
+const DATABASE_LABELS: [&str; 2] = ["datid", "datname"];
+
+#[allow(clippy::expect_used)]
+fn db_gauge(metric: &str, help: &str) -> GaugeVec {
+    GaugeVec::new(Opts::new(metric, help), &DATABASE_LABELS)
+        .expect("register pg_stat_database metric")
 }
 
 impl Collector for DatabaseStatCollector {
@@ -376,11 +301,11 @@ impl Collector for DatabaseStatCollector {
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             // Version check for active_time (PG >= 14)
-            let vrow = sqlx::query(r#"SELECT current_setting('server_version_num')::int AS v"#)
+            let vrow = sqlx::query(r"SELECT current_setting('server_version_num')::int AS v")
                 .fetch_one(pool)
                 .await?;
             let version_num: i32 = vrow.try_get("v")?;
-            let has_active_time = version_num >= 140000;
+            let has_active_time = version_num >= 140_000;
 
             // Columns per postgres_exporter
             let mut cols = vec![
@@ -435,6 +360,7 @@ impl Collector for DatabaseStatCollector {
             let apply_span = info_span!("database_stats.apply_metrics", databases = rows.len());
             let _g = apply_span.enter();
 
+            #[allow(clippy::cast_precision_loss)]
             for row in &rows {
                 let datid: String = row.try_get::<String, _>("datid")?;
                 let datname: String = row
@@ -445,47 +371,47 @@ impl Collector for DatabaseStatCollector {
 
                 self.numbackends
                     .with_label_values(&labels)
-                    .set(row.try_get::<i64, _>("numbackends").unwrap_or(0) as f64);
+                    .set(i64_to_f64(row.try_get::<i64, _>("numbackends").unwrap_or(0)));
 
                 self.xact_commit
                     .with_label_values(&labels)
-                    .set(row.try_get::<i64, _>("xact_commit").unwrap_or(0) as f64);
+                    .set(i64_to_f64(row.try_get::<i64, _>("xact_commit").unwrap_or(0)));
                 self.xact_rollback
                     .with_label_values(&labels)
-                    .set(row.try_get::<i64, _>("xact_rollback").unwrap_or(0) as f64);
+                    .set(i64_to_f64(row.try_get::<i64, _>("xact_rollback").unwrap_or(0)));
                 self.blks_read
                     .with_label_values(&labels)
-                    .set(row.try_get::<i64, _>("blks_read").unwrap_or(0) as f64);
+                    .set(i64_to_f64(row.try_get::<i64, _>("blks_read").unwrap_or(0)));
                 self.blks_hit
                     .with_label_values(&labels)
-                    .set(row.try_get::<i64, _>("blks_hit").unwrap_or(0) as f64);
+                    .set(i64_to_f64(row.try_get::<i64, _>("blks_hit").unwrap_or(0)));
                 self.tup_returned
                     .with_label_values(&labels)
-                    .set(row.try_get::<i64, _>("tup_returned").unwrap_or(0) as f64);
+                    .set(i64_to_f64(row.try_get::<i64, _>("tup_returned").unwrap_or(0)));
                 self.tup_fetched
                     .with_label_values(&labels)
-                    .set(row.try_get::<i64, _>("tup_fetched").unwrap_or(0) as f64);
+                    .set(i64_to_f64(row.try_get::<i64, _>("tup_fetched").unwrap_or(0)));
                 self.tup_inserted
                     .with_label_values(&labels)
-                    .set(row.try_get::<i64, _>("tup_inserted").unwrap_or(0) as f64);
+                    .set(i64_to_f64(row.try_get::<i64, _>("tup_inserted").unwrap_or(0)));
                 self.tup_updated
                     .with_label_values(&labels)
-                    .set(row.try_get::<i64, _>("tup_updated").unwrap_or(0) as f64);
+                    .set(i64_to_f64(row.try_get::<i64, _>("tup_updated").unwrap_or(0)));
                 self.tup_deleted
                     .with_label_values(&labels)
-                    .set(row.try_get::<i64, _>("tup_deleted").unwrap_or(0) as f64);
+                    .set(i64_to_f64(row.try_get::<i64, _>("tup_deleted").unwrap_or(0)));
                 self.conflicts
                     .with_label_values(&labels)
-                    .set(row.try_get::<i64, _>("conflicts").unwrap_or(0) as f64);
+                    .set(i64_to_f64(row.try_get::<i64, _>("conflicts").unwrap_or(0)));
                 self.temp_files
                     .with_label_values(&labels)
-                    .set(row.try_get::<i64, _>("temp_files").unwrap_or(0) as f64);
+                    .set(i64_to_f64(row.try_get::<i64, _>("temp_files").unwrap_or(0)));
                 self.temp_bytes
                     .with_label_values(&labels)
-                    .set(row.try_get::<i64, _>("temp_bytes").unwrap_or(0) as f64);
+                    .set(i64_to_f64(row.try_get::<i64, _>("temp_bytes").unwrap_or(0)));
                 self.deadlocks
                     .with_label_values(&labels)
-                    .set(row.try_get::<i64, _>("deadlocks").unwrap_or(0) as f64);
+                    .set(i64_to_f64(row.try_get::<i64, _>("deadlocks").unwrap_or(0)));
 
                 self.blk_read_time
                     .with_label_values(&labels)
@@ -501,8 +427,8 @@ impl Collector for DatabaseStatCollector {
                 // Calculate cache hit ratio
                 // Formula: blks_hit / (blks_hit + blks_read)
                 // Handles division by zero (if no blocks accessed, ratio = 0.0)
-                let blks_read = row.try_get::<i64, _>("blks_read").unwrap_or(0) as f64;
-                let blks_hit = row.try_get::<i64, _>("blks_hit").unwrap_or(0) as f64;
+                let blks_read = i64_to_f64(row.try_get::<i64, _>("blks_read").unwrap_or(0));
+                let blks_hit = i64_to_f64(row.try_get::<i64, _>("blks_hit").unwrap_or(0));
                 let total_blks = blks_hit + blks_read;
                 
                 let hit_ratio = if total_blks > 0.0 {
@@ -522,7 +448,7 @@ impl Collector for DatabaseStatCollector {
                     datname = %datname,
                     blks_read,
                     blks_hit,
-                    hit_ratio = %format!("{:.4}", hit_ratio),
+                    hit_ratio = %format!("{hit_ratio:.4}"),
                     "calculated cache hit ratio"
                 );
 

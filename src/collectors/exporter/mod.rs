@@ -1,7 +1,7 @@
 /// Exporter self-monitoring
 ///
-/// This module provides self-monitoring capabilities for pg_exporter itself.
-/// Unlike other collectors that monitor PostgreSQL, this monitors the exporter's
+/// This module provides self-monitoring capabilities for `pg_exporter` itself.
+/// Unlike other collectors that monitor `PostgreSQL`, this monitors the exporter's
 /// own health and performance.
 ///
 /// # Why Exporter Metrics Matter
@@ -15,14 +15,14 @@
 ///
 /// The exporter collector consists of two sub-collectors:
 ///
-/// ## ProcessCollector
+/// ## `ProcessCollector`
 /// Monitors the exporter's process resource consumption using the `sysinfo` crate:
 /// - CPU time (via /proc/$PID/stat on Linux)
 /// - Memory usage (RSS and VSZ)
 /// - Thread count and file descriptors
 /// - Process start time (for uptime calculation)
 ///
-/// ## ScraperCollector
+/// ## `ScraperCollector`
 /// Tracks scrape performance and health:
 /// - Per-collector scrape duration (histogram with percentiles)
 /// - Error counts per collector
@@ -86,7 +86,7 @@
 /// # Exports pg_exporter_process_* and pg_exporter_collector_* metrics
 /// ```
 ///
-/// Monitor in Prometheus:
+/// Monitor in `Prometheus`:
 ///
 /// ```promql
 /// # CPU usage %
@@ -126,7 +126,7 @@ use std::sync::Arc;
 use tracing::{debug, info_span, instrument, warn};
 use tracing_futures::Instrument as _;
 
-/// ExporterCollector combines all exporter self-monitoring
+/// `ExporterCollector` combines all exporter self-monitoring
 #[derive(Clone)]
 pub struct ExporterCollector {
     subs: Vec<Arc<dyn Collector + Send + Sync>>,
@@ -140,6 +140,7 @@ impl Default for ExporterCollector {
 }
 
 impl ExporterCollector {
+    #[must_use]
     pub fn new() -> Self {
         let scraper = Arc::new(ScraperCollector::new());
         Self {
@@ -160,6 +161,7 @@ impl ExporterCollector {
     ///
     /// This is called by `CollectorRegistry` during initialization to
     /// extract the scraper for tracking all collector performance.
+    #[must_use]
     pub fn get_scraper(&self) -> &Arc<ScraperCollector> {
         &self.scraper
     }
@@ -183,9 +185,9 @@ impl Collector for ExporterCollector {
             let res = sub.register_metrics(registry);
 
             match res {
-                Ok(_) => debug!(collector = sub.name(), "registered exporter metrics"),
+                Ok(()) => debug!(collector = sub.name(), "registered exporter metrics"),
                 Err(ref e) => {
-                    warn!(collector = sub.name(), error = %e, "failed to register exporter metrics")
+                    warn!(collector = sub.name(), error = %e, "failed to register exporter metrics");
                 }
             }
 
@@ -224,24 +226,28 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_exporter_collector_new() {
         let collector = ExporterCollector::new();
         assert_eq!(collector.subs.len(), 2);
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_exporter_collector_name() {
         let collector = ExporterCollector::new();
         assert_eq!(collector.name(), "exporter");
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_exporter_collector_not_enabled_by_default() {
         let collector = ExporterCollector::new();
         assert!(!collector.enabled_by_default());
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_exporter_collector_registers_without_error() {
         let collector = ExporterCollector::new();
         let registry = Registry::new();
@@ -249,6 +255,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_exporter_collector_has_scraper() {
         let collector = ExporterCollector::new();
         let scraper = collector.get_scraper();
@@ -258,6 +265,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_exporter_collector_scraper_is_same_instance() {
         let collector = ExporterCollector::new();
         
@@ -269,6 +277,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::unwrap_used)]
     async fn test_exporter_collector_collect_succeeds() {
         use sqlx::postgres::PgPoolOptions;
         
@@ -276,18 +285,14 @@ mod tests {
         let dsn = std::env::var("PG_EXPORTER_DSN")
             .unwrap_or_else(|_| "postgresql://postgres:postgres@localhost:5432/postgres".to_string());
         
-        let pool = match PgPoolOptions::new()
+        let Ok(pool) = PgPoolOptions::new()
             .min_connections(1)
             .max_connections(1)
             .connect(&dsn)
-            .await
-        {
-            Ok(pool) => pool,
-            Err(_) => {
+            .await else {
                 eprintln!("Skipping test: database not available");
                 return;
-            }
-        };
+            };
 
         let collector = ExporterCollector::new();
         let registry = Registry::new();

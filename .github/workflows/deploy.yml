@@ -108,7 +108,7 @@ jobs:
       # Build once for Linux (musl)
       - name: Build Linux (musl)
         if: matrix.build == 'linux'
-        run: cargo build --release --target ${{ matrix.target }} --features musl
+        run: cargo build --release --target ${{ matrix.target }}
 
       # Strip once and prep paths for both packagers
       - name: Strip and prepare packaging paths (Linux)

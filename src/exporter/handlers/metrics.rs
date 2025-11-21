@@ -28,7 +28,7 @@ pub async fn metrics(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 headers,
-                format!("Error collecting metrics: {}", e),
+                format!("Error collecting metrics: {e}"),
             )
         }
     }
@@ -42,6 +42,7 @@ mod tests {
     // We'll create unit tests for the response structure
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_metrics_response_headers() {
         // Test that we're setting the correct content-type
         let mut headers = HeaderMap::new();
@@ -57,6 +58,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_header_value_creation() {
         let header_val = HeaderValue::from_static("text/plain; charset=utf-8");
         assert_eq!(header_val.to_str().unwrap(), "text/plain; charset=utf-8");

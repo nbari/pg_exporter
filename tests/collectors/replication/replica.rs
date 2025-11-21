@@ -39,7 +39,10 @@ async fn test_replica_collector_has_all_metrics_after_collection() -> Result<()>
             families.iter().any(|m| m.name() == metric),
             "Metric {} should exist. Found: {:?}",
             metric,
-            families.iter().map(|m| m.name()).collect::<Vec<_>>()
+            families
+                .iter()
+                .map(prometheus::proto::MetricFamily::name)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -59,12 +62,8 @@ async fn test_replica_collector_is_replica_is_boolean() -> Result<()> {
     for fam in registry.gather() {
         if fam.name() == "pg_replication_is_replica" {
             for m in fam.get_metric() {
-                let v = m.get_gauge().value();
-                assert!(
-                    v == 0.0 || v == 1.0,
-                    "is_replica should be 0 or 1, got {}",
-                    v
-                );
+                let v = common::metric_value_to_i64(m.get_gauge().value());
+                assert!(v == 0 || v == 1, "is_replica should be 0 or 1, got {v}");
             }
         }
     }
@@ -86,7 +85,7 @@ async fn test_replica_collector_lag_is_non_negative() -> Result<()> {
         if fam.name() == "pg_replication_lag_seconds" {
             for m in fam.get_metric() {
                 let v = m.get_gauge().value();
-                assert!(v >= 0.0, "lag_seconds should be non-negative, got {}", v);
+                assert!(v >= 0.0, "lag_seconds should be non-negative, got {v}");
             }
         }
     }

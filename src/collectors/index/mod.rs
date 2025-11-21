@@ -19,10 +19,10 @@ use tracing_futures::Instrument as _;
 /// This collector provides comprehensive index health monitoring including:
 /// - Index usage statistics (scans, tuples read/fetched)
 /// - Index size and bloat estimation
-/// - Unused index detection (idx_scan = 0)
+/// - Unused index detection (`idx_scan` = 0)
 /// - Invalid index identification
 ///
-/// Helps identify maintenance opportunities and problematic schemas that impact query performance.
+/// Helps identify maintenance opportunities and problematic schemas that impact `query` performance.
 /// Unused indexes consume disk space and slow down write operations (INSERT/UPDATE/DELETE).
 /// Invalid indexes (from failed CREATE INDEX CONCURRENTLY) need to be dropped and recreated.
 #[derive(Clone, Default)]
@@ -31,6 +31,7 @@ pub struct IndexCollector {
 }
 
 impl IndexCollector {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             subs: vec![
@@ -59,10 +60,10 @@ impl Collector for IndexCollector {
             let res = sub.register_metrics(registry);
 
             match res {
-                Ok(_) => debug!(collector = sub.name(), "registered metrics"),
+                Ok(()) => debug!(collector = sub.name(), "registered metrics"),
 
                 Err(ref e) => {
-                    warn!(collector = sub.name(), error = %e, "failed to register metrics")
+                    warn!(collector = sub.name(), error = %e, "failed to register metrics");
                 }
             }
 

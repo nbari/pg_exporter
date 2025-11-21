@@ -20,7 +20,13 @@ pub struct CollectorRegistry {
 }
 
 impl CollectorRegistry {
-    pub fn new(config: CollectorConfig) -> Self {
+    /// Creates a new `CollectorRegistry`
+    ///
+    /// # Panics
+    ///
+    /// Panics if core metrics fail to register (should never happen)
+    #[allow(clippy::expect_used)]
+    pub fn new(config: &CollectorConfig) -> Self {
         let registry = Arc::new(Registry::new());
 
         // Register pg_up gauge
@@ -78,11 +84,11 @@ impl CollectorRegistry {
 
                     // Register metrics per collector under a span so failures surface in traces.
                     let reg_span = debug_span!("collector.register_metrics", collector = %name);
-                    let _g = reg_span.enter();
+                    let guard = reg_span.enter();
                     if let Err(e) = collector.register_metrics(&registry) {
                         warn!("Failed to register metrics for collector '{}': {}", name, e);
                     }
-                    drop(_g);
+                    drop(guard);
 
                     collector
                 })
@@ -98,6 +104,10 @@ impl CollectorRegistry {
     }
 
     /// Collect from all enabled collectors.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if metric collection or encoding fails
     #[instrument(skip(self, pool), level = "info", err, fields(otel.kind = "internal"))]
     pub async fn collect_all(&self, pool: &sqlx::PgPool) -> anyhow::Result<String> {
         // Increment scrape counter if scraper is available
@@ -137,7 +147,7 @@ impl CollectorRegistry {
         let mut tasks = FuturesUnordered::new();
 
         // Emit a summary log of which collectors are being launched in parallel.
-        let names: Vec<&'static str> = self.collectors.iter().map(|c| c.name()).collect();
+        let names: Vec<&'static str> = self.collectors.iter().map(super::Collector::name).collect();
 
         info!("Launching collectors concurrently: {:?}", names);
 
@@ -160,7 +170,7 @@ impl CollectorRegistry {
                 let res = fut.instrument(span).await;
 
                 match &res {
-                    Ok(_) => {
+                    Ok(()) => {
                         debug!("collector '{}' done: ok", name);
                         if let Some(t) = timer {
                             t.success();
@@ -201,11 +211,9 @@ impl CollectorRegistry {
 
         // Encode current registry into Prometheus exposition format.
         let encode_span = debug_span!("prometheus.encode");
-
-        let _g = encode_span.enter();
+        let guard = encode_span.enter();
 
         let encoder = TextEncoder::new();
-
         let metric_families = self.registry.gather();
 
         // Update metrics count for next scrape
@@ -213,28 +221,30 @@ impl CollectorRegistry {
         if let Some(ref scraper) = self.scraper {
             let total_metrics: i64 = metric_families
                 .iter()
-                .map(|mf| mf.get_metric().len() as i64)
+                .map(|mf| i64::try_from(mf.get_metric().len()).unwrap_or(0))
                 .sum();
             scraper.update_metrics_count(total_metrics);
         }
 
         let mut buffer = Vec::new();
-
         encoder.encode(&metric_families, &mut buffer)?;
 
-        drop(_g);
+        drop(guard);
 
         Ok(String::from_utf8(buffer)?)
     }
 
+    #[must_use]
     pub fn registry(&self) -> &Arc<Registry> {
         &self.registry
     }
 
+    #[must_use]
     pub fn collector_names(&self) -> Vec<&'static str> {
-        self.collectors.iter().map(|c| c.name()).collect()
+        self.collectors.iter().map(super::Collector::name).collect()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.collectors.is_empty()
     }

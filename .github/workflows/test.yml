@@ -1,7 +1,7 @@
 ---
 name: Test
 
-'on':
+on:
   workflow_call:
   workflow_dispatch:
   pull_request:
@@ -59,7 +59,7 @@ jobs:
           components: clippy
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features
 
   check:
     name: Check
@@ -132,7 +132,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-test-pg${{ matrix.postgres }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-test-pg${{ matrix.postgres }}-${{ hashFiles('**/Cargo.lock')
+            }}
           restore-keys: |
             ${{ runner.os }}-cargo-test-pg${{ matrix.postgres }}-
             ${{ runner.os }}-cargo-test-
@@ -153,29 +154,29 @@ jobs:
         run: |
           # Configure shared_preload_libraries (requires restart)
           psql -h localhost -U postgres -d postgres -c "ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements';"
-          
+
           # Restart PostgreSQL container to load pg_stat_statements
           docker ps -a
           CONTAINER_ID=$(docker ps --filter "ancestor=postgres:${{ matrix.postgres }}" --format "{{.ID}}")
           echo "Restarting container $CONTAINER_ID"
           docker restart $CONTAINER_ID
-          
+
           # Wait for PostgreSQL to be ready again
           sleep 5
           timeout 30 bash -c 'until pg_isready -h localhost -p 5432 -U postgres; do sleep 1; done'
-          
+
           # Now set pg_stat_statements config (extension is preloaded)
           psql -h localhost -U postgres -d postgres -c "ALTER SYSTEM SET pg_stat_statements.track = 'all';"
-          
+
           # Reload configuration
           psql -h localhost -U postgres -d postgres -c "SELECT pg_reload_conf();"
-          
+
           # Enable pg_stat_statements extension
           psql -h localhost -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;"
-          
+
           # Verify extension is loaded
           psql -h localhost -U postgres -d postgres -c "SELECT extname, extversion FROM pg_extension WHERE extname = 'pg_stat_statements';"
-          
+
           # Generate some test queries to populate pg_stat_statements
           psql -h localhost -U postgres -d postgres -c "SELECT 1;"
           psql -h localhost -U postgres -d postgres -c "SELECT current_timestamp;"

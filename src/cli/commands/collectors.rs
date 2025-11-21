@@ -14,9 +14,8 @@ pub fn add_collectors_args(mut cmd: Command) -> Command {
         };
 
         // Create flag names
-        let enable_flag: &'static str = Box::leak(format!("collector.{}", name).into_boxed_str());
-        let disable_flag: &'static str =
-            Box::leak(format!("no-collector.{}", name).into_boxed_str());
+        let enable_flag: &'static str = Box::leak(format!("collector.{name}").into_boxed_str());
+        let disable_flag: &'static str = Box::leak(format!("no-collector.{name}").into_boxed_str());
 
         // Create help text with default state indication only for enable flag
         let default_indicator = if default_enabled {
@@ -24,11 +23,10 @@ pub fn add_collectors_args(mut cmd: Command) -> Command {
         } else {
             " [default: disabled]"
         };
-        let enable_help: &'static str = Box::leak(
-            format!("Enable the {} collector{}", name, default_indicator).into_boxed_str(),
-        );
+        let enable_help: &'static str =
+            Box::leak(format!("Enable the {name} collector{default_indicator}").into_boxed_str());
         let disable_help: &'static str =
-            Box::leak(format!("Disable the {} collector", name).into_boxed_str());
+            Box::leak(format!("Disable the {name} collector").into_boxed_str());
 
         cmd = cmd
             .arg(
@@ -55,13 +53,14 @@ mod tests {
     use crate::cli::commands;
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_all_collector_flags_are_added() {
         let cmd = commands::new();
 
         // Verify all collectors have both enable and disable flags
         for &name in COLLECTOR_NAMES {
-            let enable_flag = format!("collector.{}", name);
-            let disable_flag = format!("no-collector.{}", name);
+            let enable_flag = format!("collector.{name}");
+            let disable_flag = format!("no-collector.{name}");
 
             // Verify flags exist by trying to get them
             let matches = cmd
@@ -72,13 +71,11 @@ mod tests {
             // These should exist without error
             assert!(
                 matches.contains_id(&enable_flag),
-                "Missing enable flag for {}",
-                name
+                "Missing enable flag for {name}"
             );
             assert!(
                 matches.contains_id(&disable_flag),
-                "Missing disable flag for {}",
-                name
+                "Missing disable flag for {name}"
             );
         }
     }
@@ -91,7 +88,7 @@ mod tests {
         let factories = all_factories();
 
         for &name in COLLECTOR_NAMES {
-            let enable_flag = format!("collector.{}", name);
+            let enable_flag = format!("collector.{name}");
 
             if let Some(factory) = factories.get(name) {
                 let collector = factory();
@@ -100,8 +97,7 @@ mod tests {
 
                 assert_eq!(
                     actual_value, expected_default,
-                    "Collector '{}' default mismatch: expected {}, got {}",
-                    name, expected_default, actual_value
+                    "Collector '{name}' default mismatch: expected {expected_default}, got {actual_value}"
                 );
             }
         }
@@ -190,8 +186,7 @@ mod tests {
         for &name in COLLECTOR_NAMES {
             assert!(
                 long_help.contains(name),
-                "Help text should mention collector '{}'",
-                name
+                "Help text should mention collector '{name}'"
             );
         }
     }
@@ -228,18 +223,16 @@ mod tests {
         let disabled_collector = COLLECTOR_NAMES.iter().find(|&&name| {
             factories
                 .get(name)
-                .map(|f| !f().enabled_by_default())
-                .unwrap_or(false)
+                .is_some_and(|f| !f().enabled_by_default())
         });
 
         if let Some(&name) = disabled_collector {
-            let enable_flag = format!("--collector.{}", name);
+            let enable_flag = format!("--collector.{name}");
             let matches = cmd.get_matches_from(vec!["pg_exporter", &enable_flag]);
 
             assert!(
-                matches.get_flag(&format!("collector.{}", name)),
-                "Should be able to enable disabled-by-default collector '{}'",
-                name
+                matches.get_flag(&format!("collector.{name}")),
+                "Should be able to enable disabled-by-default collector '{name}'"
             );
         }
     }

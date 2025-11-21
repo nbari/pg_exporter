@@ -25,7 +25,10 @@ async fn test_locks_count_has_metrics_after_collection() -> Result<()> {
     assert!(
         families.iter().any(|m| m.name() == "pg_locks_count"),
         "Metric pg_locks_count should exist. Found: {:?}",
-        families.iter().map(|m| m.name()).collect::<Vec<_>>()
+        families
+            .iter()
+            .map(prometheus::proto::MetricFamily::name)
+            .collect::<Vec<_>>()
     );
 
     pool.close().await;
@@ -201,8 +204,7 @@ async fn test_locks_count_multiple_lock_modes() -> Result<()> {
 
     assert!(
         modes.len() >= 2,
-        "Expected at least 2 different lock modes, found: {:?}",
-        modes
+        "Expected at least 2 different lock modes, found: {modes:?}"
     );
 
     // Cleanup
@@ -277,8 +279,7 @@ async fn test_locks_count_resets_stale_metrics() -> Result<()> {
     let initial_count = families
         .iter()
         .find(|m| m.name() == "pg_locks_count")
-        .map(|f| f.get_metric().len())
-        .unwrap_or(0);
+        .map_or(0, |f| f.get_metric().len());
 
     // Release the lock
     tx.commit().await?;
@@ -291,14 +292,12 @@ async fn test_locks_count_resets_stale_metrics() -> Result<()> {
     let _final_count = families
         .iter()
         .find(|m| m.name() == "pg_locks_count")
-        .map(|f| f.get_metric().len())
-        .unwrap_or(0);
+        .map_or(0, |f| f.get_metric().len());
 
     // Verify metrics are still valid after reset
     assert!(
         initial_count > 0,
-        "Should have had locks initially, got count: {}",
-        initial_count
+        "Should have had locks initially, got count: {initial_count}"
     );
 
     // Cleanup
@@ -413,8 +412,7 @@ async fn test_locks_count_with_current_database() -> Result<()> {
 
     assert!(
         has_current_db,
-        "Current database {} should appear in lock metrics",
-        current_db
+        "Current database {current_db} should appear in lock metrics"
     );
 
     tx.rollback().await?;

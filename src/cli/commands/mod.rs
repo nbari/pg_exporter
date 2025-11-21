@@ -6,9 +6,11 @@ use clap::{
 mod collectors;
 
 pub mod built_info {
+    #![allow(clippy::doc_markdown)]
     include!(concat!(env!("OUT_DIR"), "/built.rs"));
 }
 
+#[must_use]
 pub fn new() -> Command {
     let styles = Styles::styled()
         .header(AnsiColor::Yellow.on_default() | Effects::BOLD)
@@ -108,6 +110,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_defaults() {
         temp_env::with_var("PG_EXPORTER_DSN", None::<String>, || {
             let command = new();
@@ -115,13 +118,16 @@ mod tests {
 
             assert_eq!(matches.get_one::<u16>("port").copied(), Some(9432));
             assert_eq!(
-                matches.get_one::<String>("dsn").map(|s| s.to_string()),
+                matches
+                    .get_one::<String>("dsn")
+                    .map(std::string::ToString::to_string),
                 Some("postgresql://postgres@localhost:5432/postgres".to_string())
             );
         });
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_new() {
         let command = new();
 
@@ -137,6 +143,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_check_port_and_dsn() {
         let command = new();
         let matches = command.get_matches_from(vec![
@@ -153,19 +160,22 @@ mod tests {
 
         assert_eq!(matches.get_one::<u16>("port").copied(), Some(8080));
         assert_eq!(
-            matches.get_one::<String>("dsn").map(|s| s.to_string()),
+            matches
+                .get_one::<String>("dsn")
+                .map(std::string::ToString::to_string),
             Some("postgres://user:password@localhost:5432/genesis".to_string())
         );
 
         let excludes: Vec<String> = matches
             .get_many::<String>("exclude-databases")
             .unwrap()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         assert_eq!(excludes, vec!["template0", "template1", "postgres"]);
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_check_exclude_databases_env() {
         temp_env::with_var("PG_EXPORTER_EXCLUDE_DATABASES", Some("db1,db2,db3"), || {
             let command = new();
@@ -174,7 +184,7 @@ mod tests {
             let excludes: Vec<String> = matches
                 .get_many::<String>("exclude-databases")
                 .unwrap()
-                .map(|s| s.to_string())
+                .map(std::string::ToString::to_string)
                 .collect();
             assert_eq!(excludes, vec!["db1", "db2", "db3"]);
         });
@@ -237,6 +247,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_port_validation_non_numeric() {
         let command = new();
         let result = command.try_get_matches_from(vec!["pg_exporter", "--port", "abc"]);
@@ -244,6 +255,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_port_from_env() {
         temp_env::with_var("PG_EXPORTER_PORT", Some("7777"), || {
             let command = new();
@@ -253,6 +265,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_port_cli_overrides_env() {
         temp_env::with_var("PG_EXPORTER_PORT", Some("7777"), || {
             let command = new();
@@ -262,6 +275,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_dsn_with_special_characters() {
         let command = new();
         let matches = command.get_matches_from(vec![
@@ -271,12 +285,15 @@ mod tests {
         ]);
 
         assert_eq!(
-            matches.get_one::<String>("dsn").map(|s| s.to_string()),
+            matches
+                .get_one::<String>("dsn")
+                .map(std::string::ToString::to_string),
             Some("postgres://user:p@ss%20word@host:5432/db?sslmode=require".to_string())
         );
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_dsn_from_env() {
         temp_env::with_var(
             "PG_EXPORTER_DSN",
@@ -286,7 +303,9 @@ mod tests {
                 let matches = command.get_matches_from(vec!["pg_exporter"]);
 
                 assert_eq!(
-                    matches.get_one::<String>("dsn").map(|s| s.to_string()),
+                    matches
+                        .get_one::<String>("dsn")
+                        .map(std::string::ToString::to_string),
                     Some("postgres://custom:5432/mydb".to_string())
                 );
             },
@@ -294,6 +313,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_dsn_cli_overrides_env() {
         temp_env::with_var("PG_EXPORTER_DSN", Some("postgres://env:5432/db"), || {
             let command = new();
@@ -301,13 +321,16 @@ mod tests {
                 command.get_matches_from(vec!["pg_exporter", "--dsn", "postgres://cli:5432/db"]);
 
             assert_eq!(
-                matches.get_one::<String>("dsn").map(|s| s.to_string()),
+                matches
+                    .get_one::<String>("dsn")
+                    .map(std::string::ToString::to_string),
                 Some("postgres://cli:5432/db".to_string())
             );
         });
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_exclude_databases_multiple_flags() {
         let command = new();
         let matches = command.get_matches_from(vec![
@@ -323,13 +346,14 @@ mod tests {
         let excludes: Vec<String> = matches
             .get_many::<String>("exclude-databases")
             .unwrap()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
 
         assert_eq!(excludes, vec!["db1", "db2", "db3"]);
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_exclude_databases_comma_separated_single_flag() {
         let command = new();
         let matches =
@@ -338,13 +362,14 @@ mod tests {
         let excludes: Vec<String> = matches
             .get_many::<String>("exclude-databases")
             .unwrap()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
 
         assert_eq!(excludes, vec!["db1", "db2", "db3"]);
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_exclude_databases_with_spaces() {
         let command = new();
         let matches = command.get_matches_from(vec![
@@ -363,6 +388,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_exclude_databases_mixed_flags_and_commas() {
         let command = new();
         let matches = command.get_matches_from(vec![
@@ -376,13 +402,14 @@ mod tests {
         let excludes: Vec<String> = matches
             .get_many::<String>("exclude-databases")
             .unwrap()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
 
         assert_eq!(excludes, vec!["db1", "db2", "db3"]);
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_long_version_includes_git_hash() {
         let command = new();
         let long_version = command.get_long_version().unwrap().to_string();
@@ -450,7 +477,9 @@ mod tests {
         let command = new();
         let matches = command.get_matches_from(vec!["pg_exporter", "--listen", "0.0.0.0"]);
         assert_eq!(
-            matches.get_one::<String>("listen").map(|s| s.as_str()),
+            matches
+                .get_one::<String>("listen")
+                .map(std::string::String::as_str),
             Some("0.0.0.0")
         );
     }
@@ -460,7 +489,9 @@ mod tests {
         let command = new();
         let matches = command.get_matches_from(vec!["pg_exporter", "--listen", "127.0.0.1"]);
         assert_eq!(
-            matches.get_one::<String>("listen").map(|s| s.as_str()),
+            matches
+                .get_one::<String>("listen")
+                .map(std::string::String::as_str),
             Some("127.0.0.1")
         );
     }
@@ -470,7 +501,9 @@ mod tests {
         let command = new();
         let matches = command.get_matches_from(vec!["pg_exporter", "--listen", "192.168.1.100"]);
         assert_eq!(
-            matches.get_one::<String>("listen").map(|s| s.as_str()),
+            matches
+                .get_one::<String>("listen")
+                .map(std::string::String::as_str),
             Some("192.168.1.100")
         );
     }
@@ -480,7 +513,9 @@ mod tests {
         let command = new();
         let matches = command.get_matches_from(vec!["pg_exporter", "--listen", "::"]);
         assert_eq!(
-            matches.get_one::<String>("listen").map(|s| s.as_str()),
+            matches
+                .get_one::<String>("listen")
+                .map(std::string::String::as_str),
             Some("::")
         );
     }
@@ -490,7 +525,9 @@ mod tests {
         let command = new();
         let matches = command.get_matches_from(vec!["pg_exporter", "--listen", "::1"]);
         assert_eq!(
-            matches.get_one::<String>("listen").map(|s| s.as_str()),
+            matches
+                .get_one::<String>("listen")
+                .map(std::string::String::as_str),
             Some("::1")
         );
     }
@@ -501,7 +538,9 @@ mod tests {
             let command = new();
             let matches = command.get_matches_from(vec!["pg_exporter"]);
             assert_eq!(
-                matches.get_one::<String>("listen").map(|s| s.as_str()),
+                matches
+                    .get_one::<String>("listen")
+                    .map(std::string::String::as_str),
                 Some("192.168.1.1")
             );
         });
@@ -513,7 +552,9 @@ mod tests {
             let command = new();
             let matches = command.get_matches_from(vec!["pg_exporter", "--listen", "127.0.0.1"]);
             assert_eq!(
-                matches.get_one::<String>("listen").map(|s| s.as_str()),
+                matches
+                    .get_one::<String>("listen")
+                    .map(std::string::String::as_str),
                 Some("127.0.0.1")
             );
         });

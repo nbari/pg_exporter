@@ -55,6 +55,7 @@ The following collectors are available:
 * `--collector.replication` [replication](src/collectors/replication/mod.rs)
 * `--collector.index` [index](src/collectors/index/mod.rs)
 * `--collector.statements` [statements](src/collectors/statements/README.md) - Query performance metrics from `pg_stat_statements` (see [detailed guide](src/collectors/statements/README.md))
+* `--collector.tls` [tls](src/collectors/tls/mod.rs) - SSL/TLS certificate monitoring, connection encryption stats (PostgreSQL 9.5+)
 * `--collector.exporter` [exporter](src/collectors/exporter/mod.rs) - Exporter self-monitoring (process metrics, scrape performance, cardinality tracking)
 
 You can enable `--collector.<name>` or disable `--no-collector.<name>` For example,

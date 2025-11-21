@@ -7,7 +7,7 @@ use sqlx::PgPool;
 use tracing::{debug, error, info_span, instrument};
 use tracing_futures::Instrument as _;
 
-/// Handles PostgreSQL version metrics
+/// Handles `PostgreSQL` version metrics
 #[derive(Clone)]
 pub struct VersionCollector {
     pub pg_version_info: IntGaugeVec,
@@ -23,6 +23,13 @@ impl Default for VersionCollector {
 }
 
 impl VersionCollector {
+    /// Creates a new `VersionCollector`
+    ///
+    /// # Panics
+    ///
+    /// Panics if metric creation fails (should never happen with valid metric names)
+    #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new() -> Self {
         let pg_version_info = IntGaugeVec::new(
             Opts::new(
@@ -84,7 +91,7 @@ impl VersionCollector {
             Ok((host, port, database)) => {
                 let host = host.unwrap_or_else(|| "localhost".to_string());
                 let port = port.unwrap_or(5432);
-                Ok(format!("{}:{}:{}", host, port, database))
+                Ok(format!("{host}:{port}:{database}"))
             }
             Err(e) => {
                 debug!(error = %e, "failed to fetch inet_server_*; falling back to current_database()");
@@ -99,7 +106,7 @@ impl VersionCollector {
                     .instrument(span)
                     .await
                 {
-                    Ok(database) => Ok(format!("localhost:5432:{}", database)),
+                    Ok(database) => Ok(format!("localhost:5432:{database}")),
                     Err(e2) => {
                         debug!(error = %e2, "failed to fetch current_database(); returning 'unknown'");
                         Ok("unknown".to_string())
@@ -124,7 +131,7 @@ impl VersionCollector {
             && let Some(captures) = self.version_regex.captures(&version_str)
             && let Some(version_match) = captures.get(1)
         {
-            return Ok(self.normalize_version(version_match.as_str()));
+            return Ok(Self::normalize_version(version_match.as_str()));
         }
 
         // Fallback: SHOW server_version
@@ -141,17 +148,17 @@ impl VersionCollector {
         if let Some(captures) = self.server_version_regex.captures(&server_version)
             && let Some(version_match) = captures.get(1)
         {
-            return Ok(self.normalize_version(version_match.as_str()));
+            return Ok(Self::normalize_version(version_match.as_str()));
         }
 
         Err(anyhow!("could not parse version from server response"))
     }
 
-    fn normalize_version(&self, version: &str) -> String {
+    fn normalize_version(version: &str) -> String {
         let parts: Vec<&str> = version.split('.').collect();
         match parts.len() {
-            1 => format!("{}.0.0", parts[0]),
-            2 => format!("{}.{}.0", parts[0], parts[1]),
+            1 => format!("{}.0.0", parts.first().copied().unwrap_or("0")),
+            2 => format!("{}.{}.0", parts.first().copied().unwrap_or("0"), parts.get(1).copied().unwrap_or("0")),
             _ => version.to_string(),
         }
     }
@@ -209,9 +216,7 @@ impl Collector for VersionCollector {
             let server_version_num: i64 = server_version_num_str.parse().map_err(|e| {
                 error!(%e, server_version_num = %server_version_num_str, "Failed to parse server_version_num");
                 anyhow!(
-                    "Failed to parse server_version_num '{}': {}",
-                    server_version_num_str,
-                    e
+                    "Failed to parse server_version_num '{server_version_num_str}': {e}"
                 )
             })?;
 

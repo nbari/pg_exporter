@@ -6,12 +6,12 @@ use sqlx::{PgPool, Row};
 use tracing::{debug, info_span, instrument};
 use tracing_futures::Instrument as _;
 
-/// Tracks pg_replication_slots metrics
-/// Compatible with postgres_exporter's pg_replication_slots namespace
+/// Tracks `pg_replication_slots` metrics
+/// Compatible with `postgres_exporter`'s `pg_replication_slots` namespace
 ///
-/// Metrics (with labels: slot_name, slot_type, database, active):
-/// - pg_replication_slots_pg_wal_lsn_diff
-/// - pg_replication_slots_active (1 if active, 0 if not)
+/// Metrics (with labels: `slot_name`, `slot_type`, database, active):
+/// - `pg_replication_slots_pg_wal_lsn_diff`
+/// - `pg_replication_slots_active` (1 if active, 0 if not)
 #[derive(Clone)]
 pub struct ReplicationSlotsCollector {
     wal_lsn_diff: GaugeVec,
@@ -25,6 +25,13 @@ impl Default for ReplicationSlotsCollector {
 }
 
 impl ReplicationSlotsCollector {
+    /// Creates a new `SlotsSubCollector`
+    ///
+    /// # Panics
+    ///
+    /// Panics if metric creation fails (should never happen with valid metric names)
+    #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new() -> Self {
         let labels = &["slot_name", "slot_type", "database"];
 
@@ -89,7 +96,7 @@ impl Collector for ReplicationSlotsCollector {
 
             // Compatible with postgres_exporter for PG >= 10
             let rows = sqlx::query(
-                r#"
+                r"
                 SELECT
                     slot_name,
                     slot_type,
@@ -100,7 +107,7 @@ impl Collector for ReplicationSlotsCollector {
                         ELSE pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn) 
                     END) AS pg_wal_lsn_diff
                 FROM pg_replication_slots
-                "#,
+                ",
             )
             .fetch_all(pool)
             .instrument(query_span)
@@ -153,6 +160,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn test_replication_slots_collector_registers_without_error() {
         let collector = ReplicationSlotsCollector::new();
         let registry = Registry::new();
@@ -160,8 +168,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::expect_used)]
     async fn test_replication_slots_collector_collection() {
-        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "".to_string());
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| String::new());
 
         if database_url.is_empty() {
             eprintln!("Skipping test: DATABASE_URL not set");

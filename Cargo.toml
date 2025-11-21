@@ -11,18 +11,42 @@ keywords = ["postgresql", "prometheus", "metrics", "exporter", "observability"]
 categories = ["command-line-utilities", "network-programming", "database"]
 license = "BSD-3-Clause"
 
-[features]
-default = []
-musl = ["openssl/vendored"]
+[lints.rust]
+warnings = "deny"
+
+[lints.clippy]
+# Allow unstable/opinionated lints (lower priority so individual lints can override)
+nursery = { level = "allow", priority = -1 }
+
+# Enforce pedantic lints
+pedantic = "deny"
+
+# Core lint groups
+all = "deny"
+correctness = "deny"
+suspicious = "deny"
+perf = "deny"
+complexity = "deny"
+
+# Safety-critical lints
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+await_holding_lock = "deny"
+
+# Performance + memory reliability
+needless_borrow = "deny"
+needless_collect = "deny"
+large_stack_arrays = "deny"
 
 [dependencies]
 anyhow = "1.0"
 axum = { version = "0.8.6", features = ["tracing"] }
 chrono = "0.4.42"
 clap = { version = "4.5.48", features = ["env"] }
-openssl = { version = "0.10", optional = true, features = ["vendored"] }
 opentelemetry = "0.31.0"
-opentelemetry-otlp = { version = "0.31.0", features = ["grpc-tonic", "gzip-tonic", "tls", "tls-roots", "trace"] }
+opentelemetry-otlp = { version = "0.31.0", default-features = false, features = ["grpc-tonic", "gzip-tonic", "tls", "tls-roots", "trace"] }
 opentelemetry_sdk = { version = "0.31.0", features = ["rt-tokio"] }
 secrecy = "0.10"
 serde = "1.0"
@@ -45,6 +69,7 @@ tracing-futures = "0.2.5"
 opentelemetry-http = "0.31.0"
 once_cell = "1.21"
 sysinfo = "0.37"
+x509-parser = "0.16"
 
 [package.metadata.generate-rpm]
 assets = [

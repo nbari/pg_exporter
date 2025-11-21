@@ -51,7 +51,10 @@ async fn test_queries_collector_collects_from_database() -> Result<()> {
             metric_families.iter().any(|m| m.name() == *expected),
             "Metric {} should exist. Found: {:?}",
             expected,
-            metric_families.iter().map(|m| m.name()).collect::<Vec<_>>()
+            metric_families
+                .iter()
+                .map(prometheus::proto::MetricFamily::name)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -147,8 +150,7 @@ async fn test_queries_collector_max_duration_reasonable() -> Result<()> {
             // Sanity check: should not be more than 1 year in seconds
             assert!(
                 value < 365.0 * 24.0 * 3600.0,
-                "Max query duration seems unreasonable: {} seconds",
-                value
+                "Max query duration seems unreasonable: {value} seconds"
             );
         }
     }
@@ -181,11 +183,14 @@ async fn test_queries_collector_labels_present() -> Result<()> {
     for metric_name in &per_db_metrics {
         if let Some(family) = metric_families.iter().find(|m| m.name() == *metric_name) {
             for metric in family.get_metric() {
-                let labels: Vec<_> = metric.get_label().iter().map(|l| l.name()).collect();
+                let labels: Vec<_> = metric
+                    .get_label()
+                    .iter()
+                    .map(prometheus::proto::LabelPair::name)
+                    .collect();
                 assert!(
                     labels.contains(&"datname"),
-                    "Metric {} should have 'datname' label",
-                    metric_name
+                    "Metric {metric_name} should have 'datname' label"
                 );
             }
         }
@@ -280,15 +285,14 @@ async fn test_queries_collector_total_long_running() -> Result<()> {
 
     // Should be non-negative (likely 0 in test environment)
     for metric in total.get_metric() {
-        let value = metric.get_gauge().value();
+        let value = common::metric_value_to_i64(metric.get_gauge().value());
         assert!(
-            value >= 0.0,
-            "total_long_running_queries should be non-negative, got {}",
-            value
+            value >= 0,
+            "total_long_running_queries should be non-negative, got {value}"
         );
         // In test environment with no long queries, should be 0
         assert_eq!(
-            value, 0.0,
+            value, 0,
             "test environment should have no long-running queries"
         );
     }

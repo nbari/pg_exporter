@@ -6,6 +6,7 @@ Cargo.lock
 db/data
 db/log
 .otel-collector-config.yml
+.DS_Store
 
 # Editor/IDE artifacts
 flycheck_*
@@ -15,3 +16,11 @@ flycheck*.rs
 # test artifacts
 /tests/tmp/
 *.db
+
+# Ai tools
+.claude/
+.copilot/
+.cursor/
+.idea/
+.vscode/
+.codexrc

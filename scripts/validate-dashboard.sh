@@ -13,8 +13,14 @@ echo "Step 1: Finding exported metrics..."
 grep -rh '"pg_[a-z_0-9]*"' src/collectors --include="*.rs" 2>/dev/null |
     grep -oP '"pg_[a-z_0-9]+"' | sed 's/"//g' >/tmp/metrics.txt
 
-grep -rh '"postgres_[a-z_0-9]*"\|namespace.*postgres' src/collectors --include="*.rs" -A 5 2>/dev/null |
-    grep -oP '"[a-z_0-9]+"' | sed 's/"//g' | sed 's/^/postgres_/' >>/tmp/metrics.txt
+# Find files that use namespace("postgres") and extract their metrics with postgres_ prefix
+find src/collectors -name "*.rs" -type f -exec grep -l 'namespace("postgres")' {} \; 2>/dev/null | while read -r file; do
+    grep -oP '"pg_[a-z_0-9]+"' "$file" | sed 's/"//g' | sed 's/^/postgres_/'
+done >>/tmp/metrics.txt
+
+# Also find any metrics already prefixed with postgres_
+grep -rh '"postgres_[a-z_0-9]*"' src/collectors --include="*.rs" 2>/dev/null |
+    grep -oP '"postgres_[a-z_0-9]+"' | sed 's/"//g' >>/tmp/metrics.txt
 
 sort -u /tmp/metrics.txt -o /tmp/exported.txt
 METRIC_COUNT=$(wc -l </tmp/exported.txt)

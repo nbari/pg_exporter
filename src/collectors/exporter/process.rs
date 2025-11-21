@@ -8,7 +8,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use sysinfo::{Pid, System};
 use tracing::{debug, instrument, warn};
 
-/// Monitors the pg_exporter process itself
+/// Monitors the `pg_exporter` process itself
 ///
 /// Tracks CPU and memory usage to help detect resource issues.
 /// Matches output from scripts/monitor-exporter.sh for consistency.
@@ -17,22 +17,22 @@ use tracing::{debug, instrument, warn};
 ///
 /// - `pg_exporter_process_cpu_percent` (Gauge)
 ///   - Current CPU usage percentage (matches `ps %cpu`)
-///   - Range: 0% to (num_cores × 100%) - can exceed 100% on multi-core
+///   - Range: 0% to (`num_cores` × 100%) - can exceed 100% on multi-core
 ///   - Example: 150% = using 1.5 cores
 ///   - Note: First reading after startup will be 0 (needs 2 refreshes for accuracy)
 ///
-/// - `pg_exporter_process_cpu_cores` (IntGauge)
+/// - `pg_exporter_process_cpu_cores` (`IntGauge`)
 ///   - Number of CPU cores available on the system
 ///   - Use to normalize: `cpu_percent / cpu_cores` for per-core % (0-100%)
 ///   - Example on 24-core: 150% / 24 = 6.25% per-core average
 ///
-/// - `pg_exporter_process_resident_memory_bytes` (IntGauge)
+/// - `pg_exporter_process_resident_memory_bytes` (`IntGauge`)
 ///   - RSS (Resident Set Size) - actual RAM used
 ///
-/// - `pg_exporter_process_virtual_memory_bytes` (IntGauge)
+/// - `pg_exporter_process_virtual_memory_bytes` (`IntGauge`)
 ///   - VSZ (Virtual Size) - total virtual memory
 ///
-/// - `pg_exporter_process_open_fds` (IntGauge, Linux only)
+/// - `pg_exporter_process_open_fds` (`IntGauge`, Linux only)
 ///   - Number of open file descriptors
 ///
 /// - `pg_exporter_process_start_time_seconds` (Gauge)
@@ -49,7 +49,7 @@ pub struct ProcessCollector {
     pid: Pid,
 }
 
-/// Internal state for CPU tracking
+/// Internal `state` for CPU tracking
 struct SystemState {
     system: System,
     last_refresh: Option<Instant>,
@@ -62,6 +62,13 @@ impl Default for ProcessCollector {
 }
 
 impl ProcessCollector {
+    /// Creates a new `ProcessCollector`
+    ///
+    /// # Panics
+    ///
+    /// Panics if metric creation fails (should never happen with valid metric names)
+    #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new() -> Self {
         let cpu_percent = Gauge::with_opts(Opts::new(
             "pg_exporter_process_cpu_percent",
@@ -109,7 +116,7 @@ impl ProcessCollector {
         let pid = Pid::from(std::process::id() as usize);
 
         // Set static values once
-        cpu_cores.set(num_cpus as i64);
+        cpu_cores.set(i64::try_from(num_cpus).unwrap_or(0));
         
         let start_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -154,8 +161,8 @@ impl ProcessCollector {
                 let rss = process.memory();
                 let vsz = process.virtual_memory();
                 
-                self.resident_memory_bytes.set(rss as i64);
-                self.virtual_memory_bytes.set(vsz as i64);
+                self.resident_memory_bytes.set(i64::try_from(rss).unwrap_or(0));
+                self.virtual_memory_bytes.set(i64::try_from(vsz).unwrap_or(0));
             }
             return;
         }
@@ -168,21 +175,21 @@ impl ProcessCollector {
             // CPU usage - matches ps %cpu
             // Note: sysinfo's cpu_usage() already returns percentage like ps
             // (can exceed 100% on multi-core if using multiple cores)
-            let cpu = process.cpu_usage() as f64;
+            let cpu = f64::from(process.cpu_usage());
             self.cpu_percent.set(cpu);
 
             // Memory metrics
             let rss = process.memory();
             let vsz = process.virtual_memory();
             
-            self.resident_memory_bytes.set(rss as i64);
-            self.virtual_memory_bytes.set(vsz as i64);
+            self.resident_memory_bytes.set(i64::try_from(rss).unwrap_or(0));
+            self.virtual_memory_bytes.set(i64::try_from(vsz).unwrap_or(0));
 
             // File descriptors (Linux-specific)
             #[cfg(target_os = "linux")]
             {
                 if let Ok(entries) = std::fs::read_dir(format!("/proc/{}/fd", self.pid)) {
-                    let fd_count = entries.count() as i64;
+                    let fd_count = i64::try_from(entries.count()).unwrap_or(0);
                     self.open_fds.set(fd_count);
                 }
             }

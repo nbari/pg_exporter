@@ -1,4 +1,4 @@
-use crate::collectors::{Collector, util::get_excluded_databases};
+use crate::collectors::{Collector, i64_to_f64, util::get_excluded_databases};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, IntGauge, IntGaugeVec, Opts, Registry};
@@ -29,6 +29,13 @@ impl Default for VacuumProgressCollector {
 }
 
 impl VacuumProgressCollector {
+    /// Creates a new `VacuumProgressCollector`
+    ///
+    /// # Panics
+    ///
+    /// Panics if metric creation fails (should never happen with valid metric names)
+    #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new() -> Self {
         let in_progress = IntGaugeVec::new(
             Opts::new(
@@ -145,7 +152,7 @@ impl Collector for VacuumProgressCollector {
             // we can't resolve table names from other databases. We include the database name
             // and relid to help identify tables across databases.
             let rows = sqlx::query(
-                r#"
+                r"
                 SELECT
                     COALESCE(d.datname, 'unknown') AS database_name,
                     COALESCE(n.nspname || '.' || c.relname, p.relid::text) AS table_name,
@@ -161,7 +168,7 @@ impl Collector for VacuumProgressCollector {
                 LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
                 LEFT JOIN pg_stat_activity a ON a.pid = p.pid
                 WHERE (d.datname IS NULL OR NOT (d.datname = ANY($1)))
-                "#,
+                ",
             )
             .bind(&excluded)
             .fetch_all(pool)
@@ -197,7 +204,7 @@ impl Collector for VacuumProgressCollector {
 
                     let progress_ratio = if heap_total > 0 {
                         // Progress as 0.0-1.0 ratio for percentunit display
-                        heap_scanned as f64 / heap_total as f64
+                        i64_to_f64(heap_scanned) / i64_to_f64(heap_total)
                     } else {
                         0.0
                     };
@@ -214,7 +221,7 @@ impl Collector for VacuumProgressCollector {
                         .set(idx_count);
                     self.is_autovacuum
                         .with_label_values(&[&database, &table])
-                        .set(if is_auto { 1 } else { 0 });
+                        .set(i64::from(is_auto));
                     self.duration_seconds
                         .with_label_values(&[&database, &table])
                         .set(duration);
@@ -226,7 +233,7 @@ impl Collector for VacuumProgressCollector {
                         heap_scanned,
                         heap_vacuumed = heap_vac,
                         index_vacuum_count = idx_count,
-                        progress_ratio = %format!("{:.2}", progress_ratio),
+                        progress_ratio = %format!("{progress_ratio:.2}"),
                         is_autovacuum = is_auto,
                         duration_seconds = duration,
                         "updated vacuum progress metrics"

@@ -57,7 +57,11 @@ async fn test_replication_slots_collector_metrics_have_labels() -> Result<()> {
         if fam.name() == "pg_replication_slots_active" {
             // If there are any metrics, they should have the right labels
             for m in fam.get_metric() {
-                let labels: Vec<_> = m.get_label().iter().map(|l| l.name()).collect();
+                let labels: Vec<_> = m
+                    .get_label()
+                    .iter()
+                    .map(prometheus::proto::LabelPair::name)
+                    .collect();
                 assert!(labels.contains(&"slot_name"));
                 assert!(labels.contains(&"slot_type"));
                 assert!(labels.contains(&"database"));
@@ -81,8 +85,8 @@ async fn test_replication_slots_collector_active_is_boolean() -> Result<()> {
     for fam in registry.gather() {
         if fam.name() == "pg_replication_slots_active" {
             for m in fam.get_metric() {
-                let v = m.get_gauge().value();
-                assert!(v == 0.0 || v == 1.0, "active should be 0 or 1, got {}", v);
+                let v = common::metric_value_to_i64(m.get_gauge().value());
+                assert!(v == 0 || v == 1, "active should be 0 or 1, got {v}");
             }
         }
     }

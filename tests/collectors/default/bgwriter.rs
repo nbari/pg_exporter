@@ -33,7 +33,10 @@ async fn test_bgwriter_collector_has_all_metrics() -> Result<()> {
             families.iter().any(|m| m.name() == metric_name),
             "Metric {} should exist. Found: {:?}",
             metric_name,
-            families.iter().map(|m| m.name()).collect::<Vec<_>>()
+            families
+                .iter()
+                .map(prometheus::proto::MetricFamily::name)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -84,8 +87,7 @@ async fn test_bgwriter_collector_buffers_alloc_increases() -> Result<()> {
             .iter()
             .find(|m| m.name() == "pg_stat_bgwriter_buffers_alloc_total")
             .and_then(|f| f.get_metric().first())
-            .map(|m| m.get_counter().value() as i64)
-            .unwrap_or(0)
+            .map_or(0, |m| common::metric_value_to_i64(m.get_counter().value()))
     };
 
     // Perform some database operations to allocate buffers
@@ -109,16 +111,13 @@ async fn test_bgwriter_collector_buffers_alloc_increases() -> Result<()> {
             .iter()
             .find(|m| m.name() == "pg_stat_bgwriter_buffers_alloc_total")
             .and_then(|f| f.get_metric().first())
-            .map(|m| m.get_counter().value() as i64)
-            .unwrap_or(0)
+            .map_or(0, |m| common::metric_value_to_i64(m.get_counter().value()))
     };
 
     // buffers_alloc should have increased or stayed the same
     assert!(
         final_value >= initial_value,
-        "buffers_alloc should increase or stay same. Initial: {}, Final: {}",
-        initial_value,
-        final_value
+        "buffers_alloc should increase or stay same. Initial: {initial_value}, Final: {final_value}"
     );
 
     pool.close().await;
@@ -145,13 +144,12 @@ async fn test_bgwriter_collector_metrics_are_counters() -> Result<()> {
         let metric_family = families
             .iter()
             .find(|m| m.name() == metric_name)
-            .unwrap_or_else(|| panic!("Metric {} should exist", metric_name));
+            .unwrap_or_else(|| panic!("Metric {metric_name} should exist"));
 
         assert_eq!(
             metric_family.get_field_type(),
             prometheus::proto::MetricType::COUNTER,
-            "Metric {} should be a COUNTER",
-            metric_name
+            "Metric {metric_name} should be a COUNTER"
         );
     }
 
@@ -245,12 +243,11 @@ async fn test_bgwriter_collector_metric_help_text() -> Result<()> {
         let metric_family = families
             .iter()
             .find(|m| m.name() == metric_name)
-            .unwrap_or_else(|| panic!("Metric {} should exist", metric_name));
+            .unwrap_or_else(|| panic!("Metric {metric_name} should exist"));
 
         assert!(
             !metric_family.help().is_empty(),
-            "Metric {} should have help text",
-            metric_name
+            "Metric {metric_name} should have help text"
         );
     }
 
@@ -343,8 +340,7 @@ async fn test_bgwriter_collector_handles_database_restart() -> Result<()> {
             .iter()
             .find(|m| m.name() == "pg_stat_bgwriter_buffers_alloc_total")
             .and_then(|f| f.get_metric().first())
-            .map(|m| m.get_counter().value() as i64)
-            .unwrap_or(0)
+            .map_or(0, |m| common::metric_value_to_i64(m.get_counter().value()))
     };
 
     // Simulate reset by checking if stats_reset changes
@@ -359,8 +355,7 @@ async fn test_bgwriter_collector_handles_database_restart() -> Result<()> {
             .iter()
             .find(|m| m.name() == "pg_stat_bgwriter_buffers_alloc_total")
             .and_then(|f| f.get_metric().first())
-            .map(|m| m.get_counter().value() as i64)
-            .unwrap_or(0)
+            .map_or(0, |m| common::metric_value_to_i64(m.get_counter().value()))
     };
 
     // Values should be valid (either increased or stayed same)
@@ -389,14 +384,12 @@ async fn test_bgwriter_collector_all_counters_valid_after_activity() -> Result<(
     let mut tx = pool.begin().await?;
     for i in 0..10 {
         sqlx::query(&format!(
-            "CREATE TEMP TABLE bgwriter_activity_{} (data TEXT)",
-            i
+            "CREATE TEMP TABLE bgwriter_activity_{i} (data TEXT)"
         ))
         .execute(&mut *tx)
         .await?;
         sqlx::query(&format!(
-            "INSERT INTO bgwriter_activity_{} SELECT 'test' FROM generate_series(1, 50)",
-            i
+            "INSERT INTO bgwriter_activity_{i} SELECT 'test' FROM generate_series(1, 50)"
         ))
         .execute(&mut *tx)
         .await?;

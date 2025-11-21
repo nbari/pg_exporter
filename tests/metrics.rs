@@ -1,3 +1,7 @@
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::expect_used)]
+#![allow(clippy::panic)]
+#![allow(clippy::indexing_slicing)]
 use anyhow::Result;
 
 mod common;
@@ -104,8 +108,7 @@ async fn test_metrics_endpoint_performance() -> Result<()> {
 
         assert!(
             duration.as_secs() < 5,
-            "Metrics collection took too long: {:?}",
-            duration
+            "Metrics collection took too long: {duration:?}"
         );
     }
 

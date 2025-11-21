@@ -6,7 +6,7 @@ use sqlx::{PgPool, Row};
 use tracing::{debug, info, info_span, instrument};
 use tracing_futures::Instrument as _;
 
-/// Tracks PostgreSQL lock contention
+/// Tracks `PostgreSQL` lock contention
 #[derive(Clone)]
 pub struct LocksSubCollector {
     locks_count: IntGaugeVec,
@@ -19,6 +19,13 @@ impl Default for LocksSubCollector {
 }
 
 impl LocksSubCollector {
+    #[must_use]
+    /// Creates a new `LocksSubCollector`
+    ///
+    /// # Panics
+    ///
+    /// Panics if metric creation fails (should never happen with valid metric names)
+    #[allow(clippy::expect_used)]
     pub fn new() -> Self {
         let locks_count = IntGaugeVec::new(
             Opts::new("pg_locks_count", "Number of locks per database and mode"),
@@ -63,7 +70,7 @@ impl Collector for LocksSubCollector {
             );
 
             let rows = sqlx::query(
-                r#"
+                r"
                 SELECT
                     COALESCE(d.datname, '') AS datname,
                     l.mode,
@@ -73,7 +80,7 @@ impl Collector for LocksSubCollector {
                 WHERE NOT (COALESCE(d.datname, '') = ANY($1))
                 GROUP BY d.datname, l.mode
                 ORDER BY datname, mode
-                "#,
+                ",
             )
             .bind(&excluded)
             .fetch_all(pool)

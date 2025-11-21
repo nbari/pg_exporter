@@ -34,7 +34,10 @@ async fn test_wal_collector_has_all_metrics() -> Result<()> {
             families.iter().any(|m| m.name() == metric_name),
             "Metric {} should exist. Found: {:?}",
             metric_name,
-            families.iter().map(|m| m.name()).collect::<Vec<_>>()
+            families
+                .iter()
+                .map(prometheus::proto::MetricFamily::name)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -90,13 +93,12 @@ async fn test_wal_collector_metrics_are_counters() -> Result<()> {
         let metric_family = families
             .iter()
             .find(|m| m.name() == metric_name)
-            .unwrap_or_else(|| panic!("Metric {} should exist", metric_name));
+            .unwrap_or_else(|| panic!("Metric {metric_name} should exist"));
 
         assert_eq!(
             metric_family.get_field_type(),
             prometheus::proto::MetricType::COUNTER,
-            "Metric {} should be a COUNTER",
-            metric_name
+            "Metric {metric_name} should be a COUNTER"
         );
     }
 
@@ -120,8 +122,7 @@ async fn test_wal_collector_records_increase_with_activity() -> Result<()> {
             .iter()
             .find(|m| m.name() == "pg_stat_wal_records_total")
             .and_then(|f| f.get_metric().first())
-            .map(|m| m.get_counter().value() as i64)
-            .unwrap_or(0)
+            .map_or(0, |m| common::metric_value_to_i64(m.get_counter().value()))
     };
 
     // Generate some WAL activity
@@ -145,16 +146,13 @@ async fn test_wal_collector_records_increase_with_activity() -> Result<()> {
             .iter()
             .find(|m| m.name() == "pg_stat_wal_records_total")
             .and_then(|f| f.get_metric().first())
-            .map(|m| m.get_counter().value() as i64)
-            .unwrap_or(0)
+            .map_or(0, |m| common::metric_value_to_i64(m.get_counter().value()))
     };
 
     // WAL records should have increased
     assert!(
         final_records >= initial_records,
-        "WAL records should increase with activity. Initial: {}, Final: {}",
-        initial_records,
-        final_records
+        "WAL records should increase with activity. Initial: {initial_records}, Final: {final_records}"
     );
 
     pool.close().await;
@@ -248,12 +246,11 @@ async fn test_wal_collector_metric_help_text() -> Result<()> {
         let metric_family = families
             .iter()
             .find(|m| m.name() == metric_name)
-            .unwrap_or_else(|| panic!("Metric {} should exist", metric_name));
+            .unwrap_or_else(|| panic!("Metric {metric_name} should exist"));
 
         assert!(
             !metric_family.help().is_empty(),
-            "Metric {} should have help text",
-            metric_name
+            "Metric {metric_name} should have help text"
         );
     }
 
@@ -342,22 +339,17 @@ async fn test_wal_collector_bytes_increases() -> Result<()> {
             .iter()
             .find(|m| m.name() == "pg_stat_wal_bytes_total")
             .and_then(|f| f.get_metric().first())
-            .map(|m| m.get_counter().value() as i64)
-            .unwrap_or(0)
+            .map_or(0, |m| common::metric_value_to_i64(m.get_counter().value()))
     };
 
     // Generate WAL activity
     let mut tx = pool.begin().await?;
     for i in 0..100 {
+        sqlx::query(&format!("CREATE TEMP TABLE wal_bytes_test_{i} (data TEXT)"))
+            .execute(&mut *tx)
+            .await?;
         sqlx::query(&format!(
-            "CREATE TEMP TABLE wal_bytes_test_{} (data TEXT)",
-            i
-        ))
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(&format!(
-            "INSERT INTO wal_bytes_test_{} SELECT 'test' FROM generate_series(1, 10)",
-            i
+            "INSERT INTO wal_bytes_test_{i} SELECT 'test' FROM generate_series(1, 10)"
         ))
         .execute(&mut *tx)
         .await?;
@@ -372,20 +364,17 @@ async fn test_wal_collector_bytes_increases() -> Result<()> {
             .iter()
             .find(|m| m.name() == "pg_stat_wal_bytes_total")
             .and_then(|f| f.get_metric().first())
-            .map(|m| m.get_counter().value() as i64)
-            .unwrap_or(0)
+            .map_or(0, |m| common::metric_value_to_i64(m.get_counter().value()))
     };
 
     // Bytes should be non-negative (may or may not increase depending on system)
     assert!(
         final_bytes >= 0,
-        "WAL bytes should be non-negative: {}",
-        final_bytes
+        "WAL bytes should be non-negative: {final_bytes}"
     );
     assert!(
         initial_bytes >= 0,
-        "Initial WAL bytes should be non-negative: {}",
-        initial_bytes
+        "Initial WAL bytes should be non-negative: {initial_bytes}"
     );
 
     pool.close().await;
@@ -431,8 +420,7 @@ async fn test_wal_collector_handles_database_restart() -> Result<()> {
             .iter()
             .find(|m| m.name() == "pg_stat_wal_records_total")
             .and_then(|f| f.get_metric().first())
-            .map(|m| m.get_counter().value() as i64)
-            .unwrap_or(0)
+            .map_or(0, |m| common::metric_value_to_i64(m.get_counter().value()))
     };
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -445,8 +433,7 @@ async fn test_wal_collector_handles_database_restart() -> Result<()> {
             .iter()
             .find(|m| m.name() == "pg_stat_wal_records_total")
             .and_then(|f| f.get_metric().first())
-            .map(|m| m.get_counter().value() as i64)
-            .unwrap_or(0)
+            .map_or(0, |m| common::metric_value_to_i64(m.get_counter().value()))
     };
 
     // Values should be valid (either increased or stayed same)
@@ -474,12 +461,11 @@ async fn test_wal_collector_all_counters_valid_after_activity() -> Result<()> {
     // Generate some database activity
     let mut tx = pool.begin().await?;
     for i in 0..10 {
-        sqlx::query(&format!("CREATE TEMP TABLE wal_activity_{} (data TEXT)", i))
+        sqlx::query(&format!("CREATE TEMP TABLE wal_activity_{i} (data TEXT)"))
             .execute(&mut *tx)
             .await?;
         sqlx::query(&format!(
-            "INSERT INTO wal_activity_{} SELECT 'test' FROM generate_series(1, 50)",
-            i
+            "INSERT INTO wal_activity_{i} SELECT 'test' FROM generate_series(1, 50)"
         ))
         .execute(&mut *tx)
         .await?;

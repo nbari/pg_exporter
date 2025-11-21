@@ -18,6 +18,7 @@ pub struct StatCollector {
 }
 
 impl StatCollector {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             subs: vec![Arc::new(StatUserTablesCollector::new())],
@@ -36,9 +37,9 @@ impl Collector for StatCollector {
             let span = info_span!("collector.register_metrics", sub_collector = %sub.name());
             let res = sub.register_metrics(registry);
             match res {
-                Ok(_) => debug!(collector = sub.name(), "registered metrics"),
+                Ok(()) => debug!(collector = sub.name(), "registered metrics"),
                 Err(ref e) => {
-                    warn!(collector = sub.name(), error = %e, "failed to register metrics")
+                    warn!(collector = sub.name(), error = %e, "failed to register metrics");
                 }
             }
             res?;

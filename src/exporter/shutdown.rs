@@ -4,7 +4,7 @@ use tokio::signal;
 /// Wait for shutdown signal (SIGINT, SIGTERM on Unix; Ctrl+C on Windows)
 ///
 /// Returns Result to allow proper error handling during signal handler installation.
-/// The shutdown_signal_handler() wrapper provides a simple () return for graceful shutdown.
+/// The `shutdown_signal_handler()` wrapper provides a simple () return for graceful shutdown.
 pub async fn shutdown_signal() -> Result<()> {
     #[cfg(unix)]
     {

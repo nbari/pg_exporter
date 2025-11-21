@@ -1,4 +1,8 @@
-//! Integration tests for the pg_exporter binary
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::expect_used)]
+#![allow(clippy::panic)]
+#![allow(clippy::indexing_slicing)]
+//! Integration tests for the `pg_exporter` binary
 //!
 //! These tests execute the binary as a subprocess and verify:
 //! - CLI argument parsing (--help, --version, flags)
@@ -30,10 +34,10 @@ mod common;
 
 static BINARY_PATH: OnceLock<PathBuf> = OnceLock::new();
 
-/// Get path to the pg_exporter binary, building it once if needed.
+/// Get path to the `pg_exporter` binary, building it once if needed.
 ///
 /// This function ensures the binary is compiled exactly once across all tests,
-/// using OnceLock for thread-safe lazy initialization. Subsequent calls return
+/// using `OnceLock` for thread-safe lazy initialization. Subsequent calls return
 /// the cached path without rebuilding.
 fn get_binary_path() -> &'static PathBuf {
     BINARY_PATH.get_or_init(|| {
@@ -43,12 +47,11 @@ fn get_binary_path() -> &'static PathBuf {
             .output()
             .expect("Failed to build binary");
 
-        if !output.status.success() {
-            panic!(
-                "Failed to build binary:\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
+        assert!(
+            output.status.success(),
+            "Failed to build binary:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
 
         // Construct path to the compiled binary
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -118,7 +121,7 @@ async fn start_and_wait(port: u16, dsn: &str) -> Result<ChildGuard> {
     let guard = ChildGuard::new(child);
 
     if !common::wait_for_server(port, 100).await {
-        anyhow::bail!("Server failed to start on port {}", port);
+        anyhow::bail!("Server failed to start on port {port}");
     }
 
     Ok(guard)
@@ -128,7 +131,7 @@ async fn start_and_wait(port: u16, dsn: &str) -> Result<ChildGuard> {
 async fn http_get(port: u16, endpoint: &str) -> Result<String> {
     let client = reqwest::Client::new();
     let response = client
-        .get(format!("http://localhost:{}{}", port, endpoint))
+        .get(format!("http://localhost:{port}{endpoint}"))
         .timeout(Duration::from_secs(10))
         .send()
         .await?;
@@ -204,7 +207,7 @@ async fn test_binary_starts_and_stops() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Verify server stopped
-    let result = tokio::net::TcpStream::connect(format!("localhost:{}", port)).await;
+    let result = tokio::net::TcpStream::connect(format!("localhost:{port}")).await;
     assert!(result.is_err(), "Server should be stopped");
 
     Ok(())
@@ -230,7 +233,7 @@ async fn test_binary_handles_graceful_shutdown() -> Result<()> {
 
     // Verify server stopped
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let result = tokio::net::TcpStream::connect(format!("localhost:{}", port)).await;
+    let result = tokio::net::TcpStream::connect(format!("localhost:{port}")).await;
     assert!(result.is_err(), "Server should be stopped");
 
     Ok(())

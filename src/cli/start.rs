@@ -2,17 +2,20 @@ use crate::cli::{actions::Action, commands, dispatch::handler, telemetry};
 use anyhow::Result;
 
 /// Map verbosity count to tracing level
-fn get_verbosity_level(verbose_count: u8) -> Option<tracing::Level> {
+const fn get_verbosity_level(verbose_count: u8) -> Option<tracing::Level> {
     match verbose_count {
         0 => None,
         1 => Some(tracing::Level::INFO),
         2 => Some(tracing::Level::DEBUG),
-        3 => Some(tracing::Level::TRACE),
         _ => Some(tracing::Level::TRACE),
     }
 }
 
 /// Start the CLI
+///
+/// # Errors
+///
+/// Returns an error if telemetry initialization or command handling fails
 pub fn start() -> Result<Action> {
     let matches = commands::new().get_matches();
 

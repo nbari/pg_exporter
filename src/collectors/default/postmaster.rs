@@ -7,8 +7,8 @@ use sqlx::PgPool;
 use tracing::{info_span, instrument};
 use tracing_futures::Instrument as _;
 
-/// Exposes the PostgreSQL postmaster (server) start time as Unix epoch seconds:
-/// - pg_postmaster_start_time_seconds (IntGauge)
+/// Exposes the `PostgreSQL` postmaster (server) start time as Unix epoch seconds:
+/// - `pg_postmaster_start_time_seconds` (`IntGauge`)
 #[derive(Clone)]
 pub struct PostmasterCollector {
     start_time_epoch_seconds: IntGauge, // pg_postmaster_start_time_seconds
@@ -21,6 +21,13 @@ impl Default for PostmasterCollector {
 }
 
 impl PostmasterCollector {
+    /// Creates a new `PostmasterCollector`
+    ///
+    /// # Panics
+    ///
+    /// Panics if metric creation fails (should never happen with valid metric names)
+    #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new() -> Self {
         let start_time_epoch_seconds = IntGauge::with_opts(Opts::new(
             "pg_postmaster_start_time_seconds",
@@ -68,7 +75,7 @@ impl Collector for PostmasterCollector {
 
             // Returns Unix epoch seconds
             let epoch_seconds: i64 = sqlx::query_scalar(
-                r#"SELECT EXTRACT(EPOCH FROM pg_postmaster_start_time())::bigint"#,
+                r"SELECT EXTRACT(EPOCH FROM pg_postmaster_start_time())::bigint",
             )
             .fetch_one(pool)
             .instrument(q_span)

@@ -34,17 +34,51 @@ mod handlers;
 mod shutdown;
 
 pub mod built_info {
+    #![allow(clippy::doc_markdown)]
     include!(concat!(env!("OUT_DIR"), "/built.rs"));
 }
 
 pub const GIT_COMMIT_HASH: Option<&str> = built_info::GIT_COMMIT_HASH;
 
+/// Starts the `PostgreSQL` metrics exporter
+///
+/// # Errors
+///
+/// Returns an error if database connection, HTTP server setup, or shutdown handling fails
 pub async fn new(
     port: u16,
     listen: Option<String>,
     dsn: SecretString,
     collectors: Vec<String>,
 ) -> Result<()> {
+    let pool = connect_pool(&dsn).await?;
+
+    initialize_version(&pool).await?;
+
+    let _ = set_base_connect_options_from_dsn(&dsn);
+
+    let config = CollectorConfig::new().with_enabled(&collectors);
+
+    let registry = CollectorRegistry::new(&config);
+
+    let app = build_router(pool.clone(), registry);
+
+    let (listener, bind_addr) = bind_listener(port, listen).await?;
+
+    let excluded = get_excluded_databases();
+
+    print_startup(&bind_addr, &collectors, excluded);
+
+    run_server(listener, app).await;
+
+    info!("shutting down");
+
+    shutdown_tracer();
+
+    Ok(())
+}
+
+async fn connect_pool(dsn: &SecretString) -> Result<sqlx::PgPool> {
     let db_dsn = dsn.expose_secret().to_string();
 
     let pool = match timeout(
@@ -52,7 +86,7 @@ pub async fn new(
         PgPoolOptions::new()
             .min_connections(1)
             .max_connections(3)
-            .max_lifetime(Duration::from_secs(60 * 2))
+            .max_lifetime(Duration::from_secs(120))
             .test_before_acquire(true)
             .connect(&db_dsn),
     )
@@ -65,9 +99,12 @@ pub async fn new(
 
     info!("Connected to database");
 
-    // Get PostgreSQL version
+    Ok(pool)
+}
+
+async fn initialize_version(pool: &sqlx::PgPool) -> Result<()> {
     let version_num: String = sqlx::query_scalar("SHOW server_version_num")
-        .fetch_one(&pool)
+        .fetch_one(pool)
         .await
         .context("Failed to get PostgreSQL version")?;
 
@@ -75,20 +112,16 @@ pub async fn new(
         .parse()
         .context("Failed to parse PostgreSQL version")?;
     set_pg_version(version);
-
     info!(version, "PostgreSQL version detected");
+    Ok(())
+}
 
-    // Initialize base connect options for cross-DB collectors (idempotent).
-    let _ = set_base_connect_options_from_dsn(&dsn);
-
-    let config = CollectorConfig::new().with_enabled(&collectors);
-    let registry = CollectorRegistry::new(config);
-
+fn build_router(pool: sqlx::PgPool, registry: CollectorRegistry) -> Router {
     let trace_layer = TraceLayer::new_for_http()
         .make_span_with(make_span)
         .on_response(on_response);
 
-    let app = Router::new()
+    Router::new()
         .route("/metrics", get(handlers::metrics))
         .route("/health", get(handlers::health).options(handlers::health))
         .layer(
@@ -102,75 +135,57 @@ pub async fn new(
                 )))
                 .layer(trace_layer)
                 .layer(from_fn(add_trace_headers))
-                .layer(Extension(pool.clone()))
+                .layer(Extension(pool))
                 .layer(Extension(registry)),
-        );
+        )
+}
 
-    let (listener, bind_addr) = match listen {
-        Some(addr) => {
-            // Try to parse as IpAddr to validate and determine type
-            match addr.parse::<std::net::IpAddr>() {
-                Ok(ip) => {
-                    let bind_addr = format!("{ip}:{port}");
-                    (
-                        TcpListener::bind(&bind_addr)
-                            .await
-                            .with_context(|| format!("Failed to bind to {bind_addr}"))?,
-                        if ip.is_ipv6() {
-                            format!("[{ip}]:{port}")
-                        } else {
-                            bind_addr.clone()
-                        },
-                    )
-                }
-                Err(_) => {
-                    return Err(anyhow!(
-                        "Invalid IP address: '{}'. Expected IPv4 (e.g., 0.0.0.0, 127.0.0.1) or IPv6 (e.g., ::, ::1)",
-                        addr
-                    ));
-                }
-            }
+async fn bind_listener(port: u16, listen: Option<String>) -> Result<(TcpListener, String)> {
+    if let Some(addr) = listen {
+        let ip = addr.parse::<std::net::IpAddr>().map_err(|_| {
+            anyhow!(
+                "Invalid IP address: '{addr}'. Expected IPv4 (e.g., 0.0.0.0, 127.0.0.1) or IPv6 (e.g., ::, ::1)"
+            )
+        })?;
+        let bind_addr = format!("{ip}:{port}");
+        let listener = TcpListener::bind(&bind_addr)
+            .await
+            .with_context(|| format!("Failed to bind to {bind_addr}"))?;
+        let display = if ip.is_ipv6() {
+            format!("[{ip}]:{port}")
+        } else {
+            bind_addr.clone()
+        };
+        Ok((listener, display))
+    } else {
+        if let Ok(listener) = TcpListener::bind(format!("::0:{port}")).await {
+            return Ok((listener, format!("[::]:{port}")));
         }
-        None => {
-            // Auto: try IPv6 first, fallback to IPv4
-            match TcpListener::bind(format!("::0:{port}")).await {
-                Ok(l) => (l, format!("[::]:{port}")),
-                Err(_) => {
-                    // If IPv6 fails, fall back to binding to IPv4 address
-                    (
-                        TcpListener::bind(format!("0.0.0.0:{port}")).await?,
-                        format!("0.0.0.0:{port}"),
-                    )
-                }
-            }
-        }
-    };
+        let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await?;
+        Ok((listener, format!("0.0.0.0:{port}")))
+    }
+}
 
+fn print_startup(bind_addr: &str, collectors: &[String], excluded: &[String]) {
     println!(
         "{} {} - Listening on {bind_addr}\n\nEnabled collectors:\n{}",
         env!("CARGO_PKG_NAME"),
         env!("CARGO_PKG_VERSION"),
-        format_list(&collectors),
+        format_list(collectors),
     );
-
-    let excluded = get_excluded_databases();
 
     if !excluded.is_empty() {
         println!("\nExcluded databases:\n{}", format_list(excluded));
     }
+}
 
+async fn run_server(listener: TcpListener, app: Router) {
     if let Err(e) = axum::serve(listener, app.into_make_service())
         .with_graceful_shutdown(shutdown::shutdown_signal_handler())
         .await
     {
         error!(error=%e, "server error");
     }
-
-    info!("shutting down");
-
-    shutdown_tracer();
-
-    Ok(())
 }
 
 // Helper to format a list of items with a leading dash and indentation for the
@@ -233,19 +248,22 @@ fn on_response<B>(response: &axum::http::Response<B>, latency: Duration, span: &
     let cx = span.context();
     let trace_id = cx.span().span_context().trace_id();
 
-    if trace_id != TraceId::INVALID {
+    #[allow(clippy::cast_possible_truncation)]
+    let elapsed_ms = latency.as_millis() as u64;
+
+    if trace_id == TraceId::INVALID {
         info!(
             parent: span,
             status = response.status().as_u16(),
-            elapsed_ms = latency.as_millis() as u64,
-            trace_id = %trace_id,
+            elapsed_ms,
             "request completed"
         );
     } else {
         info!(
             parent: span,
             status = response.status().as_u16(),
-            elapsed_ms = latency.as_millis() as u64,
+            elapsed_ms,
+            trace_id = %trace_id,
             "request completed"
         );
     }
@@ -276,19 +294,18 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_git_commit_hash_is_valid_if_present() {
         // GIT_COMMIT_HASH is an Option - either Some(hash) or None
         if let Some(hash) = GIT_COMMIT_HASH {
             // If present, should be a valid git hash (hex string)
             assert!(
                 hash.len() >= 7,
-                "Git commit hash should be at least 7 chars, got: {}",
-                hash
+                "Git commit hash should be at least 7 chars, got: {hash}"
             );
             assert!(
                 hash.chars().all(|c| c.is_ascii_hexdigit()),
-                "Git commit hash should be hex digits, got: {}",
-                hash
+                "Git commit hash should be hex digits, got: {hash}"
             );
         } else {
             // None is valid when not built from git (e.g., cargo install from crates.io)
@@ -297,6 +314,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_format_list_empty() {
         let items: Vec<String> = vec![];
         let result = format_list(&items);
@@ -304,6 +322,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_format_list_single_item() {
         let items = vec!["item1"];
         let result = format_list(&items);
@@ -311,6 +330,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_format_list_multiple_items() {
         let items = vec!["item1", "item2", "item3"];
         let result = format_list(&items);
@@ -318,6 +338,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_format_list_with_numbers() {
         let items = vec![1, 2, 3];
         let result = format_list(&items);
@@ -325,6 +346,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_format_list_formatting() {
         let items = vec!["collector1", "collector2"];
         let result = format_list(&items);
@@ -337,11 +359,12 @@ mod tests {
         assert!(result.contains("collector2"));
 
         // Should have newline between items
-        assert!(result.contains("\n"));
+        assert!(result.contains('\n'));
     }
 
     // Test the on_response function behavior
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_on_response_status_codes() {
         use axum::http::{Response, StatusCode};
         use std::time::Duration;
@@ -367,6 +390,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_make_span_creates_span() {
         use axum::body::Body;
         use axum::http::Request;
@@ -382,12 +406,13 @@ mod tests {
 
         // Verify span was created with correct metadata
         assert_eq!(
-            span.metadata().map(|m| m.name()),
+            span.metadata().map(tracing::Metadata::name),
             Some("http.server.request")
         );
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_make_span_with_request_id() {
         use axum::body::Body;
         use axum::http::Request;
@@ -404,12 +429,13 @@ mod tests {
 
         // Just verify it doesn't panic and the span has the correct name
         assert_eq!(
-            span.metadata().map(|m| m.name()),
+            span.metadata().map(tracing::Metadata::name),
             Some("http.server.request")
         );
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_make_span_without_optional_headers() {
         use axum::body::Body;
         use axum::http::Request;
@@ -424,7 +450,7 @@ mod tests {
 
         // Should still create a valid span even without optional headers
         assert_eq!(
-            span.metadata().map(|m| m.name()),
+            span.metadata().map(tracing::Metadata::name),
             Some("http.server.request")
         );
     }

@@ -1,4 +1,4 @@
-use crate::collectors::{Collector, util::get_excluded_databases};
+use crate::collectors::{Collector, i64_to_f64, util::get_excluded_databases};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{Gauge, GaugeVec, IntGauge, IntGaugeVec, Opts, Registry};
@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use tracing::{debug, info_span, instrument};
 use tracing_futures::Instrument as _;
 
-/// Tracks long-running queries from pg_stat_activity
+/// Tracks long-running queries from `pg_stat_activity`
 ///
 /// **Critical for Production Incident Response:**
 /// - Detect stuck migrations immediately
@@ -16,15 +16,15 @@ use tracing_futures::Instrument as _;
 /// - Debug sudden slowdowns
 ///
 /// **Metrics:**
-/// - pg_stat_activity_long_running_queries{datname, duration_bucket} - Count by duration
-/// - pg_stat_activity_max_query_duration_seconds{datname} - Longest running query
-/// - pg_stat_activity_long_running_queries_by_state{datname, state} - Active vs waiting
-/// - pg_stat_activity_long_running_queries_by_wait_event{datname, wait_event} - What's blocking
-/// - pg_stat_activity_oldest_query_age_seconds - Global oldest query (alert > 3600)
-/// - pg_stat_activity_queries_over_5m{datname} - Queries running >5 minutes
-/// - pg_stat_activity_queries_over_15m{datname} - Queries running >15 minutes
-/// - pg_stat_activity_queries_over_1h{datname} - Queries running >1 hour
-/// - pg_stat_activity_queries_over_6h{datname} - Queries running >6 hours (stuck!)
+/// - `pg_stat_activity_long_running_queries`{`datname`, `duration_bucket`} - Count by duration
+/// - `pg_stat_activity_max_query_duration_seconds`{`datname`} - Longest running `query`
+/// - `pg_stat_activity_long_running_queries_by_state`{`datname`, `state`} - Active vs waiting
+/// - `pg_stat_activity_long_running_queries_by_wait_event`{`datname`, `wait_event`} - What's blocking
+/// - `pg_stat_activity_oldest_query_age_seconds` - Global oldest `query` (alert > 3600)
+/// - `pg_stat_activity_queries_over_5m`{`datname`} - Queries running >5 minutes
+/// - `pg_stat_activity_queries_over_15m`{`datname`} - Queries running >15 minutes
+/// - `pg_stat_activity_queries_over_1h`{`datname`} - Queries running >1 hour
+/// - `pg_stat_activity_queries_over_6h`{`datname`} - Queries running >6 hours (stuck!)
 #[derive(Clone)]
 pub struct QueriesCollector {
     // Duration bucket counters (primary metrics for alerting)
@@ -54,8 +54,15 @@ impl Default for QueriesCollector {
 }
 
 impl QueriesCollector {
+    /// Creates a new `QueriesCollector`
+    ///
+    /// # Panics
+    ///
+    /// Panics if metric creation fails (should never happen with valid metric names)
+    #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new() -> Self {
-        let queries_over_5m = IntGaugeVec::new(
+        let queries_threshold_short = IntGaugeVec::new(
             Opts::new(
                 "pg_stat_activity_queries_over_5m",
                 "Number of queries running for more than 5 minutes per database",
@@ -64,7 +71,7 @@ impl QueriesCollector {
         )
         .expect("Failed to create pg_stat_activity_queries_over_5m");
 
-        let queries_over_15m = IntGaugeVec::new(
+        let queries_threshold_medium = IntGaugeVec::new(
             Opts::new(
                 "pg_stat_activity_queries_over_15m",
                 "Number of queries running for more than 15 minutes per database",
@@ -73,7 +80,7 @@ impl QueriesCollector {
         )
         .expect("Failed to create pg_stat_activity_queries_over_15m");
 
-        let queries_over_1h = IntGaugeVec::new(
+        let queries_threshold_extended = IntGaugeVec::new(
             Opts::new(
                 "pg_stat_activity_queries_over_1h",
                 "Number of queries running for more than 1 hour per database",
@@ -82,7 +89,7 @@ impl QueriesCollector {
         )
         .expect("Failed to create pg_stat_activity_queries_over_1h");
 
-        let queries_over_6h = IntGaugeVec::new(
+        let queries_threshold_prolonged = IntGaugeVec::new(
             Opts::new(
                 "pg_stat_activity_queries_over_6h",
                 "Number of queries running for more than 6 hours per database (likely stuck!)",
@@ -131,10 +138,10 @@ impl QueriesCollector {
         .expect("Failed to create pg_stat_activity_long_running_by_wait_event");
 
         Self {
-            queries_over_5m,
-            queries_over_15m,
-            queries_over_1h,
-            queries_over_6h,
+            queries_over_5m: queries_threshold_short,
+            queries_over_15m: queries_threshold_medium,
+            queries_over_1h: queries_threshold_extended,
+            queries_over_6h: queries_threshold_prolonged,
             max_query_duration,
             oldest_query_age,
             total_long_running,
@@ -190,7 +197,7 @@ impl Collector for QueriesCollector {
             );
 
             let rows = sqlx::query(
-                r#"
+                r"
                 SELECT
                     datname,
                     state,
@@ -204,7 +211,7 @@ impl Collector for QueriesCollector {
                   AND (now() - query_start) > interval '5 minutes'
                   AND query NOT LIKE 'autovacuum:%'
                   AND NOT (COALESCE(datname, '') = ANY($1))
-                "#,
+                ",
             )
             .bind(&excluded)
             .fetch_all(pool)
@@ -230,7 +237,7 @@ impl Collector for QueriesCollector {
                 let state: String = row.try_get("state")?;
                 let wait_event_type: String = row.try_get("wait_event_type")?;
                 let duration: i64 = row.try_get("duration_seconds").unwrap_or(0);
-                let duration_f64 = duration as f64;
+                let duration_f64 = i64_to_f64(duration);
 
                 total_long += 1;
 

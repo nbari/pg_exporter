@@ -1,4 +1,4 @@
-use crate::collectors::Collector;
+use crate::collectors::{Collector, i64_to_f64};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, Opts, Registry};
@@ -6,16 +6,16 @@ use sqlx::{PgPool, Row};
 use tracing::{debug, info_span, instrument};
 use tracing_futures::Instrument as _;
 
-/// Tracks pg_stat_replication metrics for primary servers
-/// Compatible with postgres_exporter's pg_stat_replication namespace
+/// Tracks `pg_stat_replication` metrics for primary servers
+/// Compatible with `postgres_exporter`'s `pg_stat_replication` namespace
 ///
-/// Metrics (all with labels: application_name, client_addr, state):
-/// - pg_stat_replication_pg_current_wal_lsn_bytes
-/// - pg_stat_replication_pg_wal_lsn_diff
-/// - pg_stat_replication_reply_time
+/// Metrics (all with labels: `application_name`, `client_addr`, `state`):
+/// - `pg_stat_replication_pg_current_wal_lsn_bytes`
+/// - `pg_stat_replication_pg_wal_lsn_diff`
+/// - `pg_stat_replication_reply_time`
 ///
 /// Additional metrics:
-/// - pg_stat_replication_slots (count of replication slots by application_name and state)
+/// - `pg_stat_replication_slots` (count of replication slots by `application_name` and `state`)
 #[derive(Clone)]
 pub struct StatReplicationCollector {
     current_wal_lsn_bytes: GaugeVec,
@@ -31,6 +31,13 @@ impl Default for StatReplicationCollector {
 }
 
 impl StatReplicationCollector {
+    /// Creates a new `StatReplicationSubCollector`
+    ///
+    /// # Panics
+    ///
+    /// Panics if metric creation fails (should never happen with valid metric names)
+    #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new() -> Self {
         let labels = &["application_name", "client_addr", "state"];
 
@@ -117,7 +124,7 @@ impl Collector for StatReplicationCollector {
 
             // Compatible with postgres_exporter for PG >= 10
             let rows = sqlx::query(
-                r#"
+                r"
                 SELECT
                     application_name,
                     COALESCE(client_addr::text, '') AS client_addr,
@@ -136,7 +143,7 @@ impl Collector for StatReplicationCollector {
                     END) AS pg_wal_lsn_diff,
                     EXTRACT(EPOCH FROM (now() - reply_time)) AS reply_time_seconds
                 FROM pg_stat_replication
-                "#,
+                ",
             )
             .fetch_all(pool)
             .instrument(query_span)
@@ -190,7 +197,7 @@ impl Collector for StatReplicationCollector {
             for ((app_name, state), count) in slot_counts {
                 self.slots
                     .with_label_values(&[&app_name, &state])
-                    .set(count as f64);
+                    .set(i64_to_f64(count));
             }
 
             debug!(
@@ -214,6 +221,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn test_stat_replication_collector_registers_without_error() {
         let collector = StatReplicationCollector::new();
         let registry = Registry::new();
@@ -221,8 +229,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::expect_used)]
     async fn test_stat_replication_collector_on_primary() {
-        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "".to_string());
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| String::new());
 
         if database_url.is_empty() {
             eprintln!("Skipping test: DATABASE_URL not set");

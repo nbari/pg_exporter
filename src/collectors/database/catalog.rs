@@ -1,4 +1,4 @@
-use crate::collectors::{Collector, util::get_excluded_databases};
+use crate::collectors::{Collector, i64_to_f64, util::get_excluded_databases};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, Opts, Registry};
@@ -6,13 +6,13 @@ use sqlx::{PgPool, Row};
 use tracing::{debug, info_span, instrument};
 use tracing_futures::Instrument as _;
 
-/// Tracks pg_database metrics:
-/// - pg_database_size_bytes{datname}
-/// - pg_database_connection_limit{datname}
+/// Tracks `pg_database` metrics:
+/// - `pg_database_size_bytes`{`datname`}
+/// - `pg_database_connection_limit`{`datname`}
 ///
 /// Exclusions:
 /// - Set via CLI flag `--exclude-databases a,b,c` or env `PG_EXPORTER_EXCLUDE_DATABASES`.
-/// - Exclusions are applied server-side using a single query.
+/// - Exclusions are applied server-side using a single `query`.
 #[derive(Clone)]
 pub struct DatabaseSubCollector {
     size_bytes: GaugeVec,       // pg_database_size_bytes{datname}
@@ -26,6 +26,13 @@ impl Default for DatabaseSubCollector {
 }
 
 impl DatabaseSubCollector {
+    /// Creates a new `DatabaseSubCollector`
+    ///
+    /// # Panics
+    ///
+    /// Panics if metric creation fails (should never happen with valid metric names)
+    #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new() -> Self {
         let size_bytes = GaugeVec::new(
             Opts::new("pg_database_size_bytes", "Disk space used by the database"),
@@ -82,7 +89,7 @@ impl Collector for DatabaseSubCollector {
             );
 
             let rows = sqlx::query(
-                r#"
+                r"
                 SELECT
                     datname,
                     datconnlimit,
@@ -90,7 +97,7 @@ impl Collector for DatabaseSubCollector {
                 FROM pg_database
                 WHERE NOT (datname = ANY($1))
                 ORDER BY datname
-                "#,
+                ",
             )
             .bind(&excluded_list)
             .fetch_all(pool)
@@ -108,14 +115,14 @@ impl Collector for DatabaseSubCollector {
 
                 // Connection limit (may be -1 for unlimited)
                 let conn_limit: Option<i32> = row.try_get::<Option<i32>, _>("datconnlimit")?;
-                let limit_val = conn_limit.unwrap_or(0) as f64;
+                let limit_val = f64::from(conn_limit.unwrap_or(0));
                 self.connection_limit
                     .with_label_values(&[&dat])
                     .set(limit_val);
 
                 // Size
                 let size: Option<i64> = row.try_get::<Option<i64>, _>("size")?;
-                let size_val = size.unwrap_or(0) as f64;
+                let size_val = i64_to_f64(size.unwrap_or(0));
                 self.size_bytes.with_label_values(&[&dat]).set(size_val);
 
                 debug!(

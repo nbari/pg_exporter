@@ -34,7 +34,10 @@ async fn test_wait_events_collector_has_all_metrics_after_collection() -> Result
             metric_families.iter().any(|m| m.name() == metric_name),
             "Metric {} should be registered. Found: {:?}",
             metric_name,
-            metric_families.iter().map(|m| m.name()).collect::<Vec<_>>()
+            metric_families
+                .iter()
+                .map(prometheus::proto::MetricFamily::name)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -172,8 +175,7 @@ async fn test_wait_events_collector_counts_are_non_negative() -> Result<()> {
                 let value = metric.get_gauge().value();
                 assert!(
                     value >= 0.0,
-                    "Wait event count should be non-negative, got: {}",
-                    value
+                    "Wait event count should be non-negative, got: {value}"
                 );
             }
         }
@@ -198,8 +200,7 @@ async fn test_wait_events_collector_is_idempotent() -> Result<()> {
     let first_count: usize = first_metrics
         .iter()
         .find(|m| m.name() == "pg_wait_event_type")
-        .map(|m| m.get_metric().len())
-        .unwrap_or(0);
+        .map_or(0, |m| m.get_metric().len());
 
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
@@ -208,8 +209,7 @@ async fn test_wait_events_collector_is_idempotent() -> Result<()> {
     let second_count: usize = second_metrics
         .iter()
         .find(|m| m.name() == "pg_wait_event_type")
-        .map(|m| m.get_metric().len())
-        .unwrap_or(0);
+        .map_or(0, |m| m.get_metric().len());
 
     // Should have similar structure (count may vary slightly due to timing)
     assert!(

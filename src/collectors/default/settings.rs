@@ -8,7 +8,7 @@ use std::sync::RwLock;
 use tracing::{debug, info_span, instrument};
 use tracing_futures::Instrument as _;
 
-/// Handles selected PostgreSQL server settings metrics
+/// Handles selected `PostgreSQL` server settings metrics
 #[derive(Clone)]
 pub struct SettingsCollector {
     pub gauges: std::sync::Arc<RwLock<HashMap<String, IntGauge>>>,
@@ -21,6 +21,7 @@ impl Default for SettingsCollector {
 }
 
 impl SettingsCollector {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             gauges: std::sync::Arc::new(RwLock::new(HashMap::new())),
@@ -51,7 +52,7 @@ impl SettingsCollector {
         );
 
         let rows = sqlx::query(
-            r#"
+            r"
             SELECT
                 name,
                 setting,
@@ -75,7 +76,7 @@ impl SettingsCollector {
                 'work_mem'
             )
             ORDER BY name
-            "#,
+            ",
         )
         .fetch_all(pool)
         .instrument(query_span)
@@ -95,7 +96,6 @@ impl SettingsCollector {
                 Ok(v) => v,
                 Err(_) => match setting.as_str() {
                     "on" => 1,
-                    "off" => 0,
                     _ => 0,
                 },
             };
@@ -150,13 +150,15 @@ impl Collector for SettingsCollector {
             ("work_mem", "pg_settings_work_mem_bytes", "PostgreSQL setting: work_mem in bytes"),
         ];
 
-        let mut gauges = self.gauges.write().unwrap();
+        {
+            let mut gauges = self.gauges.write().map_err(|e| anyhow::anyhow!("Failed to acquire write lock: {e}"))?;
 
-        for (name, metric_name, help) in metric_configs {
-            let gauge = IntGauge::with_opts(Opts::new(metric_name, help))?;
-            registry.register(Box::new(gauge.clone()))?;
-            gauges.insert(name.to_string(), gauge);
-            debug!(metric = %metric_name, "registered settings gauge");
+            for (name, metric_name, help) in metric_configs {
+                let gauge = IntGauge::with_opts(Opts::new(metric_name, help))?;
+                registry.register(Box::new(gauge.clone()))?;
+                gauges.insert(name.to_string(), gauge);
+                debug!(metric = %metric_name, "registered settings gauge");
+            }
         }
 
         Ok(())
@@ -172,7 +174,7 @@ impl Collector for SettingsCollector {
             let apply_span = info_span!("settings.apply_metrics", items = settings.len());
             let _g = apply_span.enter();
 
-            let gauges = self.gauges.read().unwrap();
+            let gauges = self.gauges.read().map_err(|e| anyhow::anyhow!("Failed to acquire read lock: {e}"))?;
             for (name, value) in settings {
                 if let Some(gauge) = gauges.get(&name) {
                     gauge.set(value);

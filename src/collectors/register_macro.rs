@@ -154,14 +154,13 @@ mod tests {
         let factories = crate::collectors::all_factories();
 
         // Test creating each collector
-        for (name, factory) in factories.iter() {
+        for (name, factory) in &factories {
             let collector = factory();
 
             // Each collector should have a non-empty name
             assert!(
                 !collector.name().is_empty(),
-                "Collector {} has empty name",
-                name
+                "Collector {name} has empty name"
             );
         }
     }
@@ -175,8 +174,7 @@ mod tests {
         for key in factories.keys() {
             assert!(
                 names.contains(key),
-                "Factory key '{}' not found in COLLECTOR_NAMES",
-                key
+                "Factory key '{key}' not found in COLLECTOR_NAMES"
             );
         }
 
@@ -184,8 +182,7 @@ mod tests {
         for name in names {
             assert!(
                 factories.contains_key(name),
-                "Name '{}' in COLLECTOR_NAMES has no factory",
-                name
+                "Name '{name}' in COLLECTOR_NAMES has no factory"
             );
         }
 
@@ -198,7 +195,7 @@ mod tests {
         let factories = crate::collectors::all_factories();
 
         // The collector's name() should match the factory key
-        for (key, factory) in factories.iter() {
+        for (key, factory) in &factories {
             let collector = factory();
             assert_eq!(
                 collector.name(),
@@ -229,14 +226,12 @@ mod tests {
         let registry = Registry::new();
 
         // Test that each collector can register metrics without panicking
-        for (name, factory) in factories.iter() {
+        for (name, factory) in &factories {
             let collector = factory();
             let result = collector.register_metrics(&registry);
             assert!(
                 result.is_ok(),
-                "Collector '{}' failed to register metrics: {:?}",
-                name,
-                result
+                "Collector '{name}' failed to register metrics: {result:?}"
             );
         }
     }
@@ -250,8 +245,7 @@ mod tests {
             assert_eq!(
                 *name,
                 name.to_lowercase(),
-                "Collector name '{}' is not lowercase",
-                name
+                "Collector name '{name}' is not lowercase"
             );
         }
     }
@@ -264,8 +258,7 @@ mod tests {
         for name in names {
             assert!(
                 seen.insert(name),
-                "Duplicate collector name found: '{}'",
-                name
+                "Duplicate collector name found: '{name}'"
             );
         }
     }
@@ -306,6 +299,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::panic)]
     fn test_get_scraper_returns_some_for_exporter() {
         let factories = crate::collectors::all_factories();
 
@@ -336,8 +330,7 @@ mod tests {
 
                 assert!(
                     scraper.is_none(),
-                    "Collector '{}' should not provide a scraper",
-                    name
+                    "Collector '{name}' should not provide a scraper"
                 );
             }
         }

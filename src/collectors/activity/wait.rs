@@ -1,4 +1,4 @@
-use crate::collectors::{Collector, util::get_excluded_databases};
+use crate::collectors::{Collector, i64_to_f64, util::get_excluded_databases};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, Opts, Registry};
@@ -6,7 +6,7 @@ use sqlx::{PgPool, Row};
 use tracing::{debug, info, info_span, instrument};
 use tracing_futures::Instrument as _;
 
-/// Tracks PostgreSQL wait events
+/// Tracks `PostgreSQL` wait events
 #[derive(Clone)]
 pub struct WaitEventsCollector {
     wait_event_type: GaugeVec,
@@ -20,6 +20,13 @@ impl Default for WaitEventsCollector {
 }
 
 impl WaitEventsCollector {
+    /// Creates a new `WaitEventCollector`
+    ///
+    /// # Panics
+    ///
+    /// Panics if metric creation fails (should never happen with valid metric names)
+    #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new() -> Self {
         let wait_event_type = GaugeVec::new(
             Opts::new(
@@ -98,7 +105,7 @@ impl Collector for WaitEventsCollector {
             // - Exclude databases server-side with NOT (COALESCE(datname,'') = ANY($1)).
             // - COALESCE wait_event_type/event to 'none' to represent runnable sessions (no wait).
             let rows = sqlx::query(
-                r#"
+                r"
                 SELECT
                     COALESCE(wait_event_type, 'none') AS wait_event_type,
                     COALESCE(wait_event, 'none')      AS wait_event,
@@ -111,7 +118,7 @@ impl Collector for WaitEventsCollector {
                 GROUP BY COALESCE(wait_event_type, 'none'),
                          COALESCE(wait_event, 'none')
                 ORDER BY wait_event_type, wait_event
-                "#,
+                ",
             )
             .bind(&excluded)
             .fetch_all(pool)
@@ -134,10 +141,10 @@ impl Collector for WaitEventsCollector {
 
                     self.wait_event_type
                         .with_label_values(&[&event_type])
-                        .set(count as f64);
+                        .set(i64_to_f64(count));
                     self.wait_event
                         .with_label_values(&[&event])
-                        .set(count as f64);
+                        .set(i64_to_f64(count));
 
                     debug!(
                         wait_event_type = %event_type,

@@ -54,7 +54,10 @@ async fn test_database_stats_has_all_metrics_after_collection() -> Result<()> {
             families.iter().any(|m| m.name() == name),
             "Metric {} should exist. Found: {:?}",
             name,
-            families.iter().map(|m| m.name()).collect::<Vec<_>>()
+            families
+                .iter()
+                .map(prometheus::proto::MetricFamily::name)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -216,8 +219,7 @@ async fn test_database_stats_cache_hit_ratio_range() -> Result<()> {
         let value = metric.get_gauge().value();
         assert!(
             (0.0..=1.0).contains(&value),
-            "Cache hit ratio should be between 0.0 and 1.0, got: {}",
-            value
+            "Cache hit ratio should be between 0.0 and 1.0, got: {value}"
         );
     }
 
@@ -286,8 +288,7 @@ async fn test_database_stats_cache_hit_ratio_calculation() -> Result<()> {
                     .iter()
                     .any(|(n, v)| *n == "datid" && datid == Some(*v))
             })
-            .map(|m| m.get_gauge().value())
-            .unwrap_or(0.0);
+            .map_or(0.0, |m| m.get_gauge().value());
 
         let blks_hit = blks_hit_family
             .get_metric()
@@ -302,8 +303,7 @@ async fn test_database_stats_cache_hit_ratio_calculation() -> Result<()> {
                     .iter()
                     .any(|(n, v)| *n == "datid" && datid == Some(*v))
             })
-            .map(|m| m.get_gauge().value())
-            .unwrap_or(0.0);
+            .map_or(0.0, |m| m.get_gauge().value());
 
         // Verify calculation: cache_hit_ratio = blks_hit / (blks_hit + blks_read)
         let total = blks_hit + blks_read;
@@ -311,20 +311,14 @@ async fn test_database_stats_cache_hit_ratio_calculation() -> Result<()> {
             let expected_ratio = blks_hit / total;
             let diff = (cache_ratio - expected_ratio).abs();
             assert!(
-                diff < 0.0001, // Allow tiny floating point differences
-                "Database {:?}: cache hit ratio mismatch. Expected {}, got {}. (blks_hit={}, blks_read={})",
-                datname,
-                expected_ratio,
-                cache_ratio,
-                blks_hit,
-                blks_read
+                diff < 0.0001,
+                "Database {datname:?}: cache hit ratio mismatch. Expected {expected_ratio}, got {cache_ratio}. (blks_hit={blks_hit}, blks_read={blks_read})"
             );
         } else {
             // If no blocks accessed yet, ratio should be 0.0
-            assert_eq!(
-                cache_ratio, 0.0,
-                "Database {:?}: cache hit ratio should be 0.0 when no blocks accessed",
-                datname
+            assert!(
+                (cache_ratio - 0.0).abs() < f64::EPSILON,
+                "Database {datname:?}: cache hit ratio should be 0.0 when no blocks accessed"
             );
         }
     }
@@ -352,7 +346,11 @@ async fn test_database_stats_cache_hit_ratio_labels() -> Result<()> {
 
     // Verify all metrics have correct labels
     for metric in cache_hit.get_metric() {
-        let labels: Vec<_> = metric.get_label().iter().map(|l| l.name()).collect();
+        let labels: Vec<_> = metric
+            .get_label()
+            .iter()
+            .map(prometheus::proto::LabelPair::name)
+            .collect();
 
         assert!(
             labels.contains(&"datid"),

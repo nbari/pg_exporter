@@ -6,17 +6,17 @@ use sqlx::{PgPool, Row};
 use tracing::{debug, info_span, instrument};
 use tracing_futures::Instrument as _;
 
-/// Exposes PostgreSQL WAL statistics from pg_stat_wal:
-/// - pg_stat_wal_records_total (Counter)
-/// - pg_stat_wal_fpi_total (Counter)
-/// - pg_stat_wal_bytes_total (Counter)
-/// - pg_stat_wal_buffers_full_total (Counter)
+/// Exposes `PostgreSQL` WAL statistics from `pg_stat_wal`:
+/// - `pg_stat_wal_records_total` (`Counter`)
+/// - `pg_stat_wal_fpi_total` (`Counter`)
+/// - `pg_stat_wal_bytes_total` (`Counter`)
+/// - `pg_stat_wal_buffers_full_total` (`Counter`)
 #[derive(Clone)]
 pub struct WalCollector {
-    wal_records: IntCounter,      // pg_stat_wal_records_total
-    wal_fpi: IntCounter,           // pg_stat_wal_fpi_total
-    wal_bytes: IntCounter,         // pg_stat_wal_bytes_total
-    wal_buffers_full: IntCounter,  // pg_stat_wal_buffers_full_total
+    records: IntCounter,      // pg_stat_wal_records_total
+    fpi: IntCounter,           // pg_stat_wal_fpi_total
+    bytes: IntCounter,         // pg_stat_wal_bytes_total
+    buffers_full: IntCounter,  // pg_stat_wal_buffers_full_total
 }
 
 impl Default for WalCollector {
@@ -26,6 +26,13 @@ impl Default for WalCollector {
 }
 
 impl WalCollector {
+    /// Creates a new `WalCollector`
+    ///
+    /// # Panics
+    ///
+    /// Panics if metric creation fails (should never happen with valid metric names)
+    #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new() -> Self {
         let wal_records = IntCounter::with_opts(Opts::new(
             "pg_stat_wal_records_total",
@@ -52,10 +59,10 @@ impl WalCollector {
         .expect("Failed to create pg_stat_wal_buffers_full_total");
 
         Self {
-            wal_records,
-            wal_fpi,
-            wal_bytes,
-            wal_buffers_full,
+            records: wal_records,
+            fpi: wal_fpi,
+            bytes: wal_bytes,
+            buffers_full: wal_buffers_full,
         }
     }
 }
@@ -72,10 +79,10 @@ impl Collector for WalCollector {
         fields(collector = "wal")
     )]
     fn register_metrics(&self, registry: &Registry) -> Result<()> {
-        registry.register(Box::new(self.wal_records.clone()))?;
-        registry.register(Box::new(self.wal_fpi.clone()))?;
-        registry.register(Box::new(self.wal_bytes.clone()))?;
-        registry.register(Box::new(self.wal_buffers_full.clone()))?;
+        registry.register(Box::new(self.records.clone()))?;
+        registry.register(Box::new(self.fpi.clone()))?;
+        registry.register(Box::new(self.bytes.clone()))?;
+        registry.register(Box::new(self.buffers_full.clone()))?;
         Ok(())
     }
 
@@ -97,14 +104,14 @@ impl Collector for WalCollector {
             );
 
             let row_result = sqlx::query(
-                r#"
+                r"
                 SELECT
                     wal_records,
                     wal_fpi,
                     wal_bytes::bigint AS wal_bytes,
                     wal_buffers_full
                 FROM pg_stat_wal
-                "#,
+                ",
             )
             .fetch_one(pool)
             .instrument(query_span)
@@ -128,15 +135,15 @@ impl Collector for WalCollector {
             let wal_buffers_full: i64 = row.try_get("wal_buffers_full")?;
 
             // Reset and set the counter values
-            self.wal_records.reset();
-            self.wal_fpi.reset();
-            self.wal_bytes.reset();
-            self.wal_buffers_full.reset();
+            self.records.reset();
+            self.fpi.reset();
+            self.bytes.reset();
+            self.buffers_full.reset();
 
-            self.wal_records.inc_by(wal_records as u64);
-            self.wal_fpi.inc_by(wal_fpi as u64);
-            self.wal_bytes.inc_by(wal_bytes as u64);
-            self.wal_buffers_full.inc_by(wal_buffers_full as u64);
+            self.records.inc_by(u64::try_from(wal_records).unwrap_or(0));
+            self.fpi.inc_by(u64::try_from(wal_fpi).unwrap_or(0));
+            self.bytes.inc_by(u64::try_from(wal_bytes).unwrap_or(0));
+            self.buffers_full.inc_by(u64::try_from(wal_buffers_full).unwrap_or(0));
 
             debug!(
                 wal_records,

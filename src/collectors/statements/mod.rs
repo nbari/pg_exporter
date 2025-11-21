@@ -11,30 +11,30 @@ use tracing_futures::Instrument as _;
 pub mod pg_statements;
 use pg_statements::PgStatementsCollector;
 
-/// pg_stat_statements collector - THE most critical tool for DBREs
+/// `pg_stat_statements` collector - THE most critical tool for DBREs
 ///
-/// Tracks query performance metrics from the pg_stat_statements extension.
+/// Tracks `query` performance metrics from the `pg_stat_statements` extension.
 /// This is the #1 tool Database Reliability Engineers use to:
 /// - Find slow queries causing incidents
-/// - Detect N+1 query problems
+/// - Detect N+1 `query` problems
 /// - Identify performance regressions
-/// - Optimize query patterns
+/// - Optimize `query` patterns
 /// - Track resource-intensive queries
 ///
 /// # Prerequisites
 ///
-/// The pg_stat_statements extension must be installed and configured:
+/// The `pg_stat_statements` extension must be installed and configured:
 ///
 /// ```text
-/// CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+/// CREATE EXTENSION IF NOT EXISTS `pg_stat_statements`;
 /// ```
 ///
 /// Add to postgresql.conf:
 ///
 /// ```text
-/// shared_preload_libraries = 'pg_stat_statements'
-/// pg_stat_statements.track = all
-/// pg_stat_statements.max = 10000
+/// shared_preload_libraries = '`pg_stat_statements`'
+/// `pg_stat_statements`.track = all
+/// `pg_stat_statements`.max = 10000
 /// ```
 ///
 /// # Key Metrics for Production DBREs
@@ -48,7 +48,7 @@ use pg_statements::PgStatementsCollector;
 ///
 /// # DBRE Use Cases
 ///
-/// - Incident response: "What query is killing the database right now?"
+/// - Incident response: "What `query` is killing the database right now?"
 /// - Performance optimization: "What's our top 10 slowest queries?"
 /// - Capacity planning: "Which queries will break first under load?"
 /// - Code review: "Did this deploy introduce slow queries?"
@@ -58,6 +58,7 @@ pub struct StatementsCollector {
 }
 
 impl StatementsCollector {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             subs: vec![Arc::new(PgStatementsCollector::new())],
@@ -81,7 +82,7 @@ impl Collector for StatementsCollector {
             let span = info_span!("collector.register_metrics", sub_collector = %sub.name());
             let res = sub.register_metrics(registry);
             match res {
-                Ok(_) => {
+                Ok(()) => {
                     debug!(collector = sub.name(), "registered metrics");
                 }
                 Err(ref e) => {

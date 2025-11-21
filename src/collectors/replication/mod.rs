@@ -23,6 +23,7 @@ pub struct ReplicationCollector {
 }
 
 impl ReplicationCollector {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             subs: vec![
@@ -52,10 +53,10 @@ impl Collector for ReplicationCollector {
             let res = sub.register_metrics(registry);
 
             match res {
-                Ok(_) => debug!(collector = sub.name(), "registered metrics"),
+                Ok(()) => debug!(collector = sub.name(), "registered metrics"),
 
                 Err(ref e) => {
-                    warn!(collector = sub.name(), error = %e, "failed to register metrics")
+                    warn!(collector = sub.name(), error = %e, "failed to register metrics");
                 }
             }
 

@@ -59,7 +59,11 @@ async fn test_stat_replication_collector_metrics_have_labels() -> Result<()> {
         if fam.name() == "pg_stat_replication_pg_wal_lsn_diff" {
             // If there are any metrics, they should have the right labels
             for m in fam.get_metric() {
-                let labels: Vec<_> = m.get_label().iter().map(|l| l.name()).collect();
+                let labels: Vec<_> = m
+                    .get_label()
+                    .iter()
+                    .map(prometheus::proto::LabelPair::name)
+                    .collect();
                 assert!(labels.contains(&"application_name"));
                 assert!(labels.contains(&"client_addr"));
                 assert!(labels.contains(&"state"));

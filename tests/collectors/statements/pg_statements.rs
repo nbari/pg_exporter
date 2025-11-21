@@ -58,7 +58,10 @@ async fn test_pg_statements_collector_has_all_metrics_after_collection() -> Resu
             found,
             "Metric {} should exist. Found: {:?}",
             metric_name,
-            metric_families.iter().map(|m| m.name()).collect::<Vec<_>>()
+            metric_families
+                .iter()
+                .map(prometheus::proto::MetricFamily::name)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -143,7 +146,10 @@ async fn test_pg_statements_collector_metrics_have_proper_labels() -> Result<()>
         let labels = metric.get_metric()[0].get_label();
 
         // Should have expected label names
-        let label_names: Vec<&str> = labels.iter().map(|l| l.name()).collect();
+        let label_names: Vec<&str> = labels
+            .iter()
+            .map(prometheus::proto::LabelPair::name)
+            .collect();
 
         assert!(
             label_names.contains(&"queryid"),
@@ -200,8 +206,7 @@ async fn test_pg_statements_collector_cache_hit_ratio_is_valid() -> Result<()> {
             let value = m.get_gauge().value();
             assert!(
                 (0.0..=1.0).contains(&value),
-                "Cache hit ratio should be between 0.0 and 1.0, got {}",
-                value
+                "Cache hit ratio should be between 0.0 and 1.0, got {value}"
             );
         }
     }
@@ -374,7 +379,7 @@ async fn test_pg_statements_with_realistic_workload() -> Result<()> {
     // Generate a realistic workload with different query types
     for i in 0..20 {
         let _ = sqlx::query("INSERT INTO test_table (data) VALUES ($1)")
-            .bind(format!("data_{}", i))
+            .bind(format!("data_{i}"))
             .execute(&pool)
             .await;
     }
@@ -413,13 +418,12 @@ async fn test_pg_statements_with_realistic_workload() -> Result<()> {
         let total_calls: i64 = metric
             .get_metric()
             .iter()
-            .map(|m| m.get_gauge().value() as i64)
+            .map(|m| common::metric_value_to_i64(m.get_gauge().value()))
             .sum();
 
         assert!(
             total_calls > 0,
-            "Should have recorded some calls, got {}",
-            total_calls
+            "Should have recorded some calls, got {total_calls}"
         );
     }
 

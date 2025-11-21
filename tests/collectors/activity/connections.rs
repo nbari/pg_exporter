@@ -37,11 +37,7 @@ async fn test_connections_collector_has_all_metrics() -> Result<()> {
 
     for metric_name in expected_metrics {
         let found = metric_families.iter().any(|m| m.name() == metric_name);
-        assert!(
-            found,
-            "Metric {} should exist after collection",
-            metric_name
-        );
+        assert!(found, "Metric {metric_name} should exist after collection");
     }
 
     pool.close().await;
@@ -91,8 +87,7 @@ async fn test_connections_collector_collects_from_database() -> Result<()> {
 
     assert!(
         total_connections >= 1.0,
-        "Should have at least one active connection, found: {}",
-        total_connections
+        "Should have at least one active connection, found: {total_connections}"
     );
 
     // Clean up - wait for the query to complete

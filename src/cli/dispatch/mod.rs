@@ -10,6 +10,9 @@ use clap::ArgMatches;
 use secrecy::SecretString;
 use tracing::info;
 
+/// # Errors
+///
+/// Returns an error if required arguments are missing or collector validation fails
 pub fn handler(matches: &clap::ArgMatches) -> Result<Action> {
     // Initialize global excluded database list once from CLI/env
     init_excluded_databases(matches);
@@ -23,13 +26,15 @@ pub fn handler(matches: &clap::ArgMatches) -> Result<Action> {
         .ok_or_else(|| anyhow!("Port is required. Please provide it using the --port flag."))?;
 
     // Get the listen address (None means auto-detect)
-    let listen = matches.get_one::<String>("listen").map(|s| s.to_string());
+    let listen = matches
+        .get_one::<String>("listen")
+        .map(std::string::ToString::to_string);
 
     // Get the DSN or return an error
     let dsn = SecretString::from(
         matches
             .get_one::<String>("dsn")
-            .map(|s: &String| s.to_string())
+            .cloned()
             .ok_or_else(|| anyhow!("DSN is required. Please provide it using the --dsn flag."))?,
     );
 
@@ -56,14 +61,15 @@ fn init_excluded_databases(matches: &ArgMatches) {
     set_excluded_databases(excludes);
 }
 
+#[must_use]
 pub fn get_enabled_collectors(matches: &ArgMatches) -> Vec<String> {
     let factories = all_factories();
 
     COLLECTOR_NAMES
         .iter()
         .filter(|&name| {
-            let enable_flag = format!("collector.{}", name);
-            let disable_flag = format!("no-collector.{}", name);
+            let enable_flag = format!("collector.{name}");
+            let disable_flag = format!("no-collector.{name}");
 
             // If explicitly disabled, skip it
             if matches.get_flag(&disable_flag) {

@@ -39,7 +39,10 @@ async fn test_unused_index_collector_has_all_metrics_after_collection() -> Resul
             families.iter().any(|m| m.name() == metric),
             "Metric {} should exist. Found: {:?}",
             metric,
-            families.iter().map(|m| m.name()).collect::<Vec<_>>()
+            families
+                .iter()
+                .map(prometheus::proto::MetricFamily::name)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -60,7 +63,7 @@ async fn test_unused_index_collector_count_is_non_negative() -> Result<()> {
         if fam.name() == "pg_index_unused_count" {
             for m in fam.get_metric() {
                 let v = m.get_gauge().value();
-                assert!(v >= 0.0, "unused_count should be non-negative, got {}", v);
+                assert!(v >= 0.0, "unused_count should be non-negative, got {v}");
             }
         }
     }
@@ -84,8 +87,7 @@ async fn test_unused_index_collector_size_is_non_negative() -> Result<()> {
                 let v = m.get_gauge().value();
                 assert!(
                     v >= 0.0,
-                    "unused_size_bytes should be non-negative, got {}",
-                    v
+                    "unused_size_bytes should be non-negative, got {v}"
                 );
             }
         }
@@ -108,7 +110,7 @@ async fn test_unused_index_collector_invalid_count_is_non_negative() -> Result<(
         if fam.name() == "pg_index_invalid_count" {
             for m in fam.get_metric() {
                 let v = m.get_gauge().value();
-                assert!(v >= 0.0, "invalid_count should be non-negative, got {}", v);
+                assert!(v >= 0.0, "invalid_count should be non-negative, got {v}");
             }
         }
     }

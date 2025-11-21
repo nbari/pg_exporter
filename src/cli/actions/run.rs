@@ -3,6 +3,10 @@ use crate::exporter::new;
 use anyhow::Result;
 
 /// Handle the create action
+///
+/// # Errors
+///
+/// Returns an error if the exporter fails to start
 pub async fn handle(action: Action) -> Result<()> {
     match action {
         Action::Run {

@@ -6,10 +6,10 @@ use sqlx::{PgPool, Row};
 use tracing::{debug, info_span, instrument};
 use tracing_futures::Instrument as _;
 
-/// Exposes PostgreSQL background writer statistics from pg_stat_bgwriter:
-/// - pg_stat_bgwriter_buffers_clean_total (Counter)
-/// - pg_stat_bgwriter_maxwritten_clean_total (Counter)
-/// - pg_stat_bgwriter_buffers_alloc_total (Counter)
+/// Exposes `PostgreSQL` background writer statistics from `pg_stat_bgwriter`:
+/// - `pg_stat_bgwriter_buffers_clean_total` (`Counter`)
+/// - `pg_stat_bgwriter_maxwritten_clean_total` (`Counter`)
+/// - `pg_stat_bgwriter_buffers_alloc_total` (`Counter`)
 #[derive(Clone)]
 pub struct BgwriterCollector {
     buffers_clean: IntCounter,     // pg_stat_bgwriter_buffers_clean_total
@@ -24,6 +24,13 @@ impl Default for BgwriterCollector {
 }
 
 impl BgwriterCollector {
+    /// Creates a new `BgwriterCollector`
+    ///
+    /// # Panics
+    ///
+    /// Panics if metric creation fails (should never happen with valid metric names)
+    #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new() -> Self {
         let buffers_clean = IntCounter::with_opts(Opts::new(
             "pg_stat_bgwriter_buffers_clean_total",
@@ -87,13 +94,13 @@ impl Collector for BgwriterCollector {
             );
 
             let row = sqlx::query(
-                r#"
+                r"
                 SELECT
                     buffers_clean,
                     maxwritten_clean,
                     buffers_alloc
                 FROM pg_stat_bgwriter
-                "#,
+                ",
             )
             .fetch_one(pool)
             .instrument(query_span)
@@ -109,9 +116,9 @@ impl Collector for BgwriterCollector {
             self.maxwritten_clean.reset();
             self.buffers_alloc.reset();
 
-            self.buffers_clean.inc_by(buffers_clean as u64);
-            self.maxwritten_clean.inc_by(maxwritten_clean as u64);
-            self.buffers_alloc.inc_by(buffers_alloc as u64);
+            self.buffers_clean.inc_by(u64::try_from(buffers_clean).unwrap_or(0));
+            self.maxwritten_clean.inc_by(u64::try_from(maxwritten_clean).unwrap_or(0));
+            self.buffers_alloc.inc_by(u64::try_from(buffers_alloc).unwrap_or(0));
 
             debug!(
                 buffers_clean,

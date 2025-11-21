@@ -28,7 +28,7 @@ async fn test_settings_collector_returns_key_settings() -> Result<()> {
         let setting = metric_families
             .iter()
             .find(|m| m.name() == setting_name)
-            .unwrap_or_else(|| panic!("{} should exist", setting_name));
+            .unwrap_or_else(|| panic!("{setting_name} should exist"));
 
         assert_eq!(
             setting.get_field_type(),
@@ -36,19 +36,17 @@ async fn test_settings_collector_returns_key_settings() -> Result<()> {
         );
         assert!(
             !setting.get_metric().is_empty(),
-            "{} should have a value",
-            setting_name
+            "{setting_name} should have a value"
         );
 
         let metric = &setting.get_metric()[0];
-        let value = metric.get_gauge().value() as i64;
+        let value = common::metric_value_to_i64(metric.get_gauge().value());
 
         // Sanity checks
         if setting_name == "pg_settings_max_connections" {
             assert!(
                 value >= 1,
-                "max_connections should be at least 1, got {}",
-                value
+                "max_connections should be at least 1, got {value}"
             );
         }
 
@@ -56,9 +54,7 @@ async fn test_settings_collector_returns_key_settings() -> Result<()> {
             // Boolean settings should be 0 or 1
             assert!(
                 value == 0 || value == 1,
-                "{} should be 0 or 1, got {}",
-                setting_name,
-                value
+                "{setting_name} should be 0 or 1, got {value}"
             );
         }
     }
@@ -85,13 +81,12 @@ async fn test_settings_collector_handles_on_off_values() -> Result<()> {
         .find(|m| m.name() == "pg_settings_autovacuum")
         .expect("pg_settings_autovacuum should exist");
 
-    let value = autovacuum.get_metric()[0].get_gauge().value() as i64;
+    let value = common::metric_value_to_i64(autovacuum.get_metric()[0].get_gauge().value());
 
     // Should be either 0 (off) or 1 (on), not a string
     assert!(
         value == 0 || value == 1,
-        "Boolean setting should be 0 or 1, got {}",
-        value
+        "Boolean setting should be 0 or 1, got {value}"
     );
 
     pool.close().await;
@@ -162,8 +157,8 @@ async fn test_settings_collector_memory_settings_are_reasonable() -> Result<()> 
         .find(|m| m.name() == "pg_settings_work_mem_bytes")
         .unwrap();
 
-    let value = work_mem.get_metric()[0].get_gauge().value() as i64;
-    assert!(value > 0, "work_mem should be positive, got {}", value);
+    let value = common::metric_value_to_i64(work_mem.get_metric()[0].get_gauge().value());
+    assert!(value > 0, "work_mem should be positive, got {value}");
 
     pool.close().await;
     Ok(())

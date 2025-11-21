@@ -16,7 +16,7 @@ use std::time::Instant;
 /// - `pg_exporter_collector_scrape_duration_seconds{collector}` (Histogram)
 ///   - Time spent scraping each collector
 ///   - Buckets: 1ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s
-///   - Use histogram_quantile() for percentiles (p50, p95, p99)
+///   - Use `histogram_quantile()` for percentiles (p50, p95, p99)
 ///   - Example: `histogram_quantile(0.99, rate(pg_exporter_collector_scrape_duration_seconds_bucket[5m]))`
 ///
 /// - `pg_exporter_collector_scrape_errors_total{collector}` (Counter)
@@ -35,17 +35,17 @@ use std::time::Instant;
 ///
 /// ## Global Metrics
 ///
-/// - `pg_exporter_metrics_total` (IntGauge)
+/// - `pg_exporter_metrics_total` (`IntGauge`)
 ///   - **Total number of metrics currently exported**
-///   - ⭐ Critical for Cortex/Mimir operators with series limits
+///   - Critical for Cortex/Mimir operators with series limits
 ///   - Alert if approaching your cardinality limit
 ///   - Example: `pg_exporter_metrics_total > 10000`
 ///
-/// - `pg_exporter_scrapes_total` (IntGauge)
+/// - `pg_exporter_scrapes_total` (`IntGauge`)
 ///   - Total scrapes performed since start
 ///   - Used to detect if exporter is active
 ///
-/// # Usage Pattern with ScrapeTimer
+/// # Usage Pattern with `ScrapeTimer`
 ///
 /// The `ScrapeTimer` is an RAII (Resource Acquisition Is Initialization) timer
 /// that automatically records scrape duration and status when dropped:
@@ -79,14 +79,14 @@ use std::time::Instant;
 /// - Single writer (updates) blocks readers briefly
 /// - Poison errors handled explicitly for resilience
 ///
-/// Why RwLock instead of Mutex?
-/// - Scrape counters are read-heavy (Prometheus scrapes every 15-60s)
+/// Why `RwLock` instead of `Mutex`?
+/// - Scrape counters are read-heavy (`Prometheus` scrapes every 15-60s)
 /// - Writes only happen during collector execution
 /// - Better concurrency for high scrape rates
 ///
 /// ## Poison Error Handling
 ///
-/// If a panic occurs while holding the write lock, the RwLock becomes poisoned.
+/// If a panic occurs while holding the write lock, the `RwLock` becomes poisoned.
 /// We detect this and recover gracefully using `into_inner()`:
 ///
 /// ```rust,no_run
@@ -103,7 +103,7 @@ use std::time::Instant;
 ///
 /// This ensures one panic doesn't break all future metric updates.
 ///
-/// # Example Prometheus Queries
+/// # Example `Prometheus` Queries
 ///
 /// ```promql
 /// # Slowest collector (p99 latency)
@@ -133,13 +133,13 @@ pub struct ScraperCollector {
     metrics_total: IntGauge,
     scrapes_total: IntGauge,
     
-    /// Internal state for tracking total counts
+    /// Internal `state` for tracking total counts
     ///
-    /// Protected by RwLock for concurrent reads:
-    /// - Reads: Prometheus scrapes metrics
-    /// - Writes: update_metrics_count(), increment_scrapes()
+    /// Protected by `RwLock` for concurrent reads:
+    /// - Reads: `Prometheus` scrapes metrics
+    /// - Writes: `update_metrics_count()`, `increment_scrapes()`
     ///
-    /// We handle PoisonError explicitly to recover from panics:
+    /// We handle `PoisonError` explicitly to recover from panics:
     /// - If a write panics, the lock becomes poisoned
     /// - We detect this and recover via `into_inner()`
     /// - This prevents one failed update from breaking all future scrapes
@@ -159,6 +159,13 @@ impl Default for ScraperCollector {
 }
 
 impl ScraperCollector {
+    /// Creates a new `ScraperCollector`
+    ///
+    /// # Panics
+    ///
+    /// Panics if metric creation fails (should never happen with valid metric names)
+    #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new() -> Self {
         let scrape_duration_seconds = HistogramVec::new(
             prometheus::HistogramOpts::new(
@@ -221,6 +228,7 @@ impl ScraperCollector {
     }
 
     /// Record the start of a collector scrape
+    #[must_use]
     pub fn start_scrape(&self, collector_name: &str) -> ScrapeTimer {
         ScrapeTimer {
             collector_name: collector_name.to_string(),
@@ -299,6 +307,10 @@ impl ScraperCollector {
     }
 
     /// Register all metrics with the registry
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any metric fails to register
     pub fn register(&self, registry: &Registry) -> Result<()> {
         registry.register(Box::new(self.scrape_duration_seconds.clone()))?;
         registry.register(Box::new(self.scrape_errors_total.clone()))?;
@@ -370,6 +382,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_scraper_collector_new() {
         let scraper = ScraperCollector::new();
         assert_eq!(scraper.metrics_total.get(), 0);
@@ -377,6 +390,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn test_scraper_collector_registers_without_error() {
         let scraper = ScraperCollector::new();
         let registry = Registry::new();
@@ -384,6 +398,8 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
+    #[allow(clippy::expect_used)]
     fn test_scrape_timer_records_duration() {
         let scraper = ScraperCollector::new();
         let registry = Registry::new();
@@ -406,6 +422,8 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
+    #[allow(clippy::expect_used)]
     fn test_scrape_timer_records_error() {
         let scraper = ScraperCollector::new();
         let registry = Registry::new();

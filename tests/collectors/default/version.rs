@@ -60,13 +60,12 @@ async fn test_version_collector_queries_database() -> Result<()> {
     );
 
     let metric = &version_num.get_metric()[0];
-    let gauge_value = metric.get_gauge().value() as i64;
+    let gauge_value = common::metric_value_to_i64(metric.get_gauge().value());
 
-    // server_version_num should be >= 140000 (PostgreSQL 14+) based on our test matrix
+    // server_version_num should be >= 140_000 (PostgreSQL 14+) based on our test matrix
     assert!(
-        gauge_value >= 140000,
-        "server_version_num should be >= 140000, got {}",
-        gauge_value
+        gauge_value >= 140_000,
+        "server_version_num should be >= 140_000, got {gauge_value}"
     );
 
     pool.close().await;
@@ -103,16 +102,14 @@ async fn test_version_collector_normalizes_versions() -> Result<()> {
     assert_eq!(
         parts.len(),
         3,
-        "short_version should have 3 parts (X.Y.Z), got: {}",
-        short_version
+        "short_version should have 3 parts (X.Y.Z), got: {short_version}"
     );
 
     // Each part should be a number
     for part in parts {
         assert!(
             part.parse::<u32>().is_ok(),
-            "version part '{}' should be a number",
-            part
+            "version part '{part}' should be a number"
         );
     }
 
@@ -160,8 +157,7 @@ async fn test_version_collector_handles_different_version_formats() -> Result<()
     // Should contain "PostgreSQL" and a version number
     assert!(
         full_version.contains("PostgreSQL") || full_version.contains("postgres"),
-        "Full version should contain 'PostgreSQL', got: {}",
-        full_version
+        "Full version should contain 'PostgreSQL', got: {full_version}"
     );
 
     pool.close().await;

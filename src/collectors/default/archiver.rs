@@ -6,11 +6,11 @@ use sqlx::{PgPool, Row};
 use tracing::{debug, info_span, instrument};
 use tracing_futures::Instrument as _;
 
-/// Exposes PostgreSQL archiver statistics from pg_stat_archiver:
-/// - pg_stat_archiver_archived_total (Counter)
-/// - pg_stat_archiver_failed_total (Counter)
-/// - pg_stat_archiver_last_archived_age_seconds (Gauge)
-/// - pg_stat_archiver_last_failed_age_seconds (Gauge)
+/// Exposes `PostgreSQL` archiver statistics from `pg_stat_archiver`:
+/// - `pg_stat_archiver_archived_total` (`Counter`)
+/// - `pg_stat_archiver_failed_total` (`Counter`)
+/// - `pg_stat_archiver_last_archived_age_seconds` (`Gauge`)
+/// - `pg_stat_archiver_last_failed_age_seconds` (`Gauge`)
 #[derive(Clone)]
 pub struct ArchiverCollector {
     archived_count: IntCounter,      // pg_stat_archiver_archived_total
@@ -26,6 +26,13 @@ impl Default for ArchiverCollector {
 }
 
 impl ArchiverCollector {
+    /// Creates a new `ArchiverCollector`
+    ///
+    /// # Panics
+    ///
+    /// Panics if metric creation fails (should never happen with valid metric names)
+    #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new() -> Self {
         let archived_count = IntCounter::with_opts(Opts::new(
             "pg_stat_archiver_archived_total",
@@ -97,14 +104,14 @@ impl Collector for ArchiverCollector {
             );
 
             let row_result = sqlx::query(
-                r#"
+                r"
                 SELECT
                     archived_count,
                     failed_count,
                     EXTRACT(EPOCH FROM (NOW() - last_archived_time))::bigint AS last_archived_age,
                     EXTRACT(EPOCH FROM (NOW() - last_failed_time))::bigint AS last_failed_age
                 FROM pg_stat_archiver
-                "#,
+                ",
             )
             .fetch_one(pool)
             .instrument(query_span)
@@ -132,8 +139,8 @@ impl Collector for ArchiverCollector {
             self.archived_count.reset();
             self.failed_count.reset();
 
-            self.archived_count.inc_by(archived_count as u64);
-            self.failed_count.inc_by(failed_count as u64);
+            self.archived_count.inc_by(u64::try_from(archived_count).unwrap_or(0));
+            self.failed_count.inc_by(u64::try_from(failed_count).unwrap_or(0));
 
             // Set age gauges (may be NULL if never archived/failed)
             if let Some(age) = last_archived_age {

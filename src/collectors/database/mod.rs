@@ -15,7 +15,7 @@ use stats::DatabaseStatCollector;
 pub mod catalog;
 use catalog::DatabaseSubCollector;
 
-/// DatabaseCollector aggregates db-level metrics from multiple sources.
+/// `DatabaseCollector` aggregates db-level metrics from multiple sources.
 /// Collect sub-collectors concurrently to reduce tail latency.
 #[derive(Clone, Default)]
 pub struct DatabaseCollector {
@@ -23,6 +23,7 @@ pub struct DatabaseCollector {
 }
 
 impl DatabaseCollector {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             subs: vec![
@@ -49,9 +50,9 @@ impl Collector for DatabaseCollector {
             let span = info_span!("collector.register_metrics", sub_collector = %sub.name());
             let res = sub.register_metrics(registry);
             match res {
-                Ok(_) => debug!(collector = sub.name(), "registered metrics"),
+                Ok(()) => debug!(collector = sub.name(), "registered metrics"),
                 Err(ref e) => {
-                    warn!(collector = sub.name(), error = %e, "failed to register metrics")
+                    warn!(collector = sub.name(), error = %e, "failed to register metrics");
                 }
             }
             res?;

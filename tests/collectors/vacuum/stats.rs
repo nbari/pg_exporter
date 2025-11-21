@@ -40,7 +40,10 @@ async fn test_vacuum_stats_collector_has_all_metrics_after_collection() -> Resul
             found,
             "Metric {} should exist. Found: {:?}",
             metric_name,
-            metric_families.iter().map(|m| m.name()).collect::<Vec<_>>()
+            metric_families
+                .iter()
+                .map(prometheus::proto::MetricFamily::name)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -66,13 +69,12 @@ async fn test_vacuum_stats_collector_freeze_max_age_is_reasonable() -> Result<()
         .find(|m| m.name() == "pg_vacuum_freeze_max_age_xids")
         .expect("pg_vacuum_freeze_max_age_xids should exist");
 
-    let value = freeze_max.get_metric()[0].get_gauge().value() as i64;
+    let value = common::metric_value_to_i64(freeze_max.get_metric()[0].get_gauge().value());
 
     // Typical values are 200,000,000 (default) to 2,000,000,000
     assert!(
         (1_000_000..=2_100_000_000).contains(&value),
-        "freeze_max_age should be between 1M and 2.1B, got {}",
-        value
+        "freeze_max_age should be between 1M and 2.1B, got {value}"
     );
 
     pool.close().await;
@@ -98,11 +100,10 @@ async fn test_vacuum_stats_collector_freeze_age_percentage_is_valid() -> Result<
         .expect("pg_vacuum_database_freeze_age_pct_of_max should exist");
 
     for metric in freeze_pct.get_metric() {
-        let value = metric.get_gauge().value() as i64;
+        let value = common::metric_value_to_i64(metric.get_gauge().value());
         assert!(
             (0..=100).contains(&value),
-            "Freeze age percentage should be 0-100, got {}",
-            value
+            "Freeze age percentage should be 0-100, got {value}"
         );
     }
 
@@ -129,11 +130,10 @@ async fn test_vacuum_stats_collector_database_freeze_age_is_non_negative() -> Re
         .expect("pg_vacuum_database_freeze_age_xids should exist");
 
     for metric in db_freeze_age.get_metric() {
-        let value = metric.get_gauge().value() as i64;
+        let value = common::metric_value_to_i64(metric.get_gauge().value());
         assert!(
             value >= 0,
-            "Database freeze age should be non-negative, got {}",
-            value
+            "Database freeze age should be non-negative, got {value}"
         );
     }
 
@@ -160,11 +160,10 @@ async fn test_vacuum_stats_collector_autovacuum_workers_is_non_negative() -> Res
         .expect("pg_vacuum_autovacuum_workers should exist");
 
     for metric in workers.get_metric() {
-        let value = metric.get_gauge().value() as i64;
+        let value = common::metric_value_to_i64(metric.get_gauge().value());
         assert!(
             value >= 0,
-            "Autovacuum workers should be non-negative, got {}",
-            value
+            "Autovacuum workers should be non-negative, got {value}"
         );
     }
 
@@ -195,14 +194,13 @@ async fn test_vacuum_stats_collector_metrics_have_datname_labels() -> Result<()>
         let metric_family = metric_families
             .iter()
             .find(|m| m.name() == metric_name)
-            .unwrap_or_else(|| panic!("{} should exist", metric_name));
+            .unwrap_or_else(|| panic!("{metric_name} should exist"));
 
         for metric in metric_family.get_metric() {
             let has_datname = metric.get_label().iter().any(|l| l.name() == "datname");
             assert!(
                 has_datname,
-                "Metric {} should have 'datname' label",
-                metric_name
+                "Metric {metric_name} should have 'datname' label"
             );
         }
     }
