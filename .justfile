@@ -167,6 +167,7 @@ t-deploy message="CI test": check-develop check-clean test
     #!/usr/bin/env bash
     set -euo pipefail
 
+    message="{{message}}"
     ts="$(date -u +%Y%m%d-%H%M%S)"
     tag="t-${ts}"
 
