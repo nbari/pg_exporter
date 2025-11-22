@@ -92,11 +92,13 @@ _bump bump_kind: check-develop check-clean clean update test
     #!/usr/bin/env bash
     set -euo pipefail
 
+    bump_kind="{{bump_kind}}"
+
     previous_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
     echo "ℹ️  Current version: ${previous_version}"
 
     echo "🔧 Bumping ${bump_kind} version..."
-    cargo set-version --bump "{{bump_kind}}"
+    cargo set-version --bump "${bump_kind}"
     new_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
     echo "📝 New version: ${new_version}"
 
@@ -118,7 +120,7 @@ _bump bump_kind: check-develop check-clean clean update test
         esac
     }
 
-    validate_bump "${previous_version}" "{{bump_kind}}" "${new_version}"
+    validate_bump "${previous_version}" "${bump_kind}" "${new_version}"
 
     echo "🔍 Verifying tag does not exist for ${new_version}..."
     git fetch --tags --quiet
