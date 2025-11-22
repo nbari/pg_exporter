@@ -94,6 +94,16 @@ _bump bump_kind: check-develop check-clean clean update test
 
     bump_kind="{{bump_kind}}"
 
+    cleanup() {
+        status=$?
+        if [ $status -ne 0 ]; then
+            echo "↩️  Restoring version files after failure..."
+            git checkout -- Cargo.toml Cargo.lock >/dev/null 2>&1 || true
+        fi
+        exit $status
+    }
+    trap cleanup EXIT
+
     previous_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
     echo "ℹ️  Current version: ${previous_version}"
 
@@ -135,8 +145,8 @@ _bump bump_kind: check-develop check-clean clean update test
     echo "🧹 Running clean build..."
     cargo clean
 
-    echo "🧪 Running tests with new version..."
-    cargo test
+    echo "🧪 Running tests with new version (via just test)..."
+    just test
 
     git add .
     git commit -m "bump version to ${new_version}"
