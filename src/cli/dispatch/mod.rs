@@ -82,12 +82,10 @@ pub fn get_enabled_collectors(matches: &ArgMatches) -> Vec<String> {
             }
 
             // Otherwise, check the collector's default setting
-            if let Some(factory) = factories.get(name) {
+            factories.get(name).is_some_and(|factory| {
                 let collector = factory();
                 collector.enabled_by_default()
-            } else {
-                false // Fallback if collector not found
-            }
+            })
         })
         .map(|&name| name.to_string())
         .collect()

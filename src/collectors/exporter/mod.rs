@@ -162,7 +162,7 @@ impl ExporterCollector {
     /// This is called by `CollectorRegistry` during initialization to
     /// extract the scraper for tracking all collector performance.
     #[must_use]
-    pub fn get_scraper(&self) -> &Arc<ScraperCollector> {
+    pub const fn get_scraper(&self) -> &Arc<ScraperCollector> {
         &self.scraper
     }
 }
@@ -259,7 +259,7 @@ mod tests {
     fn test_exporter_collector_has_scraper() {
         let collector = ExporterCollector::new();
         let scraper = collector.get_scraper();
-        
+
         // Scraper should be accessible
         assert!(Arc::strong_count(scraper) >= 1);
     }
@@ -268,11 +268,11 @@ mod tests {
     #[allow(clippy::unwrap_used)]
     fn test_exporter_collector_scraper_is_same_instance() {
         let collector = ExporterCollector::new();
-        
+
         // Get scraper twice and verify it's the same Arc
         let scraper1 = collector.get_scraper();
         let scraper2 = collector.get_scraper();
-        
+
         assert!(Arc::ptr_eq(scraper1, scraper2));
     }
 
@@ -280,26 +280,28 @@ mod tests {
     #[allow(clippy::unwrap_used)]
     async fn test_exporter_collector_collect_succeeds() {
         use sqlx::postgres::PgPoolOptions;
-        
+
         // This test requires a database connection
-        let dsn = std::env::var("PG_EXPORTER_DSN")
-            .unwrap_or_else(|_| "postgresql://postgres:postgres@localhost:5432/postgres".to_string());
-        
+        let dsn = std::env::var("PG_EXPORTER_DSN").unwrap_or_else(|_| {
+            "postgresql://postgres:postgres@localhost:5432/postgres".to_string()
+        });
+
         let Ok(pool) = PgPoolOptions::new()
             .min_connections(1)
             .max_connections(1)
             .connect(&dsn)
-            .await else {
-                eprintln!("Skipping test: database not available");
-                return;
-            };
+            .await
+        else {
+            eprintln!("Skipping test: database not available");
+            return;
+        };
 
         let collector = ExporterCollector::new();
         let registry = Registry::new();
-        
+
         // Register metrics first
         collector.register_metrics(&registry).unwrap();
-        
+
         // Collect should succeed (it's a no-op but shouldn't error)
         let result = collector.collect(&pool).await;
         assert!(result.is_ok());

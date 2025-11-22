@@ -7,6 +7,17 @@ default: test
 
 # Test suite
 test: clippy fmt
+  @echo "🧪 Checking PostgreSQL..."
+  @if ! podman ps --filter "name=pg_exporter_postgres" --format "{{{{.Names}}}}" | grep -q "pg_exporter_postgres"; then \
+    echo "🚀 PostgreSQL container not running, starting it..."; \
+    just postgres; \
+    echo "⏳ Waiting for PostgreSQL to be ready..."; \
+    sleep 3; \
+    timeout 30 bash -c 'until psql -h localhost -p 5432 -U postgres -d postgres -c "SELECT 1" &>/dev/null; do sleep 1; done' || (echo "❌ PostgreSQL failed to start" && exit 1); \
+    echo "✅ PostgreSQL is ready"; \
+  else \
+    echo "✅ PostgreSQL container is already running"; \
+  fi
   @echo "🧪 Running setup check..."
   @if [ -f scripts/setup-local-test-db.sh ]; then \
     scripts/setup-local-test-db.sh || (echo "❌ Test database setup failed. Fix the issues above before running tests." && exit 1); \
@@ -62,13 +73,46 @@ check-develop:
     fi
     echo "✅ On develop branch"
 
+# Check if tag already exists for current version
+check-tag-not-exists:
+    #!/usr/bin/env bash
+    current_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+
+    # Fetch latest tags from remote
+    git fetch --tags --quiet
+
+    if git rev-parse -q --verify "refs/tags/${current_version}" >/dev/null 2>&1; then
+        echo "❌ Tag ${current_version} already exists!"
+        echo "Current version in Cargo.toml is already tagged."
+        echo ""
+        echo "Options:"
+        echo "  1. If you want to create a new release, first bump the version manually:"
+        echo "     cargo set-version --bump patch  # or minor, or major"
+        echo "     git add Cargo.toml Cargo.lock"
+        echo "     git commit -m 'bump version to X.Y.Z'"
+        echo "     git push origin develop"
+        echo "  2. Or run: just deploy (which will bump automatically if no tag exists)"
+        exit 1
+    fi
+
+    echo "✅ No tag exists for version ${current_version}"
+
 # Bump version and commit (patch level)
-bump: check-develop check-clean update clean test
+bump: check-develop check-clean clean update test check-tag-not-exists
     #!/usr/bin/env bash
     echo "🔧 Bumping patch version..."
     cargo set-version --bump patch
     new_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
     echo "📝 New version: $new_version"
+
+    echo "🔄 Updating dependencies..."
+    cargo update
+
+    echo "🧹 Running clean build..."
+    cargo clean
+
+    echo "🧪 Running tests with new version..."
+    cargo test
 
     git add .
     git commit -m "bump version to $new_version"
@@ -76,12 +120,21 @@ bump: check-develop check-clean update clean test
     echo "✅ Version bumped and pushed to develop"
 
 # Bump minor version
-bump-minor: check-develop check-clean update clean test
+bump-minor: check-develop check-clean clean update test check-tag-not-exists
     #!/usr/bin/env bash
     echo "🔧 Bumping minor version..."
     cargo set-version --bump minor
     new_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
     echo "📝 New version: $new_version"
+
+    echo "🔄 Updating dependencies..."
+    cargo update
+
+    echo "🧹 Running clean build..."
+    cargo clean
+
+    echo "🧪 Running tests with new version..."
+    cargo test
 
     git add .
     git commit -m "bump version to $new_version"
@@ -89,12 +142,21 @@ bump-minor: check-develop check-clean update clean test
     echo "✅ Version bumped and pushed to develop"
 
 # Bump major version
-bump-major: check-develop check-clean update clean test
+bump-major: check-develop check-clean clean update test check-tag-not-exists
     #!/usr/bin/env bash
     echo "🔧 Bumping major version..."
     cargo set-version --bump major
     new_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
     echo "📝 New version: $new_version"
+
+    echo "🔄 Updating dependencies..."
+    cargo update
+
+    echo "🧹 Running clean build..."
+    cargo clean
+
+    echo "🧪 Running tests with new version..."
+    cargo test
 
     git add .
     git commit -m "bump version to $new_version"
@@ -108,6 +170,15 @@ _deploy-merge-and-tag:
 
     new_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
     echo "🚀 Starting deployment for version $new_version..."
+
+    # Double-check tag doesn't exist (safety check)
+    echo "🔍 Verifying tag doesn't exist..."
+    git fetch --tags --quiet
+    if git rev-parse -q --verify "refs/tags/${new_version}" >/dev/null 2>&1; then
+        echo "❌ Tag ${new_version} already exists on remote!"
+        echo "This should not happen. The tag may have been created in a previous run."
+        exit 1
+    fi
 
     # Ensure develop is up to date
     echo "🔄 Ensuring develop is up to date..."
@@ -220,7 +291,7 @@ jaeger:
 
 stop-containers:
   @for c in pg_exporter_postgres jaeger; do \
-        podman stop $$c 2>/dev/null || true; \
+        podman stop $c 2>/dev/null || true; \
   done
 
 # Test against all PostgreSQL versions (14-18)
@@ -303,6 +374,34 @@ test-pg version:
 
     echo "🧹 Cleaning up..."
     podman stop pg{{version}} && podman rm pg{{version}}
+
+# Test TLS collector with SSL-enabled PostgreSQL
+test-tls version="16":
+    #!/usr/bin/env bash
+    set -e
+
+    SCRIPT_DIR="tests"
+    PG_PORT="${PG_PORT:-5433}"
+
+    echo "🔐 Starting SSL-enabled PostgreSQL {{version}} on port ${PG_PORT}..."
+    PG_VERSION={{version}} PG_PORT=${PG_PORT} "${SCRIPT_DIR}/start-ssl-postgres.sh"
+
+    # Ensure cleanup happens even if tests fail
+    cleanup() {
+        echo "🧹 Cleaning up SSL PostgreSQL container..."
+        "${SCRIPT_DIR}/stop-ssl-postgres.sh" || true
+    }
+    trap cleanup EXIT
+
+    echo "🧪 Running TLS collector tests..."
+    PG_EXPORTER_DSN="postgresql://postgres:postgres@localhost:${PG_PORT}/postgres?sslmode=require" \
+        cargo test --test collectors_tests tls -- --nocapture
+
+    echo "🧪 Running TLS integration tests..."
+    PG_EXPORTER_DSN="postgresql://postgres:postgres@localhost:${PG_PORT}/postgres?sslmode=require" \
+        cargo test --test tls_metrics_integration -- --nocapture
+
+    echo "✅ TLS tests completed successfully!"
 
 # Validate Grafana dashboard
 validate-dashboard:

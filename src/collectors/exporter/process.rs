@@ -108,7 +108,7 @@ impl ProcessCollector {
 
         let system = System::new_all();
         let num_cpus = system.cpus().len().max(1);
-        
+
         let system = Arc::new(Mutex::new(SystemState {
             system,
             last_refresh: None,
@@ -117,7 +117,7 @@ impl ProcessCollector {
 
         // Set static values once
         cpu_cores.set(i64::try_from(num_cpus).unwrap_or(0));
-        
+
         let start_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -138,7 +138,7 @@ impl ProcessCollector {
 
     fn collect_stats(&self) {
         let now = Instant::now();
-        
+
         let mut state = match self.system.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
@@ -146,27 +146,27 @@ impl ProcessCollector {
                 poisoned.into_inner()
             }
         };
-        
+
         // Check if enough time has passed since last refresh
         // sysinfo needs time between refreshes for accurate CPU usage
-        let should_wait = if let Some(last) = state.last_refresh {
-            now.duration_since(last) < sysinfo::MINIMUM_CPU_UPDATE_INTERVAL
-        } else {
-            false
-        };
-        
+        let should_wait = state
+            .last_refresh
+            .is_some_and(|last| now.duration_since(last) < sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+
         if should_wait {
             // Not enough time passed, skip CPU update but collect memory/fds
             if let Some(process) = state.system.process(self.pid) {
                 let rss = process.memory();
                 let vsz = process.virtual_memory();
-                
-                self.resident_memory_bytes.set(i64::try_from(rss).unwrap_or(0));
-                self.virtual_memory_bytes.set(i64::try_from(vsz).unwrap_or(0));
+
+                self.resident_memory_bytes
+                    .set(i64::try_from(rss).unwrap_or(0));
+                self.virtual_memory_bytes
+                    .set(i64::try_from(vsz).unwrap_or(0));
             }
             return;
         }
-        
+
         // Refresh process data
         state.system.refresh_all();
         state.last_refresh = Some(now);
@@ -181,9 +181,11 @@ impl ProcessCollector {
             // Memory metrics
             let rss = process.memory();
             let vsz = process.virtual_memory();
-            
-            self.resident_memory_bytes.set(i64::try_from(rss).unwrap_or(0));
-            self.virtual_memory_bytes.set(i64::try_from(vsz).unwrap_or(0));
+
+            self.resident_memory_bytes
+                .set(i64::try_from(rss).unwrap_or(0));
+            self.virtual_memory_bytes
+                .set(i64::try_from(vsz).unwrap_or(0));
 
             // File descriptors (Linux-specific)
             #[cfg(target_os = "linux")]
@@ -193,7 +195,7 @@ impl ProcessCollector {
                     self.open_fds.set(fd_count);
                 }
             }
-            
+
             #[cfg(not(target_os = "linux"))]
             {
                 self.open_fds.set(0);
@@ -259,7 +261,7 @@ mod tests {
     fn test_process_collector_collects_stats() {
         let collector = ProcessCollector::new();
         collector.collect_stats();
-        
+
         assert!(collector.resident_memory_bytes.get() > 0);
         assert!(collector.virtual_memory_bytes.get() > 0);
         assert!(collector.virtual_memory_bytes.get() >= collector.resident_memory_bytes.get());
@@ -270,7 +272,7 @@ mod tests {
     fn test_cpu_percent_reasonable() {
         let collector = ProcessCollector::new();
         collector.collect_stats();
-        
+
         let cpu = collector.cpu_percent.get();
         assert!(cpu >= 0.0);
         assert!(cpu < 10000.0);
@@ -280,10 +282,10 @@ mod tests {
     fn test_memory_metrics_reasonable() {
         let collector = ProcessCollector::new();
         collector.collect_stats();
-        
+
         let rss_mb = collector.resident_memory_bytes.get() / 1024 / 1024;
         let vsz_mb = collector.virtual_memory_bytes.get() / 1024 / 1024;
-        
+
         assert!(rss_mb > 1);
         assert!(rss_mb < 10_000);
         assert!(vsz_mb > rss_mb);
@@ -295,7 +297,7 @@ mod tests {
     fn test_file_descriptors_linux() {
         let collector = ProcessCollector::new();
         collector.collect_stats();
-        
+
         let fd_count = collector.open_fds.get();
         assert!(fd_count >= 3);
         assert!(fd_count > 0);
@@ -304,11 +306,11 @@ mod tests {
     #[test]
     fn test_multiple_collections_stable() {
         let collector = ProcessCollector::new();
-        
+
         for _ in 0..5 {
             collector.collect_stats();
         }
-        
+
         assert!(collector.resident_memory_bytes.get() > 0);
         assert!(collector.cpu_percent.get() >= 0.0);
     }

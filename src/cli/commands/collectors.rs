@@ -6,12 +6,10 @@ pub fn add_collectors_args(mut cmd: Command) -> Command {
 
     for &name in COLLECTOR_NAMES {
         // Get the default enabled state from the collector
-        let default_enabled = if let Some(factory) = factories.get(name) {
+        let default_enabled = factories.get(name).is_some_and(|factory| {
             let collector = factory();
             collector.enabled_by_default()
-        } else {
-            false // Fallback
-        };
+        });
 
         // Create flag names
         let enable_flag: &'static str = Box::leak(format!("collector.{name}").into_boxed_str());

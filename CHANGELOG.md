@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2025-11-22
+
+### Fixed
+- **Grafana Dashboard TLS/SSL Group**
+  - Removed invalid database filter from TLS Version and Cipher queries
+  - Fixed SSL Status and Certificate Status panels to display values only
+  - Converted Certificate Expiry from gauge to stat panel
+  - Changed Certificate Validity Period unit for better readability
+  - Fixed TLS/SSL row structure with all 8 panels properly nested
+  - Resolved duplicate panel IDs across dashboard
+
+### Changed
+- Enhanced TLS panel descriptions with cipher recommendations and security context
+- Set TLS/SSL dashboard group to collapsed by default
+
+### Development
+- Added `test-tls` recipe to justfile for automated SSL-enabled PostgreSQL testing
+- Improved `just test` to auto-start PostgreSQL container if not running
+- Added idempotent deployment checks to prevent duplicate version bumps
+- Fixed bump recipes to commit both Cargo.toml and Cargo.lock
+
 ## [0.9.0] - 2025-11-21
 
 ### Added

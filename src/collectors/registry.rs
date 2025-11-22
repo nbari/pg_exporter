@@ -56,7 +56,7 @@ impl CollectorRegistry {
             .set(1.0); // Gauge is always set to 1.0
 
         registry
-            .register(Box::new(pg_exporter_build_info.clone()))
+            .register(Box::new(pg_exporter_build_info))
             .expect("Failed to register pg_exporter_build_info GaugeVec");
 
         info!(
@@ -235,7 +235,7 @@ impl CollectorRegistry {
     }
 
     #[must_use]
-    pub fn registry(&self) -> &Arc<Registry> {
+    pub const fn registry(&self) -> &Arc<Registry> {
         &self.registry
     }
 
@@ -245,7 +245,7 @@ impl CollectorRegistry {
     }
 
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.collectors.is_empty()
     }
 }

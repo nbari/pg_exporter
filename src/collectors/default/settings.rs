@@ -92,17 +92,19 @@ impl SettingsCollector {
             let setting: String = row.try_get("setting")?;
             let unit: Option<String> = row.try_get("unit").ok();
 
-            let mut value: i64 = match setting.parse::<i64>() {
-                Ok(v) => v,
-                Err(_) => match setting.as_str() {
+            let mut value: i64 = setting.parse::<i64>().map_or(
+                match setting.as_str() {
                     "on" => 1,
                     _ => 0,
                 },
-            };
+                |v| v,
+            );
 
             // Convert memory settings to bytes based on their units
-            if matches!(name.as_str(), "shared_buffers" | "maintenance_work_mem" | "work_mem" | "wal_buffers")
-                && let Some(ref u) = unit
+            if matches!(
+                name.as_str(),
+                "shared_buffers" | "maintenance_work_mem" | "work_mem" | "wal_buffers"
+            ) && let Some(ref u) = unit
             {
                 value *= match u.as_str() {
                     "8kB" => 8192,
@@ -133,25 +135,84 @@ impl Collector for SettingsCollector {
     )]
     fn register_metrics(&self, registry: &Registry) -> Result<()> {
         let metric_configs = vec![
-            ("autovacuum", "pg_settings_autovacuum", "PostgreSQL setting: autovacuum"),
-            ("autovacuum_max_workers", "pg_settings_autovacuum_max_workers", "PostgreSQL setting: autovacuum_max_workers"),
-            ("autovacuum_naptime", "pg_settings_autovacuum_naptime_seconds", "PostgreSQL setting: autovacuum_naptime in seconds"),
-            ("autovacuum_analyze_threshold", "pg_settings_autovacuum_analyze_threshold", "PostgreSQL setting: autovacuum_analyze_threshold"),
-            ("autovacuum_vacuum_threshold", "pg_settings_autovacuum_vacuum_threshold", "PostgreSQL setting: autovacuum_vacuum_threshold"),
-            ("checkpoint_timeout", "pg_settings_checkpoint_timeout_seconds", "PostgreSQL setting: checkpoint_timeout in seconds"),
+            (
+                "autovacuum",
+                "pg_settings_autovacuum",
+                "PostgreSQL setting: autovacuum",
+            ),
+            (
+                "autovacuum_max_workers",
+                "pg_settings_autovacuum_max_workers",
+                "PostgreSQL setting: autovacuum_max_workers",
+            ),
+            (
+                "autovacuum_naptime",
+                "pg_settings_autovacuum_naptime_seconds",
+                "PostgreSQL setting: autovacuum_naptime in seconds",
+            ),
+            (
+                "autovacuum_analyze_threshold",
+                "pg_settings_autovacuum_analyze_threshold",
+                "PostgreSQL setting: autovacuum_analyze_threshold",
+            ),
+            (
+                "autovacuum_vacuum_threshold",
+                "pg_settings_autovacuum_vacuum_threshold",
+                "PostgreSQL setting: autovacuum_vacuum_threshold",
+            ),
+            (
+                "checkpoint_timeout",
+                "pg_settings_checkpoint_timeout_seconds",
+                "PostgreSQL setting: checkpoint_timeout in seconds",
+            ),
             ("fsync", "pg_settings_fsync", "PostgreSQL setting: fsync"),
-            ("log_min_duration_statement", "pg_settings_log_min_duration_statement_milliseconds", "PostgreSQL setting: log_min_duration_statement in milliseconds"),
-            ("maintenance_work_mem", "pg_settings_maintenance_work_mem_bytes", "PostgreSQL setting: maintenance_work_mem in bytes"),
-            ("max_connections", "pg_settings_max_connections", "PostgreSQL setting: max_connections"),
-            ("max_locks_per_transaction", "pg_settings_max_locks_per_transaction", "PostgreSQL setting: max_locks_per_transaction"),
-            ("shared_buffers", "pg_settings_shared_buffers_bytes", "PostgreSQL setting: shared_buffers in bytes"),
-            ("synchronous_commit", "pg_settings_synchronous_commit", "PostgreSQL setting: synchronous_commit"),
-            ("wal_buffers", "pg_settings_wal_buffers_bytes", "PostgreSQL setting: wal_buffers in bytes"),
-            ("work_mem", "pg_settings_work_mem_bytes", "PostgreSQL setting: work_mem in bytes"),
+            (
+                "log_min_duration_statement",
+                "pg_settings_log_min_duration_statement_milliseconds",
+                "PostgreSQL setting: log_min_duration_statement in milliseconds",
+            ),
+            (
+                "maintenance_work_mem",
+                "pg_settings_maintenance_work_mem_bytes",
+                "PostgreSQL setting: maintenance_work_mem in bytes",
+            ),
+            (
+                "max_connections",
+                "pg_settings_max_connections",
+                "PostgreSQL setting: max_connections",
+            ),
+            (
+                "max_locks_per_transaction",
+                "pg_settings_max_locks_per_transaction",
+                "PostgreSQL setting: max_locks_per_transaction",
+            ),
+            (
+                "shared_buffers",
+                "pg_settings_shared_buffers_bytes",
+                "PostgreSQL setting: shared_buffers in bytes",
+            ),
+            (
+                "synchronous_commit",
+                "pg_settings_synchronous_commit",
+                "PostgreSQL setting: synchronous_commit",
+            ),
+            (
+                "wal_buffers",
+                "pg_settings_wal_buffers_bytes",
+                "PostgreSQL setting: wal_buffers in bytes",
+            ),
+            (
+                "work_mem",
+                "pg_settings_work_mem_bytes",
+                "PostgreSQL setting: work_mem in bytes",
+            ),
         ];
 
         {
-            let mut gauges = self.gauges.write().map_err(|e| anyhow::anyhow!("Failed to acquire write lock: {e}"))?;
+            let mut gauges = self
+                .gauges
+                .write()
+                .map_err(|e| anyhow::anyhow!("Failed to acquire write lock: {e}"))?;
 
             for (name, metric_name, help) in metric_configs {
                 let gauge = IntGauge::with_opts(Opts::new(metric_name, help))?;
@@ -174,7 +235,10 @@ impl Collector for SettingsCollector {
             let apply_span = info_span!("settings.apply_metrics", items = settings.len());
             let _g = apply_span.enter();
 
-            let gauges = self.gauges.read().map_err(|e| anyhow::anyhow!("Failed to acquire read lock: {e}"))?;
+            let gauges = self
+                .gauges
+                .read()
+                .map_err(|e| anyhow::anyhow!("Failed to acquire read lock: {e}"))?;
             for (name, value) in settings {
                 if let Some(gauge) = gauges.get(&name) {
                     gauge.set(value);
