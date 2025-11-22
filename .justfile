@@ -73,95 +73,85 @@ check-develop:
     fi
     echo "✅ On develop branch"
 
-# Check if tag already exists for current version
-check-tag-not-exists:
+# Check if tag already exists for a given version
+check-tag-not-exists version:
     #!/usr/bin/env bash
-    current_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+    set -euo pipefail
+    version="{{version}}"
 
-    # Fetch latest tags from remote
     git fetch --tags --quiet
 
-    if git rev-parse -q --verify "refs/tags/${current_version}" >/dev/null 2>&1; then
-        echo "❌ Tag ${current_version} already exists!"
-        echo "Current version in Cargo.toml is already tagged."
-        echo ""
-        echo "Options:"
-        echo "  1. If you want to create a new release, first bump the version manually:"
-        echo "     cargo set-version --bump patch  # or minor, or major"
-        echo "     git add Cargo.toml Cargo.lock"
-        echo "     git commit -m 'bump version to X.Y.Z'"
-        echo "     git push origin develop"
-        echo "  2. Or run: just deploy (which will bump automatically if no tag exists)"
+    if git rev-parse -q --verify "refs/tags/${version}" >/dev/null 2>&1; then
+        echo "❌ Tag ${version} already exists!"
         exit 1
     fi
 
-    echo "✅ No tag exists for version ${current_version}"
+    echo "✅ No tag exists for version ${version}"
+
+_bump bump_kind: check-develop check-clean clean update test
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    previous_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+    echo "ℹ️  Current version: ${previous_version}"
+
+    echo "🔧 Bumping ${bump_kind} version..."
+    cargo set-version --bump "{{bump_kind}}"
+    new_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+    echo "📝 New version: ${new_version}"
+
+    validate_bump() {
+        local previous=$1 bump=$2 current=$3
+        IFS=. read -r prev_major prev_minor prev_patch <<<"${previous}"
+        IFS=. read -r new_major new_minor new_patch <<<"${current}"
+
+        case "${bump}" in
+            patch)
+                (( new_major == prev_major && new_minor == prev_minor && new_patch == prev_patch + 1 )) || { echo "❌ Expected patch bump from ${previous}, got ${current}"; exit 1; }
+                ;;
+            minor)
+                (( new_major == prev_major && new_minor == prev_minor + 1 && new_patch == 0 )) || { echo "❌ Expected minor bump from ${previous}, got ${current}"; exit 1; }
+                ;;
+            major)
+                (( new_major == prev_major + 1 && new_minor == 0 && new_patch == 0 )) || { echo "❌ Expected major bump from ${previous}, got ${current}"; exit 1; }
+                ;;
+        esac
+    }
+
+    validate_bump "${previous_version}" "{{bump_kind}}" "${new_version}"
+
+    echo "🔍 Verifying tag does not exist for ${new_version}..."
+    git fetch --tags --quiet
+    if git rev-parse -q --verify "refs/tags/${new_version}" >/dev/null 2>&1; then
+        echo "❌ Tag ${new_version} already exists!"
+        exit 1
+    fi
+
+    echo "🔄 Updating dependencies..."
+    cargo update
+
+    echo "🧹 Running clean build..."
+    cargo clean
+
+    echo "🧪 Running tests with new version..."
+    cargo test
+
+    git add .
+    git commit -m "bump version to ${new_version}"
+    git push origin develop
+    echo "✅ Version bumped and pushed to develop"
 
 # Bump version and commit (patch level)
-bump: check-develop check-clean clean update test check-tag-not-exists
-    #!/usr/bin/env bash
-    echo "🔧 Bumping patch version..."
-    cargo set-version --bump patch
-    new_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
-    echo "📝 New version: $new_version"
-
-    echo "🔄 Updating dependencies..."
-    cargo update
-
-    echo "🧹 Running clean build..."
-    cargo clean
-
-    echo "🧪 Running tests with new version..."
-    cargo test
-
-    git add .
-    git commit -m "bump version to $new_version"
-    git push origin develop
-    echo "✅ Version bumped and pushed to develop"
+bump:
+    @just _bump patch
 
 # Bump minor version
-bump-minor: check-develop check-clean clean update test check-tag-not-exists
-    #!/usr/bin/env bash
-    echo "🔧 Bumping minor version..."
-    cargo set-version --bump minor
-    new_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
-    echo "📝 New version: $new_version"
-
-    echo "🔄 Updating dependencies..."
-    cargo update
-
-    echo "🧹 Running clean build..."
-    cargo clean
-
-    echo "🧪 Running tests with new version..."
-    cargo test
-
-    git add .
-    git commit -m "bump version to $new_version"
-    git push origin develop
-    echo "✅ Version bumped and pushed to develop"
+bump-minor:
+    @just _bump minor
 
 # Bump major version
-bump-major: check-develop check-clean clean update test check-tag-not-exists
-    #!/usr/bin/env bash
-    echo "🔧 Bumping major version..."
-    cargo set-version --bump major
-    new_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
-    echo "📝 New version: $new_version"
-
-    echo "🔄 Updating dependencies..."
-    cargo update
-
-    echo "🧹 Running clean build..."
-    cargo clean
-
-    echo "🧪 Running tests with new version..."
-    cargo test
-
-    git add .
-    git commit -m "bump version to $new_version"
-    git push origin develop
-    echo "✅ Version bumped and pushed to develop"
+bump-major:
+    @just _bump major
 
 # Internal function to handle the merge and tag process
 _deploy-merge-and-tag:
