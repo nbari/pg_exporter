@@ -18,6 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Updated `pg_exporter_metrics_total` description to clarify it tracks "Total active time series / cardinality (non-comment, non-empty lines)"
 - Enhanced exporter collector documentation with explicit cardinality counting behavior
+- **Container Image Improvements**
+  - Migrated from Alpine to distroless base image (gcr.io/distroless/static-debian12:nonroot)
+  - Reduced final image size from ~10MB to ~12.8MB while improving security posture
+  - Removed unnecessary runtime dependencies (postgresql-client)
+  - Added dynamic port support via `PG_EXPORTER_PORT` environment variable
+  - Documented all available environment variables in Containerfile
+  - Removed misleading default DSN (now requires explicit configuration)
+  - Runs as non-root user (UID 65532) by default
+  - Removed built-in HEALTHCHECK (use external health checks with orchestrators)
+  - Optimized layer caching for faster rebuilds
 
 ## [0.9.1] - 2025-11-22
 

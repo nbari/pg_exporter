@@ -40,38 +40,33 @@ RUN . /tmp/rust_target.env && \
     mkdir -p /build/output && \
     cp "/build/target/$RUST_TARGET/release/pg_exporter" /build/output/
 
-# Runtime stage
-FROM alpine:latest
-
-# Install runtime dependencies
-RUN apk add --no-cache \
-    ca-certificates \
-    postgresql-client
-
-# Create non-root user
-RUN addgroup -g 10001 exporter && \
-    adduser -D -u 10001 -G exporter exporter
-
-WORKDIR /app
+# Runtime stage - using distroless for minimal attack surface
+# Distroless images contain only your application and runtime dependencies
+# No shell, package manager, or other unnecessary tools
+FROM gcr.io/distroless/static-debian12:nonroot
 
 # Copy binary from builder
-COPY --from=builder /build/output/pg_exporter /usr/local/bin/pg_exporter
+COPY --from=builder --chmod=755 /build/output/pg_exporter /usr/local/bin/pg_exporter
 
-# Make binary executable
-RUN chmod +x /usr/local/bin/pg_exporter
+# Default environment variables
+# Note: Override PG_EXPORTER_DSN to point to your actual PostgreSQL instance
+ENV PG_EXPORTER_PORT="9432"
 
-# Switch to non-root user
-USER exporter
+# Optional TLS/SSL configuration (uncomment and set as needed):
+# ENV PG_EXPORTER_TLS_CERT="/app/certs/cert.pem"
+# ENV PG_EXPORTER_TLS_KEY="/app/certs/key.pem"
+# ENV PG_EXPORTER_LISTEN="0.0.0.0"
 
-# Default port
+# Optional: Exclude specific databases from monitoring
+# ENV PG_EXPORTER_EXCLUDE_DATABASES="template0,template1"
+
+# Default port (can be overridden with PG_EXPORTER_PORT)
 EXPOSE 9432
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:9432/health || exit 1
-
-# Default command - using TCP connection
-# Override with docker run -e PG_EXPORTER_DSN="postgresql://..."
-ENV PG_EXPORTER_DSN="postgresql://postgres:postgres@localhost:5432/postgres"
+# Note: No built-in HEALTHCHECK in distroless images (no shell/wget/curl)
+# Use external health checks instead:
+# - Kubernetes: livenessProbe/readinessProbe with httpGet on /health
+# - Docker Compose: healthcheck with wget/curl from host
+# - Prometheus: Scraping /metrics already monitors availability
 
 ENTRYPOINT ["/usr/local/bin/pg_exporter"]
