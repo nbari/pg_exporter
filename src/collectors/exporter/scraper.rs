@@ -36,7 +36,9 @@ use std::time::Instant;
 /// ## Global Metrics
 ///
 /// - `pg_exporter_metrics_total` (`IntGauge`)
-///   - **Total number of metrics currently exported**
+///   - **Total active time series / cardinality currently exported**
+///   - Matches: `curl -s 0:9432/metrics | grep -vEc '^(#|\s*$)'`
+///   - Counts non-comment, non-empty metric lines
 ///   - Critical for Cortex/Mimir operators with series limits
 ///   - Alert if approaching your cardinality limit
 ///   - Example: `pg_exporter_metrics_total > 10000`
@@ -206,7 +208,7 @@ impl ScraperCollector {
 
         let metrics_total = IntGauge::with_opts(Opts::new(
             "pg_exporter_metrics_total",
-            "Total number of metrics currently exported (for cardinality monitoring)",
+            "Total active time series / cardinality (non-comment, non-empty lines)",
         ))
         .expect("pg_exporter_metrics_total");
 

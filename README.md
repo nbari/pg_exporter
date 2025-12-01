@@ -25,6 +25,36 @@ Install via Cargo:
 
 Or download the latest release from the [releases page](https://github.com/nbari/pg_exporter/releases/latest).
 
+### Docker/Podman
+
+Container images are available at `ghcr.io/nbari/pg_exporter`:
+
+```bash
+# Using Docker
+docker run -d \
+  -e PG_EXPORTER_DSN="postgresql://postgres_exporter@postgres-host:5432/postgres" \
+  -p 9432:9432 \
+  ghcr.io/nbari/pg_exporter:latest
+
+# Using Podman
+podman run -d \
+  -e PG_EXPORTER_DSN="postgresql://postgres_exporter@postgres-host:5432/postgres" \
+  -p 9432:9432 \
+  ghcr.io/nbari/pg_exporter:latest
+```
+
+**Connecting to host PostgreSQL from container:**
+- Docker Desktop (Mac/Windows): use `host.docker.internal` instead of `localhost`
+- Podman: use `host.containers.internal` instead of `localhost`
+- Linux with `--network=host`: use `localhost` directly
+
+Example with host connection:
+```bash
+podman run -d \
+  -e PG_EXPORTER_DSN="postgresql://postgres_exporter@host.containers.internal:5432/postgres" \
+  -p 9432:9432 \
+  ghcr.io/nbari/pg_exporter:latest
+```
 
 ## Usage
 

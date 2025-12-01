@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.2] - 2025-12-01
+
+### Fixed
+- **Exporter Collector (`--collector.exporter`)**
+  - Fixed `pg_exporter_metrics_total` to accurately count active time series/cardinality
+  - Metric now matches `curl -s 0:9432/metrics | grep -vEc '^(#|\s*$)'`
+  - Previously counted MetricFamily objects instead of actual exported time series
+  - Improved UTF-8 handling with zero-copy optimization and lossy fallback for robustness
+  - Fixed overflow handling to return 0 instead of i64::MAX for safer alert behavior
+
+### Changed
+- Updated `pg_exporter_metrics_total` description to clarify it tracks "Total active time series / cardinality (non-comment, non-empty lines)"
+- Enhanced exporter collector documentation with explicit cardinality counting behavior
+
 ## [0.9.1] - 2025-11-22
 
 ### Fixed

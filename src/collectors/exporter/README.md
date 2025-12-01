@@ -53,7 +53,7 @@ Tracks scrape performance and health across all collectors.
 - `pg_exporter_collector_scrape_errors_total{collector}` - Error counter per collector
 - `pg_exporter_collector_last_scrape_timestamp_seconds{collector}` - Last scrape timestamp
 - `pg_exporter_collector_last_scrape_success{collector}` - Success indicator (1/0)
-- `pg_exporter_metrics_total` - ⭐ Total metrics exported (for cardinality monitoring)
+- `pg_exporter_metrics_total` - ⭐ Total active time series / cardinality (matches `curl -s 0:9432/metrics | grep -vEc '^(#|\s*$)'`)
 - `pg_exporter_scrapes_total` - Total scrapes performed
 
 **Implementation:**
