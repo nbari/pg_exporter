@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.4] - 2025-12-14
+
+### Added
+- **Local Metrics Stack Helpers**
+  - Added `just metrics` and `just restart-metrics` recipes to spin up Prometheus + Grafana with the bundled dashboard and persistent Prometheus volume.
+  - Auto-builds/rebuilds the Grafana stack image when `grafana/dashboard.json` changes and exposes Grafana (3000) and Prometheus (9090) for quick local testing against the exporter on port 9432.
+
+### Changed
+- **Dependencies**
+  - Ran `cargo update` to pull in the latest compatible dependency patch releases.
+
 ## [0.9.3] - 2025-12-01
 
 ### Changed

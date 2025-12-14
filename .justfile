@@ -278,8 +278,6 @@ postgres version="latest":
     -v $(pwd)/db/config/postgres:/etc/postgresql/config \
     --userns keep-id:uid={{ uid }},gid={{ gid }} \
     --user {{ uid }}:{{ gid }} \
-    --userns keep-id:uid=999,gid=999 \
-    --user 999:999 \
     postgres:{{ version }} \
     postgres -c config_file=/etc/postgresql/config/postgresql.conf
 
@@ -412,3 +410,89 @@ validate-dashboard:
 # Run all validations (tests + dashboard)
 validate-all: test validate-dashboard
   @echo "✅ All validations passed!"
+
+# Run local Prometheus + Grafana stack against exporter (podman)
+metrics target="host.containers.internal:9432" image="pg-exporter-metrics-stack" name="metrics-stack" prom_volume="prom_data":
+  # Build the stack image if it's missing so `just metrics` works without a manual build step
+  if ! podman image exists "{{image}}"; then \
+    podman build -t "{{image}}" grafana; \
+  fi
+  # Replace any existing container with the same name to avoid conflicts
+  podman rm -f {{name}} 2>/dev/null || true
+  # Ensure a persistent volume for Prometheus data
+  if ! podman volume exists "{{prom_volume}}"; then \
+    podman volume create "{{prom_volume}}"; \
+  fi
+  podman run -d \
+    --name {{name}} \
+    --add-host=host.containers.internal:host-gateway \
+    -e EXPORTER_TARGET={{target}} \
+    -e GF_AUTH_ANONYMOUS_ENABLED=true \
+    -e GF_AUTH_ANONYMOUS_ORG_ROLE=Admin \
+    -e GF_SECURITY_DISABLE_LOGIN_FORM=true \
+    -p 3000:3000 -p 9090:9090 \
+    -v {{prom_volume}}:/var/lib/prometheus \
+    {{image}}
+
+restart-metrics target="host.containers.internal:9432" image="pg-exporter-metrics-stack" name="metrics-stack" prom_volume="prom_data":
+  #!/usr/bin/env bash
+  set -euo pipefail
+
+  echo "🛑 Stopping existing metrics-stack container..."
+  podman rm -f {{name}} 2>/dev/null || true
+
+  echo "🔍 Checking if dashboard.json changed..."
+  REBUILD=0
+
+  # Check if image exists
+  if ! podman image exists "{{image}}"; then
+    echo "📦 Image doesn't exist, will build..."
+    REBUILD=1
+  else
+    # Get image creation time
+    IMAGE_TIME=$(podman inspect {{image}} --format='{{{{.Created}}}}' 2>/dev/null || echo "")
+
+    if [ -n "$IMAGE_TIME" ]; then
+      # Convert image time to epoch (works with ISO 8601 format)
+      IMAGE_EPOCH=$(date -d "$IMAGE_TIME" +%s 2>/dev/null || echo "0")
+
+      # Get dashboard.json modification time
+      DASHBOARD_EPOCH=$(stat -c %Y grafana/dashboard.json 2>/dev/null || echo "0")
+
+      if [ "$DASHBOARD_EPOCH" -gt "$IMAGE_EPOCH" ]; then
+        echo "📊 Dashboard changed ($(date -d @$DASHBOARD_EPOCH '+%Y-%m-%d %H:%M:%S') > $(date -d @$IMAGE_EPOCH '+%Y-%m-%d %H:%M:%S')), rebuilding image..."
+        REBUILD=1
+      else
+        echo "✅ Dashboard unchanged, reusing existing image"
+      fi
+    else
+      echo "⚠️  Could not get image time, rebuilding to be safe..."
+      REBUILD=1
+    fi
+  fi
+
+  if [ "$REBUILD" -eq 1 ]; then
+    echo "🔨 Building Grafana stack image..."
+    podman build -t "{{image}}" grafana
+  fi
+
+  if ! podman volume exists "{{prom_volume}}"; then
+    echo "📦 Creating Prometheus volume..."
+    podman volume create "{{prom_volume}}"
+  fi
+
+  echo "🚀 Starting metrics-stack container..."
+  podman run -d \
+    --name {{name}} \
+    --add-host=host.containers.internal:host-gateway \
+    -e EXPORTER_TARGET={{target}} \
+    -e GF_AUTH_ANONYMOUS_ENABLED=true \
+    -e GF_AUTH_ANONYMOUS_ORG_ROLE=Admin \
+    -e GF_SECURITY_DISABLE_LOGIN_FORM=true \
+    -p 3000:3000 -p 9090:9090 \
+    -v {{prom_volume}}:/var/lib/prometheus \
+    {{image}}
+
+  echo "✅ Metrics stack restarted!"
+  echo "🌐 Grafana: http://localhost:3000"
+  echo "📊 Prometheus: http://localhost:9090"

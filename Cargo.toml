@@ -54,7 +54,7 @@ serde_json = "1.0"
 sqlx = { version = "0.8.6", features = ["ipnetwork", "postgres", "runtime-tokio", "tls-rustls", "uuid"] }
 tokio = { version = "1.47.1", features = ["full"] }
 tower = "0.5.2"
-tower-http = { version = "0.6.6", features = ["request-id", "set-header", "trace"] }
+tower-http = { version = "0.6.8", features = ["request-id", "set-header", "trace"] }
 tracing = "0.1.41"
 tracing-opentelemetry = "0.32.0"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
