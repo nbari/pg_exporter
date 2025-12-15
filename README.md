@@ -93,6 +93,25 @@ You can also specify a custom port, for example `9187`:
     pg_exporter --dsn postgresql://postgres_exporter@localhost:5432/postgres --port 9187
 
 
+## Environment Variables
+
+`pg_exporter` supports standard PostgreSQL environment variables for connection configuration. This is useful when you want to avoid putting sensitive information like passwords in the DSN or command line arguments.
+
+Supported variables include:
+* `PGHOST`
+* `PGPORT`
+* `PGUSER`
+* `PGPASSWORD`
+* `PGDATABASE`
+
+Example usage with `PGPASSWORD`:
+
+    PGPASSWORD=secret pg_exporter --dsn postgresql://postgres@localhost:5432/postgres
+
+You can also omit parts of the DSN and rely on environment variables:
+
+    PGUSER=postgres PGPASSWORD=secret pg_exporter --dsn postgresql://localhost:5432/postgres
+
 ## Available collectors
 
 The following collectors are available:
