@@ -236,6 +236,7 @@ impl ScraperCollector {
             collector_name: collector_name.to_string(),
             start: Instant::now(),
             scraper: self.clone(),
+            recorded: false,
         }
     }
 
@@ -351,25 +352,31 @@ pub struct ScrapeTimer {
     collector_name: String,
     start: Instant,
     scraper: ScraperCollector,
+    recorded: bool,
 }
 
 impl ScrapeTimer {
     /// Mark scrape as successful
     /// Call this before timer drops if scrape succeeded
-    pub fn success(self) {
+    pub fn success(mut self) {
+        self.recorded = true;
         let duration = self.start.elapsed().as_secs_f64();
         self.scraper.record_success(&self.collector_name, duration);
     }
 
     /// Mark scrape as failed
     /// Call this before timer drops if scrape failed
-    pub fn error(self) {
+    pub fn error(mut self) {
+        self.recorded = true;
         self.scraper.record_error(&self.collector_name);
     }
 }
 
 impl Drop for ScrapeTimer {
     fn drop(&mut self) {
+        if self.recorded {
+            return;
+        }
         // If neither success() nor error() was called explicitly,
         // default to success (optimistic)
         let duration = self.start.elapsed().as_secs_f64();
@@ -420,7 +427,12 @@ mod tests {
             .find(|m| m.name() == "pg_exporter_collector_scrape_duration_seconds")
             .expect("duration metric should exist");
 
-        assert!(!duration_metric.get_metric().is_empty());
+        let metric = duration_metric.get_metric().first().expect("metric should have at least one sample");
+        assert_eq!(
+            metric.get_histogram().get_sample_count(),
+            1,
+            "Should record exactly one sample"
+        );
     }
 
     #[test]
@@ -443,7 +455,24 @@ mod tests {
             .find(|m| m.name() == "pg_exporter_collector_scrape_errors_total")
             .expect("error metric should exist");
 
-        assert!(!error_metric.get_metric().is_empty());
+        let metric = error_metric.get_metric().first().expect("metric should have at least one sample");
+        assert!((metric.get_counter().value() - 1.0).abs() < f64::EPSILON, "Should record exactly one error");
+
+        // Verify NO success duration was recorded (bug fix check)
+        let duration_metric = metrics
+            .iter()
+            .find(|m| m.name() == "pg_exporter_collector_scrape_duration_seconds");
+
+        if let Some(m) = duration_metric {
+            let metrics = m.get_metric();
+            if !metrics.is_empty() {
+                assert_eq!(
+                    metrics.first().expect("metric should have at least one sample").get_histogram().get_sample_count(),
+                    0,
+                    "Should not record duration on error"
+                );
+            }
+        }
     }
 
     #[test]

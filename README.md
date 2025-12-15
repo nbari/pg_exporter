@@ -66,6 +66,27 @@ Run the exporter and use the socket directory:
 
     local  all  postgres_exporter  trust
 
+### Security Best Practices
+
+Instead of using `trust` authentication (which allows connection without password), it is recommended to use `peer` authentication for local connections. This requires creating a system user named `postgres_exporter`.
+
+1. Create the system user:
+   ```bash
+   sudo useradd -r -d /nonexistent -s /usr/bin/nologin postgres_exporter
+   ```
+
+2. Configure `pg_hba.conf` to use `peer` authentication:
+   ```
+   local  all  postgres_exporter  peer
+   ```
+
+3. Run the exporter as the `postgres_exporter` user:
+   ```bash
+   sudo -u postgres_exporter pg_exporter --dsn postgresql:///postgres?user=postgres_exporter
+   ```
+
+This ensures that only the system user `postgres_exporter` can connect to the database as the `postgres_exporter` role, significantly improving security.
+
 
 You can also specify a custom port, for example `9187`:
 

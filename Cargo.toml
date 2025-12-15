@@ -74,6 +74,8 @@ x509-parser = "0.18"
 [package.metadata.generate-rpm]
 assets = [
     { source = "target/release/pg_exporter", dest = "/usr/local/bin/pg_exporter", mode = "0755" },
+    { source = "contrib/systemd/pg_exporter.service", dest = "/etc/systemd/system/pg_exporter.service", mode = "0644" },
+    { source = "contrib/systemd/pg_exporter.env.example", dest = "/etc/pg_exporter/pg_exporter.env", mode = "0640" },
 ]
 
 [package.metadata.deb]
