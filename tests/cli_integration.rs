@@ -324,3 +324,45 @@ async fn test_binary_exposes_health_endpoint() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_binary_uses_dsn_file() -> Result<()> {
+    use std::io::Write;
+
+    let port = common::get_available_port();
+    let dsn = common::get_test_dsn();
+
+    // Create temporary file with DSN
+    let mut temp_file = tempfile::NamedTempFile::new()?;
+    writeln!(temp_file, "{dsn}")?;
+    temp_file.flush()?;
+
+    // Start binary with PG_EXPORTER_DSN_FILE
+    let child = Command::new(get_binary_path())
+        .env("PG_EXPORTER_DSN_FILE", temp_file.path())
+        .args(["--port", &port.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+
+    let _guard = ChildGuard(child);
+
+    // Wait for server to start with retries
+    let mut attempts = 0;
+    let max_attempts = 20; // 2 seconds total
+    loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        match http_get(port, "/health").await {
+            Ok(body) => {
+                assert!(!body.is_empty(), "Health endpoint should return content");
+                break;
+            }
+            Err(_) if attempts < max_attempts => {
+                attempts += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    Ok(())
+}

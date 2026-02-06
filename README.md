@@ -112,6 +112,34 @@ You can also omit parts of the DSN and rely on environment variables:
 
     PGUSER=postgres PGPASSWORD=secret pg_exporter --dsn postgresql://localhost:5432/postgres
 
+### Docker Secrets Support
+
+For Docker Swarm or Kubernetes environments, you can use `PG_EXPORTER_DSN_FILE` to read the DSN from a file (e.g., Docker secrets):
+
+```yaml
+# docker-compose.yml for Docker Swarm
+services:
+  pg_exporter:
+    image: ghcr.io/nbari/pg_exporter:latest
+    environment:
+      PG_EXPORTER_DSN_FILE: /run/secrets/pg_dsn
+    secrets:
+      - pg_dsn
+    ports:
+      - "9432:9432"
+
+secrets:
+  pg_dsn:
+    external: true
+```
+
+Create the secret:
+```bash
+echo "postgresql://postgres_exporter:password@postgres:5432/postgres" | docker secret create pg_dsn -
+```
+
+Priority order: `PG_EXPORTER_DSN_FILE` > `PG_EXPORTER_DSN` > `--dsn` flag > default value
+
 ## Available collectors
 
 The following collectors are available:
