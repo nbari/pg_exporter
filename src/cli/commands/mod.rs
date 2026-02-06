@@ -73,11 +73,15 @@ pub fn new() -> Command {
                      - Require SSL: postgresql://user@host/db?sslmode=require\n\
                      - Verify CA: postgresql://user@host/db?sslmode=verify-ca\n\
                      - Verify full: postgresql://user@host/db?sslmode=verify-full\n\n\
+                     Docker Secrets:\n\
+                     - Use PG_EXPORTER_DSN_FILE to read DSN from a file (e.g., /run/secrets/pg_dsn)\n\
+                     - Priority: PG_EXPORTER_DSN_FILE > PG_EXPORTER_DSN > --dsn flag > default\n\n\
                      Examples:\n\
                        --dsn postgresql://postgres@localhost:5432/postgres\n\
                        --dsn postgresql://monitor:pass@db.example.com/postgres?sslmode=require\n\
                        --dsn 'postgresql:///postgres?user=postgres_exporter'\n\
-                       --dsn 'postgresql:///postgres?host=/var/run/postgresql&user=exporter'\n\n\
+                       --dsn 'postgresql:///postgres?host=/var/run/postgresql&user=exporter'\n\
+                       PG_EXPORTER_DSN_FILE=/run/secrets/pg_dsn\n\n\
                      SSL modes: disable, allow, prefer, require, verify-ca, verify-full\n\
                      See: https://www.postgresql.org/docs/current/libpq-connect.html"
                 )
