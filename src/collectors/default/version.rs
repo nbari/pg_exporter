@@ -223,6 +223,10 @@ impl Collector for VersionCollector {
             // Server label lookup
             let server_label = self.get_server_info(pool).await?;
 
+            // Reset metrics to clear any stale label combinations (e.g., after version upgrade)
+            self.pg_version_info.reset();
+            self.pg_settings_server_version_num.reset();
+
             // Set metrics (synchronous)
             self.pg_version_info
                 .with_label_values(&[&full_version, &short_version])

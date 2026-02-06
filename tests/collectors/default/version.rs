@@ -163,3 +163,49 @@ async fn test_version_collector_handles_different_version_formats() -> Result<()
     pool.close().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn test_version_collector_no_duplicate_versions() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+
+    let collector = VersionCollector::new();
+    let registry = Registry::new();
+
+    collector.register_metrics(&registry)?;
+
+    // Simulate multiple collections (as would happen during version upgrade)
+    collector.collect(&pool).await?;
+    collector.collect(&pool).await?;
+    collector.collect(&pool).await?;
+
+    let metric_families = registry.gather();
+
+    // Check pg_version_info - should have exactly ONE metric (not duplicates)
+    let version_info = metric_families
+        .iter()
+        .find(|m| m.name() == "pg_version_info")
+        .expect("pg_version_info metric should exist");
+
+    assert_eq!(
+        version_info.get_metric().len(),
+        1,
+        "Should have exactly one pg_version_info metric, found {}",
+        version_info.get_metric().len()
+    );
+
+    // Check pg_settings_server_version_num - should have exactly ONE metric
+    let version_num = metric_families
+        .iter()
+        .find(|m| m.name() == "pg_settings_server_version_num")
+        .expect("pg_settings_server_version_num metric should exist");
+
+    assert_eq!(
+        version_num.get_metric().len(),
+        1,
+        "Should have exactly one pg_settings_server_version_num metric, found {}",
+        version_num.get_metric().len()
+    );
+
+    pool.close().await;
+    Ok(())
+}
