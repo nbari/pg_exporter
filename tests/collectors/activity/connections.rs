@@ -259,3 +259,27 @@ async fn test_connections_collector_metrics_are_non_negative() -> Result<()> {
     pool.close().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn test_connections_collector_handles_query_error() -> Result<()> {
+    use sqlx::postgres::PgPoolOptions;
+    use std::time::Duration;
+
+    let collector = ConnectionsCollector::new();
+    let registry = Registry::new();
+    collector.register_metrics(&registry)?;
+
+    // Use a pool that will definitely fail (invalid port)
+    // We use connect_lazy so the pool creation succeeds, but the first query will fail
+    let pool = PgPoolOptions::new()
+        .acquire_timeout(Duration::from_millis(100))
+        .connect_lazy("postgresql://postgres:postgres@localhost:54321/postgres")
+        .expect("failed to create lazy pool");
+
+    // Collect should fail when it tries to execute queries
+    let result = collector.collect(&pool).await;
+
+    assert!(result.is_err(), "Should return error when query fails");
+
+    Ok(())
+}

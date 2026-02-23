@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Startup Hangs**: Implemented lazy connection pooling and startup timeouts to ensure the HTTP server binds and starts regardless of database state.
 - **Collection Timeouts**: Added a 5-second acquisition timeout to prevent long-running scrapes when the database is unresponsive.
+- **Connections Collector**: Fixed a bug where `pg_stat_activity_max_connections` (and derived utilization metrics) would default to 100 if the query failed, leading to misleading data. Errors are now propagated correctly.
 
 ### Changed
 - **Dependencies**: Updated all dependencies to their latest compatible versions.
