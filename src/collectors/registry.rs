@@ -1,7 +1,9 @@
 use crate::{
     collectors::{
-        Collector, CollectorType, all_factories, config::CollectorConfig,
+        Collector, CollectorType, all_factories,
+        config::CollectorConfig,
         exporter::ScraperCollector,
+        util::{get_pg_version, set_pg_version},
     },
     exporter::GIT_COMMIT_HASH,
 };
@@ -131,6 +133,22 @@ impl CollectorRegistry {
         {
             Ok(_) => {
                 self.pg_up_gauge.set(1.0);
+
+                // Deferred version initialization: if not set yet, try now.
+                if get_pg_version() == 0 {
+                    let version_num_res: Result<String, sqlx::Error> =
+                        sqlx::query_scalar("SHOW server_version_num")
+                            .fetch_one(pool)
+                            .await;
+
+                    if let Ok(version_num) = version_num_res
+                        && let Ok(version) = version_num.parse::<i32>()
+                    {
+                        set_pg_version(version);
+                        info!(version, "Deferred PostgreSQL version detection successful");
+                    }
+                }
+
                 true
             }
 
@@ -298,5 +316,89 @@ mod tests {
         // Even though "exporter" collector ran and succeeded (returned Ok(())),
         // pg_up MUST stay at 0.0 because the connectivity check failed.
         assert!((registry.pg_up_gauge.get() - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn test_scrape_count_increments() {
+        let config = CollectorConfig::new().with_enabled(&["exporter".to_string()]);
+        let registry = CollectorRegistry::new(&config);
+
+        let pool = PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(100))
+            .connect_lazy("postgresql://localhost:54321/postgres")
+            .expect("failed to connect lazy to invalid DB");
+
+        // Initial count should be 0 (gauge is initialized at 0)
+        assert_eq!(
+            registry
+                .scraper
+                .as_ref()
+                .expect("scraper missing")
+                .scrapes_total(),
+            0
+        );
+
+        let _ = registry.collect_all(&pool).await;
+        assert_eq!(
+            registry
+                .scraper
+                .as_ref()
+                .expect("scraper missing")
+                .scrapes_total(),
+            1
+        );
+
+        let _ = registry.collect_all(&pool).await;
+        assert_eq!(
+            registry
+                .scraper
+                .as_ref()
+                .expect("scraper missing")
+                .scrapes_total(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn test_outage_filtering() {
+        // Enabled both exporter (DB-independent) and database (DB-dependent)
+        let config =
+            CollectorConfig::new().with_enabled(&["exporter".to_string(), "database".to_string()]);
+        let registry = CollectorRegistry::new(&config);
+
+        // Use a pool that will definitely fail
+        let pool = PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(100))
+            .connect_lazy("postgresql://localhost:54321/postgres")
+            .expect("failed to connect lazy to invalid DB");
+
+        let _ = registry.collect_all(&pool).await;
+
+        // Check registry content
+        let metrics = registry.registry.gather();
+        let metric_names: Vec<_> = metrics
+            .iter()
+            .map(prometheus::proto::MetricFamily::name)
+            .collect();
+
+        // pg_up should be present
+        assert!(metric_names.contains(&"pg_up"));
+
+        // exporter metrics should be present
+        assert!(metric_names.contains(&"pg_exporter_scrapes_total"));
+
+        // pg_database_size_bytes (from database collector) is a GaugeVec
+        // It is registered, but should have NO samples because collection was skipped
+        let db_size = metrics
+            .iter()
+            .find(|m| m.name() == "pg_database_size_bytes");
+        if let Some(m) = db_size {
+            assert!(
+                m.get_metric().is_empty(),
+                "DB-dependent metric should have no samples during outage"
+            );
+        }
     }
 }

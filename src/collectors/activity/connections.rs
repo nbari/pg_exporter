@@ -223,6 +223,21 @@ impl Collector for ConnectionsCollector {
     )]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            // 0) Reset all metrics to clear stale data (e.g. dropped databases, inactive applications)
+            self.count_by_state.reset();
+            self.active_connections.reset();
+            self.idle_connections.reset();
+            self.waiting_connections.reset();
+            self.blocked_connections.reset();
+            self.idle_in_transaction.reset();
+            self.idle_in_transaction_aborted.reset();
+            self.connections_by_application.reset();
+            self.idle_age_1m.reset();
+            self.idle_age_5m.reset();
+            self.idle_age_15m.reset();
+            self.idle_age_1h.reset();
+            self.idle_age_old.reset();
+
             // Build exclusion list from global OnceCell (set at startup via Clap/env).
             let excluded: Vec<String> = get_excluded_databases().to_vec();
 

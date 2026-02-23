@@ -75,6 +75,10 @@ impl Collector for DatabaseSubCollector {
     )]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            // 0) Reset all metrics to clear stale data (e.g. dropped databases)
+            self.size_bytes.reset();
+            self.connection_limit.reset();
+
             // Build exclusion list from global OnceCell (set at startup via Clap/env).
             let excluded_list: Vec<String> = get_excluded_databases().to_vec();
 

@@ -1,4 +1,4 @@
-use crate::collectors::{Collector, i64_to_f64};
+use crate::collectors::{Collector, i64_to_f64, util::{PG_CATALOG, INFORMATION_SCHEMA}};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{Gauge, Opts, Registry};
@@ -109,7 +109,8 @@ impl Collector for UnusedIndexCollector {
         Box::pin(async move {
             // Query for unused indexes (idx_scan = 0)
             // Exclude primary keys and unique constraints as they may not be scanned but are still critical
-            let unused_query = r"
+            let unused_query = format!(
+                r"
                 SELECT 
                     COUNT(*)::BIGINT as unused_count,
                     COALESCE(SUM(pg_relation_size(s.indexrelid)), 0)::BIGINT as unused_size_bytes
@@ -118,22 +119,25 @@ impl Collector for UnusedIndexCollector {
                 WHERE s.idx_scan = 0
                     AND NOT i.indisprimary
                     AND NOT i.indisunique
-                    AND s.schemaname NOT IN ('pg_catalog', 'information_schema')
-            ";
+                    AND s.schemaname NOT IN ('{PG_CATALOG}', '{INFORMATION_SCHEMA}')
+                "
+            );
 
-            let unused: UnusedStats = sqlx::query_as(unused_query).fetch_one(pool).await?;
+            let unused: UnusedStats = sqlx::query_as(&unused_query).fetch_one(pool).await?;
 
             // Query for invalid indexes
-            let invalid_query = r"
+            let invalid_query = format!(
+                r"
                 SELECT COUNT(*)::BIGINT as invalid_count
                 FROM pg_index i
                 JOIN pg_class c ON i.indexrelid = c.oid
                 JOIN pg_namespace n ON c.relnamespace = n.oid
                 WHERE NOT i.indisvalid
-                    AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-            ";
+                    AND n.nspname NOT IN ('{PG_CATALOG}', '{INFORMATION_SCHEMA}')
+                "
+            );
 
-            let invalid: InvalidStats = sqlx::query_as(invalid_query).fetch_one(pool).await?;
+            let invalid: InvalidStats = sqlx::query_as(&invalid_query).fetch_one(pool).await?;
 
             // Update metrics
             self.unused_count.set(i64_to_f64(unused.unused_count));

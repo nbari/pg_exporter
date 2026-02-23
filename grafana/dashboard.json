@@ -3855,7 +3855,115 @@
       ],
       "title": "Replication & WAL (requires --collector.replication)",
       "type": "row",
-      "description": "Replication lag and WAL generation. Monitor replica health and streaming replication status."
+      "description": "Replication lag and WAL generation. Monitor replica health and streaming replication status.",
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Replication lag in seconds. \n\nVALUES:\n- 0: Caught up\n- >0: Delay behind primary\n- -1: Server is PRIMARY (not a replica)",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [
+                {
+                  "options": {
+                    "-1": {
+                      "color": "blue",
+                      "index": 0,
+                      "text": "PRIMARY"
+                    }
+                  },
+                  "type": "value"
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 30
+                  },
+                  {
+                    "color": "red",
+                    "value": 60
+                  }
+                ]
+              },
+              "unit": "s"
+            }
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 106
+          },
+          "id": 130,
+          "options": {
+            "legend": {
+              "calcs": ["last"],
+              "displayMode": "table",
+              "placement": "right"
+            }
+          },
+          "targets": [
+            {
+              "expr": "pg_replication_lag_seconds{job=\"$job\", instance=\"$instance\"}",
+              "legendFormat": "Lag: {{instance}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Replication Lag",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Indicates if the server is a replica (1) or primary (0).",
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [
+                {
+                  "options": {
+                    "0": { "color": "blue", "text": "PRIMARY" },
+                    "1": { "color": "green", "text": "REPLICA" }
+                  },
+                  "type": "value"
+                }
+              ]
+            }
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 106
+          },
+          "id": 131,
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"], "values": false },
+            "textMode": "value"
+          },
+          "targets": [
+            {
+              "expr": "pg_replication_is_replica{job=\"$job\", instance=\"$instance\"}",
+              "refId": "A"
+            }
+          ],
+          "title": "Server Role",
+          "type": "stat"
+        }
+      ]
     },
     {
       "collapsed": true,

@@ -26,6 +26,17 @@ static POOLS: OnceCell<RwLock<HashMap<String, PgPool>>> = OnceCell::new();
 /// `PostgreSQL` version number (e.g., `140_000` for v14.0, `170_000` for v17.0).
 static PG_VERSION: OnceCell<i32> = OnceCell::new();
 
+/// Common constants for `PostgreSQL` system schemas
+pub const PG_CATALOG: &str = "pg_catalog";
+pub const INFORMATION_SCHEMA: &str = "information_schema";
+
+/// Common constants for `PostgreSQL` template databases
+pub const TEMPLATE0: &str = "template0";
+pub const TEMPLATE1: &str = "template1";
+
+/// Time conversion factors
+pub const MS_TO_SEC: f64 = 1000.0;
+
 /// Set the excluded databases from CLI/env. Call this once during startup.
 pub fn set_excluded_databases(list: Vec<String>) {
     let mut cleaned: Vec<String> = list
@@ -167,13 +178,13 @@ mod tests {
     fn test_set_and_get_exclusions() {
         set_excluded_databases(vec![
             "postgres".into(),
-            "template0".into(),
-            "template0".into(), // duplicate
-            " ".into(),         // empty after trim
+            TEMPLATE0.into(),
+            TEMPLATE0.into(), // duplicate
+            " ".into(),       // empty after trim
         ]);
 
         let got = get_excluded_databases();
-        assert_eq!(got, &["postgres".to_string(), "template0".to_string()]);
+        assert_eq!(got, &["postgres".to_string(), TEMPLATE0.to_string()]);
         assert!(is_database_excluded("postgres"));
         assert!(!is_database_excluded("not_there"));
     }

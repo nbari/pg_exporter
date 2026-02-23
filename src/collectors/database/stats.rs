@@ -1,4 +1,7 @@
-use crate::collectors::{Collector, i64_to_f64, util::get_excluded_databases};
+use crate::collectors::{
+    Collector, i64_to_f64,
+    util::{MS_TO_SEC, get_excluded_databases},
+};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, Opts, Registry};
@@ -300,6 +303,27 @@ impl Collector for DatabaseStatCollector {
     )]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            // 0) Reset all metrics to clear stale data (e.g. dropped databases)
+            self.numbackends.reset();
+            self.xact_commit.reset();
+            self.xact_rollback.reset();
+            self.blks_read.reset();
+            self.blks_hit.reset();
+            self.tup_returned.reset();
+            self.tup_fetched.reset();
+            self.tup_inserted.reset();
+            self.tup_updated.reset();
+            self.tup_deleted.reset();
+            self.conflicts.reset();
+            self.temp_files.reset();
+            self.temp_bytes.reset();
+            self.deadlocks.reset();
+            self.blk_read_time.reset();
+            self.blk_write_time.reset();
+            self.stats_reset.reset();
+            self.active_time_seconds_total.reset();
+            self.blks_hit_ratio.reset();
+
             // Version check for active_time (PG >= 14)
             let vrow = sqlx::query(r"SELECT current_setting('server_version_num')::int AS v")
                 .fetch_one(pool)
@@ -308,30 +332,33 @@ impl Collector for DatabaseStatCollector {
             let has_active_time = version_num >= 140_000;
 
             // Columns per postgres_exporter
-            let mut cols = vec![
-                "datid::text AS datid",
-                "datname",
-                "numbackends::bigint AS numbackends",
-                "xact_commit::bigint AS xact_commit",
-                "xact_rollback::bigint AS xact_rollback",
-                "blks_read::bigint AS blks_read",
-                "blks_hit::bigint AS blks_hit",
-                "tup_returned::bigint AS tup_returned",
-                "tup_fetched::bigint AS tup_fetched",
-                "tup_inserted::bigint AS tup_inserted",
-                "tup_updated::bigint AS tup_updated",
-                "tup_deleted::bigint AS tup_deleted",
-                "conflicts::bigint AS conflicts",
-                "temp_files::bigint AS temp_files",
-                "temp_bytes::bigint AS temp_bytes",
-                "deadlocks::bigint AS deadlocks",
-                "blk_read_time::double precision AS blk_read_time",
-                "blk_write_time::double precision AS blk_write_time",
-                "EXTRACT(EPOCH FROM stats_reset)::double precision AS stats_reset_epoch",
+            let mut cols: Vec<String> = vec![
+                "datid::text AS datid".to_string(),
+                "datname".to_string(),
+                "numbackends::bigint AS numbackends".to_string(),
+                "xact_commit::bigint AS xact_commit".to_string(),
+                "xact_rollback::bigint AS xact_rollback".to_string(),
+                "blks_read::bigint AS blks_read".to_string(),
+                "blks_hit::bigint AS blks_hit".to_string(),
+                "tup_returned::bigint AS tup_returned".to_string(),
+                "tup_fetched::bigint AS tup_fetched".to_string(),
+                "tup_inserted::bigint AS tup_inserted".to_string(),
+                "tup_updated::bigint AS tup_updated".to_string(),
+                "tup_deleted::bigint AS tup_deleted".to_string(),
+                "conflicts::bigint AS conflicts".to_string(),
+                "temp_files::bigint AS temp_files".to_string(),
+                "temp_bytes::bigint AS temp_bytes".to_string(),
+                "deadlocks::bigint AS deadlocks".to_string(),
+                "blk_read_time::double precision AS blk_read_time".to_string(),
+                "blk_write_time::double precision AS blk_write_time".to_string(),
+                "EXTRACT(EPOCH FROM stats_reset)::double precision AS stats_reset_epoch"
+                    .to_string(),
             ];
             if has_active_time {
                 // Convert ms to seconds to match *_seconds_total naming in Go
-                cols.push("(active_time / 1000.0)::double precision AS active_time_seconds");
+                cols.push(format!(
+                    "(active_time / {MS_TO_SEC})::double precision AS active_time_seconds"
+                ));
             }
 
             // Apply exclusions server-side. If the list is empty, this is a no-op.

@@ -5,13 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.9.8] - 2026-02-23
+## [0.10.0] - 2026-02-23
 
 ### Added
 - **Database Outage Resilience**: The exporter now starts and stays available even if PostgreSQL is unreachable.
 - **Scrape Behavior**: The `/metrics` endpoint now always returns HTTP 200 during database outages to prevent unnecessary exporter-down alerts.
 - **`pg_up` Reporting**: Improved `pg_up` metric to accurately reflect database connectivity. It is now driven by a dedicated connectivity check and is no longer overwritten by other collectors.
 - **Metric Omission**: Database-dependent metrics are now omitted from the output when the database is unreachable, rather than reporting stale or zero values.
+- **Deferred Version Initialization**: If the PostgreSQL version cannot be detected at startup, it is automatically retried during the first successful scrape.
+- **State Management**: Implemented `.reset()` across all major collectors (Tables, Databases, Locks, TLS, Statements) to ensure dropped or renamed objects are cleared from Prometheus output.
+- **Dashboard Enhancements**: Added new panels for Replication Lag and Server Role to the Grafana dashboard, with explicit support for the new `-1` lag signaling.
 
 ### Fixed
 - **Startup Hangs**: Implemented lazy connection pooling and startup timeouts to ensure the HTTP server binds and starts regardless of database state.
@@ -19,8 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Connections Collector**: Fixed a bug where `pg_stat_activity_max_connections` (and derived utilization metrics) would default to 100 if the query failed, leading to misleading data. Errors are now propagated correctly.
 
 ### Changed
+- **BREAKING - Replication Lag Signaling**: `pg_replication_lag_seconds` now reports `-1` on primary servers instead of `0` to distinguish "not a replica" from "zero lag".
+- **Precision Timing**: Updated `pg_stat_statements` latency metrics to use high-precision floating point math for sub-second visibility.
+- **Code Quality**: Replaced hardcoded system schema strings and time conversion factors with shared constants for better maintainability.
 - **Dependencies**: Updated all dependencies to their latest compatible versions.
-- **Code Quality**: Addressed Clippy lints and improved asynchronous connection handling.
 
 ## [0.9.7] - 2026-02-06
 

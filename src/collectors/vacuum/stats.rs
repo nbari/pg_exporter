@@ -108,6 +108,11 @@ impl Collector for VacuumStatsCollector {
     )]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            // 0) Reset all metrics to clear stale data (e.g. dropped databases)
+            self.db_freeze_age_xids.reset();
+            self.db_freeze_age_pct_of_max.reset();
+            self.autovac_workers.reset();
+
             let excluded: Vec<String> = get_excluded_databases().to_vec();
 
             // Query 1: global autovacuum_freeze_max_age (xids)

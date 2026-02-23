@@ -1,4 +1,7 @@
-use crate::collectors::{Collector, i64_to_f64};
+use crate::collectors::{
+    Collector, i64_to_f64,
+    util::{MS_TO_SEC, TEMPLATE0, TEMPLATE1},
+};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, IntGaugeVec, Opts, Registry};
@@ -205,10 +208,10 @@ impl PgStatementsCollector {
                 u.usename,
                 LEFT(query, 80) as query_short,
                 calls::bigint,
-                (total_exec_time / 1000.0)::double precision as total_exec_time_sec,
-                (mean_exec_time / 1000.0)::double precision as mean_exec_time_sec,
-                (max_exec_time / 1000.0)::double precision as max_exec_time_sec,
-                (stddev_exec_time / 1000.0)::double precision as stddev_exec_time_sec,
+                (total_exec_time / {MS_TO_SEC})::double precision as total_exec_time_sec,
+                (mean_exec_time / {MS_TO_SEC})::double precision as mean_exec_time_sec,
+                (max_exec_time / {MS_TO_SEC})::double precision as max_exec_time_sec,
+                (stddev_exec_time / {MS_TO_SEC})::double precision as stddev_exec_time_sec,
                 rows::bigint,
                 shared_blks_hit::bigint,
                 shared_blks_read::bigint,
@@ -226,7 +229,7 @@ impl PgStatementsCollector {
             JOIN pg_user u ON u.usesysid = s.userid
             WHERE queryid IS NOT NULL
               AND total_exec_time > 0
-              AND d.datname NOT IN ('template0', 'template1')
+              AND d.datname NOT IN ('{TEMPLATE0}', '{TEMPLATE1}')
             ORDER BY total_exec_time DESC
             LIMIT {}
             ",
@@ -408,6 +411,26 @@ impl Collector for PgStatementsCollector {
                     );
                     return Ok(());
                 }
+
+                // Reset all metrics to clear stale data (e.g. queries that fell out of top N)
+                self.total_exec_time.reset();
+                self.mean_exec_time.reset();
+                self.max_exec_time.reset();
+                self.stddev_exec_time.reset();
+                self.calls.reset();
+                self.rows.reset();
+                self.shared_blks_hit.reset();
+                self.shared_blks_read.reset();
+                self.shared_blks_dirtied.reset();
+                self.shared_blks_written.reset();
+                self.local_blks_hit.reset();
+                self.local_blks_read.reset();
+                self.local_blks_dirtied.reset();
+                self.local_blks_written.reset();
+                self.temp_blks_read.reset();
+                self.temp_blks_written.reset();
+                self.wal_bytes.reset();
+                self.cache_hit_ratio.reset();
 
                 let query = self.build_pg_statements_query();
                 let rows: Vec<PgRow> = sqlx::query(&query).fetch_all(pool).await?;

@@ -167,6 +167,35 @@ impl Collector for StatUserTablesCollector {
     #[instrument(skip(self, pool), level = "info", err, fields(collector="stat_user_tables", otel.kind="internal"))]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            // 0) Reset all metrics to clear stale data (e.g. dropped tables)
+            self.seq_scan.reset();
+            self.seq_tup_read.reset();
+            self.idx_scan.reset();
+            self.idx_tup_fetch.reset();
+            self.n_tup_ins.reset();
+            self.n_tup_upd.reset();
+            self.n_tup_del.reset();
+            self.n_tup_hot_upd.reset();
+            self.n_live_tup.reset();
+            self.n_dead_tup.reset();
+            self.n_mod_since_analyze.reset();
+            self.last_vacuum.reset();
+            self.last_autovacuum.reset();
+            self.last_analyze.reset();
+            self.last_autoanalyze.reset();
+            self.vacuum_count.reset();
+            self.autovacuum_count.reset();
+            self.analyze_count.reset();
+            self.autoanalyze_count.reset();
+            self.index_size_bytes.reset();
+            self.table_size_bytes.reset();
+            self.bloat_ratio.reset();
+            self.dead_tuple_size_bytes.reset();
+            self.last_autovacuum_seconds_ago.reset();
+            self.last_autoanalyze_seconds_ago.reset();
+            self.autovacuum_threshold_ratio.reset();
+            self.autoanalyze_threshold_ratio.reset();
+
             // 1) Discover databases (exclude templates and configured exclusions)
             let excluded = get_excluded_databases().to_vec();
             let db_list_span = info_span!(

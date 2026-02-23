@@ -1,4 +1,4 @@
-use crate::collectors::{Collector, i64_to_f64};
+use crate::collectors::{Collector, i64_to_f64, util::{PG_CATALOG, INFORMATION_SCHEMA}};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{Gauge, Opts, Registry};
@@ -109,7 +109,8 @@ impl Collector for IndexStatsCollector {
         Box::pin(async move {
             // Query pg_stat_user_indexes joined with pg_class for size and pg_index for validity
             // Excludes system databases and tracks key index health metrics
-            let query = r"
+            let query = format!(
+                r"
                 SELECT 
                     COALESCE(SUM(s.idx_scan), 0)::BIGINT as total_scans,
                     COALESCE(SUM(s.idx_tup_read), 0)::BIGINT as total_tup_read,
@@ -118,10 +119,11 @@ impl Collector for IndexStatsCollector {
                     COALESCE(SUM(i.indisvalid::int), 0)::BIGINT as valid_count
                 FROM pg_stat_user_indexes s
                 JOIN pg_index i ON s.indexrelid = i.indexrelid
-                WHERE s.schemaname NOT IN ('pg_catalog', 'information_schema')
-            ";
+                WHERE s.schemaname NOT IN ('{PG_CATALOG}', '{INFORMATION_SCHEMA}')
+                "
+            );
 
-            let stats: IndexStats = sqlx::query_as(query).fetch_one(pool).await?;
+            let stats: IndexStats = sqlx::query_as(&query).fetch_one(pool).await?;
 
             // Update metrics
             self.scans.set(i64_to_f64(stats.total_scans));

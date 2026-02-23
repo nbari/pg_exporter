@@ -229,6 +229,12 @@ impl ScraperCollector {
         }
     }
 
+    /// Returns the total number of scrapes performed
+    #[must_use]
+    pub fn scrapes_total(&self) -> i64 {
+        self.scrapes_total.get()
+    }
+
     /// Record the start of a collector scrape
     #[must_use]
     pub fn start_scrape(&self, collector_name: &str) -> ScrapeTimer {
