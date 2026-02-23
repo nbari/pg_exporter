@@ -25,28 +25,25 @@ pub async fn handle(action: Action) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::future::BoxFuture;
     use secrecy::SecretString;
 
     #[tokio::test]
     async fn test_handle_action_signature() {
         // Test that handle accepts a valid Action and returns Result<()>
-        // We can't actually run it without a database, but we can test the signature
+        // Note: We don't call handle(action).await here because it starts a blocking
+        // HTTP server which would hang the test suite.
+        // Instead, we just verify the types and that it compiles.
 
-        let action = Action::Run {
+        let _action = Action::Run {
             port: 9999,
             listen: None,
             dsn: SecretString::new("postgresql://localhost/test".into()),
             collectors: vec!["default".to_string()],
         };
 
-        // This will fail to connect, but that's expected in unit test
-        // The important thing is the function signature and type checking works
-        let result = handle(action).await;
-
-        assert!(
-            result.is_err(),
-            "Should fail without real database connection"
-        );
+        // Signature check: handle is an async function taking Action and returning Result<()>
+        let _: fn(Action) -> BoxFuture<'static, Result<()>> = |a| Box::pin(handle(a));
     }
 
     #[test]

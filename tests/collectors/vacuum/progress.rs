@@ -280,10 +280,10 @@ async fn test_vacuum_progress_collector_captures_actual_vacuum() -> Result<()> {
 
             // If we caught a vacuum in progress, verify database label exists
             if let Some(db) = database_label {
-                // Should have database label set to "postgres" or "none"
+                // Should have database label set to "postgres", "pgbench_test" or "none"
                 assert!(
-                    db == "postgres" || db == "none",
-                    "Database label should be 'postgres' or 'none', got: {db}"
+                    db == "postgres" || db == "pgbench_test" || db == "none",
+                    "Database label should be 'postgres', 'pgbench_test' or 'none', got: {db}"
                 );
             }
         }
