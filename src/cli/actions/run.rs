@@ -25,25 +25,23 @@ pub async fn handle(action: Action) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::future::BoxFuture;
     use secrecy::SecretString;
 
     #[tokio::test]
     async fn test_handle_action_signature() {
         // Test that handle accepts a valid Action and returns Result<()>
-        // Note: We don't call handle(action).await here because it starts a blocking
-        // HTTP server which would hang the test suite.
-        // Instead, we just verify the types and that it compiles.
-
-        let _action = Action::Run {
+        // We use an invalid DSN to ensure it returns an error instead of starting
+        // the blocking HTTP server, allowing the test to complete.
+        let action = Action::Run {
             port: 9999,
             listen: None,
-            dsn: SecretString::new("postgresql://localhost/test".into()),
+            dsn: SecretString::new("invalid-dsn".into()),
             collectors: vec!["default".to_string()],
         };
 
-        // Signature check: handle is an async function taking Action and returning Result<()>
-        let _: fn(Action) -> BoxFuture<'static, Result<()>> = |a| Box::pin(handle(a));
+        let result = handle(action).await;
+
+        assert!(result.is_err(), "Should fail with invalid DSN");
     }
 
     #[test]
