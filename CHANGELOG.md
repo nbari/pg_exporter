@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.8] - 2026-02-23
+
+### Added
+- **Database Outage Resilience**: The exporter now starts and stays available even if PostgreSQL is unreachable.
+- **Scrape Behavior**: The `/metrics` endpoint now always returns HTTP 200 during database outages to prevent unnecessary exporter-down alerts.
+- **`pg_up` Reporting**: Improved `pg_up` metric to accurately reflect database connectivity. It is now driven by a dedicated connectivity check and is no longer overwritten by other collectors.
+- **Metric Omission**: Database-dependent metrics are now omitted from the output when the database is unreachable, rather than reporting stale or zero values.
+
+### Fixed
+- **Startup Hangs**: Implemented lazy connection pooling and startup timeouts to ensure the HTTP server binds and starts regardless of database state.
+- **Collection Timeouts**: Added a 5-second acquisition timeout to prevent long-running scrapes when the database is unresponsive.
+
+### Changed
+- **Dependencies**: Updated all dependencies to their latest compatible versions.
+- **Code Quality**: Addressed Clippy lints and improved asynchronous connection handling.
+
 ## [0.9.7] - 2026-02-06
 
 ### Added

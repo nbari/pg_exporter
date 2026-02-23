@@ -115,8 +115,6 @@ impl CollectorRegistry {
             scraper.increment_scrapes();
         }
 
-        let mut any_success = false;
-
         // Quick connectivity check (does not guarantee every collector will succeed).
         let connect_span = info_span!(
             "db.connectivity_check",
@@ -126,22 +124,22 @@ impl CollectorRegistry {
             db.statement = "SELECT 1"
         );
 
-        match sqlx::query("SELECT 1")
+        let is_up = match sqlx::query("SELECT 1")
             .fetch_one(pool)
             .instrument(connect_span)
             .await
         {
             Ok(_) => {
                 self.pg_up_gauge.set(1.0);
-                any_success = true;
+                true
             }
 
             Err(e) => {
                 error!("Failed to connect to PostgreSQL: {}", e);
                 self.pg_up_gauge.set(0.0);
-                // We still try individual collectors; some may succeed (e.g., cached metrics).
+                false
             }
-        }
+        };
 
         // Launch all collectors concurrently.
         let mut tasks = FuturesUnordered::new();
@@ -153,6 +151,16 @@ impl CollectorRegistry {
 
         for collector in &self.collectors {
             let name = collector.name();
+
+            // Skip DB-dependent collectors if DB is down.
+            // "exporter" collector should always run as it tracks scrape stats.
+            if !is_up && name != "exporter" {
+                debug!(
+                    "Skipping DB-dependent collector '{}' because DB is down",
+                    name
+                );
+                continue;
+            }
 
             // Create a span per collector execution to visualize overlap in traces.
             let span = info_span!("collector.collect", collector = %name, otel.kind = "internal");
@@ -189,24 +197,8 @@ impl CollectorRegistry {
         }
 
         // Drain completions as they finish (unordered).
-        while let Some((name, res)) = tasks.next().await {
-            match res {
-                Ok(()) => {
-                    debug!("Collected metrics from '{}'", name);
-                    any_success = true;
-                }
-
-                Err(e) => {
-                    error!("Collector '{}' failed: {}", name, e);
-                }
-            }
-        }
-
-        // If nothing worked, mark down; otherwise ensure up=1.
-        if !any_success {
-            self.pg_up_gauge.set(0.0);
-        } else if (self.pg_up_gauge.get() - 1.0).abs() > f64::EPSILON {
-            self.pg_up_gauge.set(1.0);
+        while let Some((name, _res)) = tasks.next().await {
+            debug!("Collected metrics from '{}'", name);
         }
 
         // Encode current registry into Prometheus exposition format.
@@ -261,5 +253,50 @@ impl CollectorRegistry {
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.collectors.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::collectors::config::CollectorConfig;
+    use sqlx::postgres::PgPoolOptions;
+    use std::time::Duration;
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn test_pg_up_indicator_on_failure() {
+        let config = CollectorConfig::new().with_enabled(&["default".to_string()]);
+        let registry = CollectorRegistry::new(&config);
+
+        // Use a pool that will definitely fail
+        let pool = PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(100))
+            .connect_lazy("postgresql://localhost:54321/postgres")
+            .expect("failed to connect lazy to invalid DB");
+
+        let _ = registry.collect_all(&pool).await;
+
+        assert!((registry.pg_up_gauge.get() - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn test_pg_up_not_overwritten_by_collector_success() {
+        // "exporter" collector always runs and should "succeed" even if DB is down
+        let config = CollectorConfig::new().with_enabled(&["exporter".to_string()]);
+        let registry = CollectorRegistry::new(&config);
+
+        // Use a pool that will definitely fail
+        let pool = PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(100))
+            .connect_lazy("postgresql://localhost:54321/postgres")
+            .expect("failed to connect lazy to invalid DB");
+
+        let _ = registry.collect_all(&pool).await;
+
+        // Even though "exporter" collector ran and succeeded (returned Ok(())),
+        // pg_up MUST stay at 0.0 because the connectivity check failed.
+        assert!((registry.pg_up_gauge.get() - 0.0).abs() < f64::EPSILON);
     }
 }

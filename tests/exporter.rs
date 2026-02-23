@@ -3,6 +3,7 @@
 #![allow(clippy::panic)]
 #![allow(clippy::indexing_slicing)]
 use anyhow::Result;
+use secrecy::SecretString;
 
 mod common;
 
@@ -215,5 +216,52 @@ async fn test_exporter_default_bind_auto_detect() -> Result<()> {
 
     handle.abort();
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_exporter_starts_even_when_db_down() -> Result<()> {
+    // Attempt to initialize tracing, ignore if already initialized
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_test_writer()
+        .try_init();
+
+    let port = common::get_available_port();
+    // Use a port where definitely no Postgres is running
+    let dsn = SecretString::from("postgresql://postgres:postgres@localhost:54321/postgres");
+
+    let handle = tokio::spawn(async move {
+        pg_exporter::exporter::new(port, None, dsn, vec!["default".to_string()]).await
+    });
+
+    // Wait for server to start
+    assert!(
+        common::wait_for_server(port, 50).await,
+        "Server failed to start on port {port} despite DB being down"
+    );
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("{}/metrics", common::get_test_url(port)))
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), 200);
+
+    let body = response.text().await?;
+    assert!(
+        body.contains("pg_up 0"),
+        "pg_up should be 0 when DB is down"
+    );
+
+    // DB-dependent metrics should be omitted.
+    // Default collector normally exports pg_settings_count
+    assert!(
+        !body.contains("pg_settings_count"),
+        "DB-dependent metrics should be omitted"
+    );
+
+    handle.abort();
     Ok(())
 }

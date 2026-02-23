@@ -170,6 +170,15 @@ This collectors are enabled by default:
 * `vacuum`
 
 
+## Scrape Behavior
+
+`pg_exporter` is designed to be resilient to PostgreSQL outages:
+
+* **High Availability** – The exporter starts and stays available even if the database is down.
+* **HTTP 200 Always** – The `/metrics` endpoint always responds with HTTP 200 to avoid triggering unnecessary Prometheus "down" alerts for the exporter itself.
+* **`pg_up` Metric** – Use the `pg_up` metric (1 for up, 0 for down) to monitor database connectivity.
+* **Metric Omission** – When the database is unreachable, database-dependent metrics are omitted from the output rather than being reported as zero.
+
 ## Project layout
 
 The project is structured as follows:

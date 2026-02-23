@@ -51,9 +51,10 @@ pub async fn new(
     dsn: SecretString,
     collectors: Vec<String>,
 ) -> Result<()> {
-    let pool = connect_pool(&dsn).await?;
+    let pool = connect_pool(&dsn)?;
 
-    initialize_version(&pool).await?;
+    // Try to initialize version, but don't block startup if DB is down
+    let _ = timeout(Duration::from_secs(1), initialize_version(&pool)).await;
 
     let _ = set_base_connect_options_from_dsn(&dsn);
 
@@ -78,26 +79,18 @@ pub async fn new(
     Ok(())
 }
 
-async fn connect_pool(dsn: &SecretString) -> Result<sqlx::PgPool> {
+fn connect_pool(dsn: &SecretString) -> Result<sqlx::PgPool> {
     let db_dsn = dsn.expose_secret().to_string();
 
-    let pool = match timeout(
-        Duration::from_secs(2),
-        PgPoolOptions::new()
-            .min_connections(1)
-            .max_connections(3)
-            .max_lifetime(Duration::from_secs(120))
-            .test_before_acquire(true)
-            .connect(&db_dsn),
-    )
-    .await
-    {
-        Ok(Ok(pool)) => pool,
-        Ok(Err(err)) => return Err(err).context("Failed to connect to database"),
-        Err(_) => return Err(anyhow!("Failed to connect to database: timed out after 2s")),
-    };
+    let pool = PgPoolOptions::new()
+        .min_connections(0)
+        .max_connections(3)
+        .acquire_timeout(Duration::from_secs(5))
+        .max_lifetime(Duration::from_secs(120))
+        .test_before_acquire(true)
+        .connect_lazy(&db_dsn)?;
 
-    info!("Connected to database");
+    info!("Database connection pool initialized (lazy)");
 
     Ok(pool)
 }

@@ -25,8 +25,10 @@ pub async fn metrics(
         }
         Err(e) => {
             error!("Failed to collect metrics: {}", e);
+            // Even on error, we return 200 with best-effort results if available.
+            // If the error happened before encoding, we'll return the error message.
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::OK,
                 headers,
                 format!("Error collecting metrics: {e}"),
             )
