@@ -241,8 +241,7 @@ impl Collector for ConnectionsCollector {
             )
             .fetch_one(pool)
             .instrument(max_conn_query)
-            .await
-            .unwrap_or(100); // Fallback to common default
+            .await?;
 
             self.max_connections.set(max_conn);
 
