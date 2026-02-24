@@ -281,5 +281,24 @@ async fn test_connections_collector_handles_query_error() -> Result<()> {
 
     assert!(result.is_err(), "Should return error when query fails");
 
+    // Regression guard: must NOT silently fallback to 100 max connections.
+    // If collection fails before reading pg_settings, gauge should remain at its
+    // initialization value (0), not a hardcoded default.
+    let metric_families = registry.gather();
+    let max_connections = metric_families
+        .iter()
+        .find(|m| m.name() == "pg_stat_activity_max_connections")
+        .expect("pg_stat_activity_max_connections metric should exist");
+    let first_sample = max_connections
+        .get_metric()
+        .first()
+        .expect("pg_stat_activity_max_connections should have one sample");
+    let gauge_value = common::metric_value_to_i64(first_sample.get_gauge().value());
+
+    assert_eq!(
+        gauge_value, 0,
+        "max_connections must stay at 0 on error path, got {gauge_value}"
+    );
+
     Ok(())
 }

@@ -41,3 +41,7 @@ Activity
 
     cargo test --test collectors_tests test_version_collector_queries_database
     cargo test --test collectors_tests test_connections_collector_collects_from_database
+
+# Run replication lag topology test
+
+    cargo test --test collectors_tests replication::replica_podman::test_replica_collector_reports_positive_lag_on_paused_replay -- --nocapture

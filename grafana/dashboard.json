@@ -3862,24 +3862,13 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "description": "Replication lag in seconds. \n\nVALUES:\n- 0: Caught up\n- >0: Delay behind primary\n- -1: Server is PRIMARY (not a replica)",
+          "description": "Replication lag in seconds. \n\nVALUES:\n- 0: Primary or caught-up replica\n- >0: Delay behind primary\n\nUse pg_replication_is_replica to distinguish server role.",
           "fieldConfig": {
             "defaults": {
               "color": {
                 "mode": "thresholds"
               },
-              "mappings": [
-                {
-                  "options": {
-                    "-1": {
-                      "color": "blue",
-                      "index": 0,
-                      "text": "PRIMARY"
-                    }
-                  },
-                  "type": "value"
-                }
-              ],
+              "mappings": [],
               "thresholds": {
                 "mode": "absolute",
                 "steps": [

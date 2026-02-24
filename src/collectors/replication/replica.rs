@@ -101,15 +101,27 @@ impl Collector for ReplicaCollector {
                 r"
                 SELECT
                     CASE
-                        WHEN NOT pg_is_in_recovery() THEN -1
-                        WHEN pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn() THEN 0
-                        ELSE GREATEST(0, EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp())))
+                        WHEN NOT pg_is_in_recovery() THEN 0::double precision
+                        WHEN pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn() THEN 0::double precision
+                        ELSE COALESCE(
+                            GREATEST(
+                                0::double precision,
+                                EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()))::double precision
+                            ),
+                            0::double precision
+                        )
                     END AS lag,
                     CASE
                         WHEN pg_is_in_recovery() THEN 1
                         ELSE 0
                     END AS is_replica,
-                    GREATEST(0, EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()))) AS last_replay
+                    COALESCE(
+                        GREATEST(
+                            0::double precision,
+                            EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()))::double precision
+                        ),
+                        0::double precision
+                    ) AS last_replay
                 ",
             )
             .fetch_one(pool)
@@ -176,13 +188,13 @@ mod tests {
 
         assert!(result.is_ok(), "Collection failed: {:?}", result.err());
 
-        // On a primary, is_replica should be 0 and lag should be -1.0
+        // On a primary, is_replica should be 0 and lag should be 0.0
         let is_replica_val = collector.is_replica.get();
         let lag_val = collector.lag_seconds.get();
         #[allow(clippy::float_cmp)]
         {
             if is_replica_val == 0.0 {
-                assert_eq!(lag_val, -1.0, "lag should be -1.0 on primary");
+                assert_eq!(lag_val, 0.0, "lag should be 0.0 on primary");
             } else {
                 assert!(lag_val >= 0.0, "lag should be non-negative on replica");
             }

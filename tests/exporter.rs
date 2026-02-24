@@ -254,6 +254,10 @@ async fn test_exporter_starts_even_when_db_down() -> Result<()> {
         body.contains("pg_up 0"),
         "pg_up should be 0 when DB is down"
     );
+    assert!(
+        body.contains("pg_exporter_build_info"),
+        "Core build-info metric should still be exposed during outage"
+    );
 
     // DB-dependent metrics should be omitted.
     // Default collector normally exports pg_settings_count
