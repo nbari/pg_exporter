@@ -55,10 +55,40 @@ jobs:
           timeout 30 bash -c 'until pg_isready -h localhost -p 5432 -U postgres; do sleep 1; done'
           echo "PostgreSQL is ready!"
 
+      - name: Configure container runtime for testcontainers
+        run: |
+          if [[ -n "${DOCKER_HOST:-}" ]]; then
+            echo "Using preconfigured DOCKER_HOST=${DOCKER_HOST}"
+            echo "DOCKER_HOST=${DOCKER_HOST}" >> "${GITHUB_ENV}"
+            exit 0
+          fi
+
+          if [[ -S /var/run/docker.sock ]]; then
+            echo "DOCKER_HOST=unix:///var/run/docker.sock" >> "${GITHUB_ENV}"
+            echo "Using Docker socket at /var/run/docker.sock"
+            exit 0
+          fi
+
+          if [[ -n "${XDG_RUNTIME_DIR:-}" && -S "${XDG_RUNTIME_DIR}/podman/podman.sock" ]]; then
+            echo "DOCKER_HOST=unix://${XDG_RUNTIME_DIR}/podman/podman.sock" >> "${GITHUB_ENV}"
+            echo "Using Podman socket at ${XDG_RUNTIME_DIR}/podman/podman.sock"
+            exit 0
+          fi
+
+          if [[ -S "/run/user/$(id -u)/podman/podman.sock" ]]; then
+            echo "DOCKER_HOST=unix:///run/user/$(id -u)/podman/podman.sock" >> "${GITHUB_ENV}"
+            echo "Using Podman socket at /run/user/$(id -u)/podman/podman.sock"
+            exit 0
+          fi
+
+          echo "No Docker/Podman socket available for testcontainers" >&2
+          exit 1
+
       - name: Run tests
         run: cargo test --verbose -- --nocapture
         env:
           PG_EXPORTER_DSN: postgresql://postgres:postgres@localhost:5432/postgres
+          PG_EXPORTER_REQUIRE_TESTCONTAINERS: "1"
           RUST_BACKTRACE: full
           CARGO_INCREMENTAL: 0
           LLVM_PROFILE_FILE: coverage-%p-%m.profraw

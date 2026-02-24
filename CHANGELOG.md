@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.10.1] - 2026-02-24
+
+### Changed
+- **Replication Integration Topology**: Replaced shell-script-driven replication setup with in-test `testcontainers` orchestration for a real primary+replica PostgreSQL topology.
+- **Replication Semantics Coverage**: Added end-to-end assertions for role and lag semantics across primary sentinel behavior, replica backlog (`lag > 0`), replica catch-up (`lag = 0`), and broken-path error handling.
+- **WAL Dashboard Signals**: Updated WAL dashboards to focus on default collector runtime signals (throughput, record activity, buffer pressure, FPI ratio) and replication max lag bytes.
+- **Dashboard Layout**: Reworked WAL layout to a 2x2 panel grid and adjusted section ordering/row behavior for consistent rendering.
+
+### CI
+- **Container Runtime Wiring**: Added explicit runtime socket detection/export (`DOCKER_HOST`) for testcontainers so replication topology tests run consistently with Docker or Podman sockets.
+
+### Fixed
+- **Uptime Panel Semantics**: Uptime now renders `DOWN` in red when `pg_up = 0` instead of showing stale uptime values.
+- **Metrics Stack Provisioning**: Ensured dashboard provisioning file mode is readable in the Grafana container (`0644`) to prevent missing dashboard after `just restart-metrics`.
+- **Dashboard Validator Portability**: Hardened `scripts/validate-dashboard.sh` with repo-root path resolution, temp-file safety, command checks, and portable regex usage.
+
 ## [0.10.0] - 2026-02-23
 
 ### Added

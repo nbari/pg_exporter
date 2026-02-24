@@ -34,6 +34,12 @@ cargo test --test collectors_tests statements
 cargo test -- --nocapture
 ```
 
+For rootless Podman with `testcontainers`, export:
+
+```bash
+export DOCKER_HOST="unix:///run/user/$UID/podman/podman.sock"
+```
+
 ### CI Testing
 
 The CI pipeline automatically:

@@ -37,6 +37,7 @@ RUN chmod +x /usr/local/bin/stack-entrypoint.sh
 
 # Copy dashboard.json last (separate layer - rebuilds only when dashboard changes)
 COPY dashboard.json /etc/grafana/provisioning/dashboards/pg_exporter.json
+RUN chmod 0644 /etc/grafana/provisioning/dashboards/pg_exporter.json
 
 # Drop back to the grafana user (uid 472, gid 0/root in the base image)
 USER 472

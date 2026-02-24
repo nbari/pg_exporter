@@ -135,9 +135,16 @@ topk(10,
 - **Vacuum Progress**: Real-time vacuum operation tracking
 - **Heap Blocks Vacuumed**: Vacuum work completed
 
-### 🔄 Replication & WAL
-- **WAL & Buffer Activity**: Write-ahead log generation rate
-- **Background Writer Activity**: Background checkpoint operations
+### 📦 WAL
+- **WAL Throughput**: Write-ahead log generation rate
+- **WAL Record Activity**: WAL records and full-page images per second
+- **WAL Buffer Pressure**: Rate of WAL buffer saturation events
+- **FPI Ratio**: Full-page-image share of WAL records
+
+### 🔄 Replication
+- **Replication Lag**: Replay delay on standby nodes
+- **Server Role**: Primary vs replica identification
+- **Max Replication Lag Bytes**: Maximum WAL byte lag across replicas
 
 ### 📊 Table Statistics
 - **Table DML Operations Rate**: Per-table INSERT/UPDATE/DELETE rates
@@ -166,7 +173,8 @@ Different sections require different collectors to be enabled:
 | Database Activity | `database`, `activity` | Partial |
 | Locks | `locks` | ❌ No |
 | Vacuum | `vacuum` | ✅ Yes |
-| Replication & WAL | `default`, `replication` | Partial |
+| WAL | `default` | ✅ Yes |
+| Replication | `default`, `replication` | Partial |
 | Table Statistics | `stat` | ❌ No |
 | Database Size | `database` | ❌ No |
 

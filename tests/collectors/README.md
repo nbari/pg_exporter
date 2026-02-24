@@ -42,6 +42,10 @@ Activity
     cargo test --test collectors_tests test_version_collector_queries_database
     cargo test --test collectors_tests test_connections_collector_collects_from_database
 
-# Run replication lag topology test
+# Run replication lag topology test (testcontainers primary+replica)
 
-    cargo test --test collectors_tests replication::replica_podman::test_replica_collector_reports_positive_lag_on_paused_replay -- --nocapture
+    cargo test --test collectors_tests replication::replica_topology::replication_lag_and_role_semantics_from_postgres_primary_replica_pair -- --nocapture
+
+# Same test via justfile helper
+
+    just test-replica

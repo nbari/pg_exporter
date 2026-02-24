@@ -25,6 +25,34 @@ test: clippy fmt
   @echo "🔧 Using local test database (overriding .envrc)..."
   PG_EXPORTER_DSN="postgresql://postgres:postgres@localhost:5432/postgres" cargo test -- --nocapture
 
+# Run only the replication topology integration test (primary+replica via testcontainers)
+test-replica:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    docker_host="${DOCKER_HOST:-}"
+
+    if [[ -z "${docker_host}" ]]; then
+        if [[ -S /var/run/docker.sock ]]; then
+            docker_host="unix:///var/run/docker.sock"
+        elif [[ -n "${XDG_RUNTIME_DIR:-}" && -S "${XDG_RUNTIME_DIR}/podman/podman.sock" ]]; then
+            docker_host="unix://${XDG_RUNTIME_DIR}/podman/podman.sock"
+        elif [[ -S "/run/user/$(id -u)/podman/podman.sock" ]]; then
+            docker_host="unix:///run/user/$(id -u)/podman/podman.sock"
+        else
+            echo "❌ No Docker/Podman socket found for testcontainers" >&2
+            echo "Set DOCKER_HOST, e.g.:" >&2
+            echo "  export DOCKER_HOST=unix:///run/user/\$UID/podman/podman.sock" >&2
+            exit 1
+        fi
+    fi
+
+    echo "🧪 Running replication topology test with DOCKER_HOST=${docker_host}"
+    DOCKER_HOST="${docker_host}" PG_EXPORTER_REQUIRE_TESTCONTAINERS=1 \
+      cargo test --test collectors_tests \
+      replication::replica_topology::replication_lag_and_role_semantics_from_postgres_primary_replica_pair \
+      -- --nocapture
+
 # Linting
 clippy:
   cargo clippy --all-targets --all-features

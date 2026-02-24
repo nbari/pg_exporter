@@ -103,7 +103,10 @@ impl SettingsCollector {
             // Convert memory settings to bytes based on their units
             if matches!(
                 name.as_str(),
-                "shared_buffers" | "maintenance_work_mem" | "work_mem" | "wal_buffers"
+                "shared_buffers"
+                    | "maintenance_work_mem"
+                    | "work_mem"
+                    | "wal_buffers"
             ) && let Some(ref u) = unit
             {
                 value *= match u.as_str() {

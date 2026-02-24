@@ -144,16 +144,30 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Database uptime in days. Goal: High uptime with planned maintenance windows. Action: If uptime is very low, investigate recent crashes or restarts.",
+      "description": "Database uptime in days. Shows DOWN in red when pg_up=0.",
       "fieldConfig": {
         "defaults": {
-          "mappings": [],
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "DOWN"
+                }
+              },
+              "type": "value"
+            }
+          ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "text",
+                "color": "red",
                 "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
               }
             ]
           },
@@ -181,7 +195,7 @@
         },
         "orientation": "auto",
         "textMode": "value",
-        "colorMode": "none",
+        "colorMode": "value",
         "graphMode": "none"
       },
       "pluginVersion": "10.0.0",
@@ -191,7 +205,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_postmaster_start_time_seconds{job=\"$job\", instance=\"$instance\"} * 1000",
+          "expr": "((pg_postmaster_start_time_seconds{job=\"$job\", instance=\"$instance\"} * 1000) * on(job, instance) pg_up{job=\"$job\", instance=\"$instance\"}) or on(job, instance) (pg_up{job=\"$job\", instance=\"$instance\"} * 0)",
           "instant": true,
           "refId": "A"
         }
@@ -1570,12 +1584,255 @@
       "type": "timeseries"
     },
     {
-      "collapsed": true,
+      "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 85
+      },
+      "id": 111,
+      "panels": [],
+      "title": "WAL",
+      "type": "row",
+      "description": "Write-ahead log throughput, activity, buffer pressure, and full-page-image ratio."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "WAL generation throughput in bytes/sec from pg_stat_wal.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "Bps"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 86
+      },
+      "id": 2117,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "right"
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(pg_stat_wal_bytes_total{job=\"$job\", instance=\"$instance\"}[5m])",
+          "legendFormat": "WAL bytes/s",
+          "refId": "A"
+        }
+      ],
+      "title": "WAL Throughput",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "WAL records/sec and full-page-image (FPI) generation/sec from pg_stat_wal.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "ops"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 86
+      },
+      "id": 2118,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "right"
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(pg_stat_wal_records_total{job=\"$job\", instance=\"$instance\"}[5m])",
+          "legendFormat": "WAL records/s",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(pg_stat_wal_fpi_total{job=\"$job\", instance=\"$instance\"}[5m])",
+          "legendFormat": "WAL FPI/s",
+          "refId": "B"
+        }
+      ],
+      "title": "WAL Record Activity",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Times WAL writes were forced because WAL buffers became full (rate over 5m). Sustained non-zero values suggest WAL pressure.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          },
+          "unit": "ops"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 94
+      },
+      "id": 2119,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "right"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(pg_stat_wal_buffers_full_total{job=\"$job\", instance=\"$instance\"}[5m])",
+          "legendFormat": "buffers_full/s",
+          "refId": "A"
+        }
+      ],
+      "title": "WAL Buffer Pressure",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Full-page-image share of WAL records (5m rate). Higher values indicate more WAL amplification, often around checkpoint pressure.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 10
+              },
+              {
+                "color": "red",
+                "value": 25
+              }
+            ]
+          },
+          "unit": "percent"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 94
+      },
+      "id": 2121,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "right"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "100 * rate(pg_stat_wal_fpi_total{job=\"$job\", instance=\"$instance\"}[5m]) / clamp_min(rate(pg_stat_wal_records_total{job=\"$job\", instance=\"$instance\"}[5m]), 1)",
+          "legendFormat": "FPI ratio %",
+          "refId": "A"
+        }
+      ],
+      "title": "FPI Ratio",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 119
       },
       "id": 102,
       "panels": [
@@ -2150,7 +2407,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 86
+        "y": 120
       },
       "id": 103,
       "panels": [
@@ -3361,7 +3618,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 87
+        "y": 121
       },
       "id": 104,
       "panels": [
@@ -3468,7 +3725,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 88
+        "y": 102
       },
       "id": 105,
       "panels": [],
@@ -3535,7 +3792,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 89
+        "y": 102
       },
       "id": 17,
       "options": {
@@ -3626,7 +3883,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 97
+        "y": 110
       },
       "id": 18,
       "options": {
@@ -3664,198 +3921,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 105
+        "y": 122
       },
       "id": 106,
-      "panels": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "description": "WAL generation and buffer allocation rates.\n\nGOAL: Steady pattern, no sudden spikes\n- High WAL: Write-heavy workload\n- Buffer allocation: Shared buffers turnover\n\nACTIONS TO IMPROVE:\n1. Increase shared_buffers if buffer allocation high\n2. Tune checkpoint_completion_target\n3. Monitor wal_buffers\n4. Adjust wal_writer_delay\n5. Consider archiving/replication impact\n\nMETRIC: bytes/second",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "drawStyle": "line",
-                "fillOpacity": 10,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "tooltip": false,
-                  "viz": false,
-                  "legend": false
-                },
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "never",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              },
-              "unit": "Bps"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 0,
-            "y": 102
-          },
-          "id": 19,
-          "options": {
-            "legend": {
-              "calcs": [
-                "last",
-                "mean"
-              ],
-              "displayMode": "table",
-              "placement": "right",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            }
-          },
-          "pluginVersion": "10.0.0",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
-              },
-              "expr": "rate(pg_stat_bgwriter_buffers_alloc_total{job=\"$job\", instance=\"$instance\"}[5m]) * 8192",
-              "legendFormat": "Buffer allocation rate",
-              "refId": "A"
-            }
-          ],
-          "title": "WAL & Buffer Activity",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "description": "Background writer cleaning dirty buffers.\n\nGOAL: Proactive cleaning before backends need pages\n- High bgwriter clean rate: Good\n- High backend writes: Increase bgwriter activity\n\nACTIONS TO IMPROVE:\n1. Tune bgwriter_lru_maxpages\n2. Adjust bgwriter_lru_multiplier\n3. Reduce bgwriter_delay\n4. Monitor buffer allocation patterns\n\nMETRIC: Buffers cleaned per second",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "drawStyle": "line",
-                "fillOpacity": 10,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "tooltip": false,
-                  "viz": false,
-                  "legend": false
-                },
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "never",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              },
-              "unit": "Bps"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 12,
-            "y": 102
-          },
-          "id": 20,
-          "options": {
-            "legend": {
-              "calcs": [
-                "last",
-                "mean"
-              ],
-              "displayMode": "table",
-              "placement": "right",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            }
-          },
-          "pluginVersion": "10.0.0",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
-              },
-              "expr": "rate(pg_stat_bgwriter_buffers_clean_total{job=\"$job\", instance=\"$instance\"}[5m]) * 8192",
-              "legendFormat": "Bgwriter clean rate",
-              "refId": "A"
-            }
-          ],
-          "title": "Background Writer Activity",
-          "type": "timeseries"
-        }
-      ],
-      "title": "Replication & WAL (requires --collector.replication)",
-      "type": "row",
-      "description": "Replication lag and WAL generation. Monitor replica health and streaming replication status.",
       "panels": [
         {
           "datasource": {
@@ -3898,7 +3966,9 @@
           "id": 130,
           "options": {
             "legend": {
-              "calcs": ["last"],
+              "calcs": [
+                "last"
+              ],
               "displayMode": "table",
               "placement": "right"
             }
@@ -3924,8 +3994,14 @@
               "mappings": [
                 {
                   "options": {
-                    "0": { "color": "blue", "text": "PRIMARY" },
-                    "1": { "color": "green", "text": "REPLICA" }
+                    "0": {
+                      "color": "blue",
+                      "text": "PRIMARY"
+                    },
+                    "1": {
+                      "color": "green",
+                      "text": "REPLICA"
+                    }
                   },
                   "type": "value"
                 }
@@ -3940,7 +4016,12 @@
           },
           "id": 131,
           "options": {
-            "reduceOptions": { "calcs": ["lastNotNull"], "values": false },
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "values": false
+            },
             "textMode": "value"
           },
           "targets": [
@@ -3951,8 +4032,61 @@
           ],
           "title": "Server Role",
           "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Maximum WAL lag in bytes across connected replicas. Useful to spot backlog growth and sustained replica delay.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "bytes"
+            }
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 114
+          },
+          "id": 2120,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last"
+              ],
+              "displayMode": "table",
+              "placement": "right"
+            }
+          },
+          "targets": [
+            {
+              "expr": "max(pg_stat_replication_pg_wal_lsn_diff{job=\"$job\", instance=\"$instance\"})",
+              "legendFormat": "Max replica lag bytes",
+              "refId": "A"
+            }
+          ],
+          "title": "Max Replication Lag Bytes",
+          "type": "timeseries"
         }
-      ]
+      ],
+      "title": "Replication (requires --collector.replication)",
+      "type": "row",
+      "description": "Replication lag and role. Monitor replica health and streaming replication status."
     },
     {
       "collapsed": true,
@@ -3960,7 +4094,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 106
+        "y": 123
       },
       "id": 107,
       "panels": [
@@ -4085,7 +4219,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 107
+        "y": 124
       },
       "id": 108,
       "panels": [
@@ -4283,7 +4417,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 108
+        "y": 125
       },
       "id": 110,
       "panels": [
@@ -4943,7 +5077,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 109
+        "y": 126
       },
       "id": 1000,
       "panels": [
@@ -5575,7 +5709,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 128
+        "y": 145
       },
       "id": 200,
       "panels": [
@@ -6512,5 +6646,5 @@
   "uid": "pg_exporter_monitoring",
   "version": 1,
   "weekStart": "",
-  "description": "PostgreSQL Performance Monitoring Dashboard This dashboard provides comprehensive monitoring for PostgreSQL databases using pg_exporter metrics. KEY SECTIONS: - Instance Information: PostgreSQL version, settings, and uptime - Critical Alerts: Connection pool utilization and performance warnings - Connection Analysis: Active connections, idle transactions, and connection age - Query Performance: Top queries by execution time, calls, and I/O (requires pg_stat_statements extension) - Cache & I/O: Buffer cache hit ratios, shared buffers, and I/O operations - Locks & Blocking: Lock monitoring and blocking query detection - Vacuum & Maintenance: Autovacuum activity, table bloat, and maintenance statistics - Replication & WAL: Replication lag and WAL generation (if replication is configured) - Table Statistics: DML operations and table-level activity - Database Size: Database growth and size trends REQUIREMENTS: - PostgreSQL 12+ recommended - pg_stat_statements extension enabled for query performance metrics - Appropriate monitoring user permissions For more information, visit: https://github.com/nbari/pg_exporter"
+  "description": "PostgreSQL Performance Monitoring Dashboard This dashboard provides comprehensive monitoring for PostgreSQL databases using pg_exporter metrics. KEY SECTIONS: - Instance Information: PostgreSQL version, settings, and uptime - Critical Alerts: Connection pool utilization and performance warnings - Connection Analysis: Active connections, idle transactions, and connection age - Query Performance: Top queries by execution time, calls, and I/O (requires pg_stat_statements extension) - Cache & I/O: Buffer cache hit ratios, shared buffers, and I/O operations - Locks & Blocking: Lock monitoring and blocking query detection - Vacuum & Maintenance: Autovacuum activity, table bloat, and maintenance statistics - WAL: WAL throughput, record activity, buffer pressure, and FPI ratio - Replication: lag, role, and max replication lag bytes (requires replication collector) - Table Statistics: DML operations and table-level activity - Database Size: Database growth and size trends REQUIREMENTS: - PostgreSQL 12+ recommended - pg_stat_statements extension enabled for query performance metrics - Appropriate monitoring user permissions For more information, visit: https://github.com/nbari/pg_exporter"
 }
