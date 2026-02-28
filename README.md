@@ -60,7 +60,7 @@ podman run -d \
 
 Run the exporter and use the socket directory:
 
-    pg_exporter --dsn postgresql:///postgres?user=postgres_exporter
+    pg_exporter --dsn postgresql:///postgres?host=/var/run/postgresql&user=postgres_exporter
 
 > in pg_hba.conf you need to allow the user `postgres_exporter` to connect, for example:
 
@@ -82,7 +82,7 @@ Instead of using `trust` authentication (which allows connection without passwor
 
 3. Run the exporter as the `postgres_exporter` user:
    ```bash
-   sudo -u postgres_exporter pg_exporter --dsn postgresql:///postgres?user=postgres_exporter
+   sudo -u postgres_exporter pg_exporter --dsn postgresql:///postgres?host=/var/run/postgresql&user=postgres_exporter
    ```
 
 This ensures that only the system user `postgres_exporter` can connect to the database as the `postgres_exporter` role, significantly improving security.
@@ -159,7 +159,7 @@ The following collectors are available:
 You can enable `--collector.<name>` or disable `--no-collector.<name>` For example,
 to disable the `vacuum` collector:
 
-    pg_exporter --dsn postgresql:///postgres?user=postgres_exporter --no-collector.vacuum
+    pg_exporter --dsn postgresql:///postgres?host=/var/run/postgresql&user=postgres_exporter --no-collector.vacuum
 
 ### Enabled by default
 
@@ -178,6 +178,18 @@ This collectors are enabled by default:
 * **HTTP 200 Always** – The `/metrics` endpoint always responds with HTTP 200 to avoid triggering unnecessary Prometheus "down" alerts for the exporter itself.
 * **`pg_up` Metric** – Use the `pg_up` metric (1 for up, 0 for down) to monitor database connectivity.
 * **Metric Omission** – When the database is unreachable, database-dependent metrics are omitted from the output rather than being reported as zero.
+
+## Systemd Boot Ordering
+
+For systemd deployments, ensure exporter startup is ordered after PostgreSQL to avoid early boot races:
+
+```ini
+[Unit]
+After=network-online.target postgresql.service
+Wants=network-online.target
+```
+
+If your distribution uses a versioned unit name (for example `postgresql-16.service`), replace `postgresql.service` accordingly.
 
 ## Project layout
 
@@ -242,9 +254,14 @@ better testability. (or that is the plan).
 The project includes unit tests for each collector and integration tests for the
 exporter as a whole. You can run the tests using:
 
-    just
+    just test
 
 > need just installed, see [just](https://github.com/casey/just)
+
+For direct checks, these commands are also part of the normal validation flow:
+
+    cargo fmt --all -- --check
+    just clippy
 
 To run with opentelemetry set the environment variable `OTEL_EXPORTER_OTLP_ENDPOINT`, for example:
 
@@ -263,6 +280,24 @@ For tracees add more verbosity with `-v`, for example:
     cargo watch -x 'run -- --collector.vacuum -vv'
 
 open `jaeger` at http://localhost:16686 and select the `pg_exporter` service to see the traces.
+
+## 🤝 Contributing
+
+We welcome contributions of all kinds.
+
+1. **Read the [Agent & Contributor Contract](AGENTS.md)**. It contains repository-specific rules for AI and human contributors, including testing, safety, and release-flow expectations.
+2. **Read the [Development Guide](CONTRIBUTING.md)**. It covers local PostgreSQL setup, test workflows, and safe collector patterns.
+3. **Run tests**: `just test` runs the standard validation flow for this crate.
+4. **Formatting**: run `cargo fmt --all -- --check`.
+5. **Linting**: run `just clippy` before submitting changes.
+6. **Check recent release notes** in [CHANGELOG.md](CHANGELOG.md) so documentation and release notes stay aligned.
+
+Related docs:
+
+- [AGENTS.md](AGENTS.md)
+- [CONTRIBUTING.md](CONTRIBUTING.md)
+- [CHANGELOG.md](CHANGELOG.md)
+- [tests/TESTING.md](tests/TESTING.md)
 
 ## Feedback
 

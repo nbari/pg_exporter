@@ -4,6 +4,10 @@ use pg_exporter::collectors::Collector;
 use pg_exporter::collectors::statements::pg_statements::PgStatementsCollector;
 use prometheus::Registry;
 
+async fn setup_pg_statements_test_db() -> Result<Option<common::IsolatedTestDatabase>> {
+    common::create_pg_statements_test_database("pg_statements").await
+}
+
 #[tokio::test]
 async fn test_pg_statements_collector_registers_without_error() -> Result<()> {
     let collector = PgStatementsCollector::new();
@@ -17,25 +21,22 @@ async fn test_pg_statements_collector_registers_without_error() -> Result<()> {
 
 #[tokio::test]
 async fn test_pg_statements_collector_has_all_metrics_after_collection() -> Result<()> {
-    let pool = common::create_test_pool().await?;
-
-    // First, ensure pg_stat_statements extension exists (may not be available in test env)
-    let ext_check = sqlx::query("SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'")
-        .fetch_optional(&pool)
-        .await?;
-
-    if ext_check.is_none() {
-        // Skip test if extension not available
+    let Some(test_db) = setup_pg_statements_test_db().await? else {
         println!("pg_stat_statements extension not installed, skipping test");
-        pool.close().await;
         return Ok(());
-    }
+    };
+    let pool = test_db.pool();
 
     let collector = PgStatementsCollector::new();
     let registry = Registry::new();
 
     collector.register_metrics(&registry)?;
-    collector.collect(&pool).await?;
+
+    for _ in 0..5 {
+        let _ = sqlx::query("SELECT 1").execute(pool).await;
+    }
+
+    collector.collect(pool).await?;
 
     let metric_families = registry.gather();
 
@@ -65,13 +66,14 @@ async fn test_pg_statements_collector_has_all_metrics_after_collection() -> Resu
         );
     }
 
-    pool.close().await;
+    test_db.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn test_pg_statements_collector_gracefully_handles_missing_extension() -> Result<()> {
-    let pool = common::create_test_pool().await?;
+    let test_db = common::IsolatedTestDatabase::new("pg_statements_missing").await?;
+    let pool = test_db.pool();
 
     let collector = PgStatementsCollector::new();
     let registry = Registry::new();
@@ -80,19 +82,23 @@ async fn test_pg_statements_collector_gracefully_handles_missing_extension() -> 
 
     // Should not panic even if extension is missing
     // The collector should just log a warning and continue
-    let result = collector.collect(&pool).await;
+    let result = collector.collect(pool).await;
     assert!(
         result.is_ok(),
         "Collector should handle missing extension gracefully"
     );
 
-    pool.close().await;
+    test_db.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn test_pg_statements_collector_with_top_n_configuration() -> Result<()> {
-    let pool = common::create_test_pool().await?;
+    let Some(test_db) = setup_pg_statements_test_db().await? else {
+        println!("pg_stat_statements extension not installed, skipping test");
+        return Ok(());
+    };
+    let pool = test_db.pool();
 
     // Test with custom top_n value
     let collector = PgStatementsCollector::with_top_n(50);
@@ -101,37 +107,30 @@ async fn test_pg_statements_collector_with_top_n_configuration() -> Result<()> {
     collector.register_metrics(&registry)?;
 
     // Should not error with custom configuration
-    let result = collector.collect(&pool).await;
+    let result = collector.collect(pool).await;
     assert!(result.is_ok());
 
-    pool.close().await;
+    test_db.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn test_pg_statements_collector_metrics_have_proper_labels() -> Result<()> {
-    let pool = common::create_test_pool().await?;
-
-    // Check if extension exists
-    let ext_check = sqlx::query("SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'")
-        .fetch_optional(&pool)
-        .await?;
-
-    if ext_check.is_none() {
+    let Some(test_db) = setup_pg_statements_test_db().await? else {
         println!("pg_stat_statements extension not installed, skipping test");
-        pool.close().await;
         return Ok(());
-    }
+    };
+    let pool = test_db.pool();
 
     // Generate some test queries to ensure we have data
-    let _ = sqlx::query("SELECT 1").execute(&pool).await;
-    let _ = sqlx::query("SELECT current_timestamp").execute(&pool).await;
+    let _ = sqlx::query("SELECT 1").execute(pool).await;
+    let _ = sqlx::query("SELECT current_timestamp").execute(pool).await;
 
     let collector = PgStatementsCollector::new();
     let registry = Registry::new();
 
     collector.register_metrics(&registry)?;
-    collector.collect(&pool).await?;
+    collector.collect(pool).await?;
 
     let metric_families = registry.gather();
 
@@ -169,30 +168,23 @@ async fn test_pg_statements_collector_metrics_have_proper_labels() -> Result<()>
         );
     }
 
-    pool.close().await;
+    test_db.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn test_pg_statements_collector_cache_hit_ratio_is_valid() -> Result<()> {
-    let pool = common::create_test_pool().await?;
-
-    // Check if extension exists
-    let ext_check = sqlx::query("SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'")
-        .fetch_optional(&pool)
-        .await?;
-
-    if ext_check.is_none() {
+    let Some(test_db) = setup_pg_statements_test_db().await? else {
         println!("pg_stat_statements extension not installed, skipping test");
-        pool.close().await;
         return Ok(());
-    }
+    };
+    let pool = test_db.pool();
 
     let collector = PgStatementsCollector::new();
     let registry = Registry::new();
 
     collector.register_metrics(&registry)?;
-    collector.collect(&pool).await?;
+    collector.collect(pool).await?;
 
     let metric_families = registry.gather();
 
@@ -211,28 +203,22 @@ async fn test_pg_statements_collector_cache_hit_ratio_is_valid() -> Result<()> {
         }
     }
 
-    pool.close().await;
+    test_db.cleanup().await?;
     Ok(())
 }
 
 /// Test that utility statements (VACUUM, ANALYZE, etc.) with NULL query text are handled properly
 #[tokio::test]
 async fn test_pg_statements_handles_utility_statements() -> Result<()> {
-    let pool = common::create_test_pool().await?;
-
-    let ext_check = sqlx::query("SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'")
-        .fetch_optional(&pool)
-        .await?;
-
-    if ext_check.is_none() {
+    let Some(test_db) = setup_pg_statements_test_db().await? else {
         println!("pg_stat_statements extension not installed, skipping test");
-        pool.close().await;
         return Ok(());
-    }
+    };
+    let pool = test_db.pool();
 
     // Generate utility statements that may have NULL query text
-    let _ = sqlx::query("VACUUM").execute(&pool).await;
-    let _ = sqlx::query("ANALYZE").execute(&pool).await;
+    let _ = sqlx::query("VACUUM").execute(pool).await;
+    let _ = sqlx::query("ANALYZE").execute(pool).await;
 
     let collector = PgStatementsCollector::new();
     let registry = Registry::new();
@@ -240,13 +226,13 @@ async fn test_pg_statements_handles_utility_statements() -> Result<()> {
     collector.register_metrics(&registry)?;
 
     // Should not panic with utility statements
-    let result = collector.collect(&pool).await;
+    let result = collector.collect(pool).await;
     assert!(
         result.is_ok(),
         "Should handle utility statements without panicking"
     );
 
-    pool.close().await;
+    test_db.cleanup().await?;
     Ok(())
 }
 
@@ -254,26 +240,20 @@ async fn test_pg_statements_handles_utility_statements() -> Result<()> {
 /// This specifically tests for the NUMERIC vs BIGINT type mismatch issue
 #[tokio::test]
 async fn test_pg_statements_handles_numeric_types_correctly() -> Result<()> {
-    let pool = common::create_test_pool().await?;
-
-    let ext_check = sqlx::query("SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'")
-        .fetch_optional(&pool)
-        .await?;
-
-    if ext_check.is_none() {
+    let Some(test_db) = setup_pg_statements_test_db().await? else {
         println!("pg_stat_statements extension not installed, skipping test");
-        pool.close().await;
         return Ok(());
-    }
+    };
+    let pool = test_db.pool();
 
     // Generate diverse queries to ensure pg_stat_statements has data with various numeric types
     for _ in 0..10 {
-        let _ = sqlx::query("SELECT 1").execute(&pool).await;
+        let _ = sqlx::query("SELECT 1").execute(pool).await;
         let _ = sqlx::query("SELECT COUNT(*) FROM pg_stat_statements")
-            .execute(&pool)
+            .execute(pool)
             .await;
         let _ = sqlx::query("SELECT * FROM pg_stat_statements WHERE queryid IS NOT NULL LIMIT 1")
-            .execute(&pool)
+            .execute(pool)
             .await;
     }
 
@@ -283,7 +263,7 @@ async fn test_pg_statements_handles_numeric_types_correctly() -> Result<()> {
     collector.register_metrics(&registry)?;
 
     // Should not panic on type conversions
-    let result = collector.collect(&pool).await;
+    let result = collector.collect(pool).await;
     assert!(
         result.is_ok(),
         "Should handle NUMERIC type conversions without panicking: {:?}",
@@ -301,38 +281,27 @@ async fn test_pg_statements_handles_numeric_types_correctly() -> Result<()> {
         println!("Successfully collected pg_stat_statements metrics with numeric types");
     }
 
-    pool.close().await;
+    test_db.cleanup().await?;
     Ok(())
 }
 
 /// Test that all metrics handle zero/NULL values gracefully
 #[tokio::test]
 async fn test_pg_statements_handles_edge_case_values() -> Result<()> {
-    let pool = common::create_test_pool().await?;
-
-    let ext_check = sqlx::query("SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'")
-        .fetch_optional(&pool)
-        .await?;
-
-    if ext_check.is_none() {
+    let Some(test_db) = setup_pg_statements_test_db().await? else {
         println!("pg_stat_statements extension not installed, skipping test");
-        pool.close().await;
         return Ok(());
-    }
-
-    // Reset stats to ensure we're testing edge cases
-    let _ = sqlx::query("SELECT pg_stat_statements_reset()")
-        .execute(&pool)
-        .await;
+    };
+    let pool = test_db.pool();
 
     // Generate a minimal query
-    let _ = sqlx::query("SELECT 1").execute(&pool).await;
+    let _ = sqlx::query("SELECT 1").execute(pool).await;
 
     let collector = PgStatementsCollector::new();
     let registry = Registry::new();
 
     collector.register_metrics(&registry)?;
-    collector.collect(&pool).await?;
+    collector.collect(pool).await?;
 
     let metric_families = registry.gather();
 
@@ -352,42 +321,36 @@ async fn test_pg_statements_handles_edge_case_values() -> Result<()> {
         }
     }
 
-    pool.close().await;
+    test_db.cleanup().await?;
     Ok(())
 }
 
 /// Test that the collector works correctly with a realistic workload
 #[tokio::test]
 async fn test_pg_statements_with_realistic_workload() -> Result<()> {
-    let pool = common::create_test_pool().await?;
-
-    let ext_check = sqlx::query("SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'")
-        .fetch_optional(&pool)
-        .await?;
-
-    if ext_check.is_none() {
+    let Some(test_db) = setup_pg_statements_test_db().await? else {
         println!("pg_stat_statements extension not installed, skipping test");
-        pool.close().await;
         return Ok(());
-    }
+    };
+    let pool = test_db.pool();
 
     // Create a test table
     let _ = sqlx::query("CREATE TEMP TABLE test_table (id SERIAL PRIMARY KEY, data TEXT)")
-        .execute(&pool)
+        .execute(pool)
         .await;
 
     // Generate a realistic workload with different query types
     for i in 0..20 {
         let _ = sqlx::query("INSERT INTO test_table (data) VALUES ($1)")
             .bind(format!("data_{i}"))
-            .execute(&pool)
+            .execute(pool)
             .await;
     }
 
     for _ in 0..30 {
         let _ = sqlx::query("SELECT * FROM test_table WHERE id > $1")
             .bind(5)
-            .execute(&pool)
+            .execute(pool)
             .await;
     }
 
@@ -395,7 +358,7 @@ async fn test_pg_statements_with_realistic_workload() -> Result<()> {
         let _ = sqlx::query("UPDATE test_table SET data = $1 WHERE id = $2")
             .bind("updated")
             .bind(1)
-            .execute(&pool)
+            .execute(pool)
             .await;
     }
 
@@ -403,7 +366,7 @@ async fn test_pg_statements_with_realistic_workload() -> Result<()> {
     let registry = Registry::new();
 
     collector.register_metrics(&registry)?;
-    collector.collect(&pool).await?;
+    collector.collect(pool).await?;
 
     let metric_families = registry.gather();
 
@@ -427,6 +390,6 @@ async fn test_pg_statements_with_realistic_workload() -> Result<()> {
         );
     }
 
-    pool.close().await;
+    test_db.cleanup().await?;
     Ok(())
 }

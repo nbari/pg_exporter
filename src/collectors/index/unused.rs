@@ -95,17 +95,6 @@ impl Collector for UnusedIndexCollector {
     }
 
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
-        #[derive(sqlx::FromRow)]
-        struct UnusedStats {
-            unused_count: i64,
-            unused_size_bytes: i64,
-        }
-
-        #[derive(sqlx::FromRow)]
-        struct InvalidStats {
-            invalid_count: i64,
-        }
-
         Box::pin(async move {
             // Query for unused indexes (idx_scan = 0)
             // Exclude primary keys and unique constraints as they may not be scanned but are still critical
@@ -123,7 +112,8 @@ impl Collector for UnusedIndexCollector {
                 "
             );
 
-            let unused: UnusedStats = sqlx::query_as(&unused_query).fetch_one(pool).await?;
+            let (unused_count, unused_size_bytes): (i64, i64) =
+                sqlx::query_as(&unused_query).fetch_one(pool).await?;
 
             // Query for invalid indexes
             let invalid_query = format!(
@@ -137,13 +127,12 @@ impl Collector for UnusedIndexCollector {
                 "
             );
 
-            let invalid: InvalidStats = sqlx::query_as(&invalid_query).fetch_one(pool).await?;
+            let (invalid_count,): (i64,) = sqlx::query_as(&invalid_query).fetch_one(pool).await?;
 
             // Update metrics
-            self.unused_count.set(i64_to_f64(unused.unused_count));
-            self.unused_size_bytes
-                .set(i64_to_f64(unused.unused_size_bytes));
-            self.invalid_count.set(i64_to_f64(invalid.invalid_count));
+            self.unused_count.set(i64_to_f64(unused_count));
+            self.unused_size_bytes.set(i64_to_f64(unused_size_bytes));
+            self.invalid_count.set(i64_to_f64(invalid_count));
 
             Ok(())
         })

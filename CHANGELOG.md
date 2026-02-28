@@ -5,7 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.10.2] - 2026-02-28
+
+### Fixed
+- **Startup / Reboot Resilience**: Improved behavior when the exporter starts before PostgreSQL is fully ready. The exporter now starts independently of immediate database availability, reports `pg_up = 0` during the outage window, and recovers on later scrapes once PostgreSQL becomes reachable again.
+- **Systemd Startup Ordering**: Documented PostgreSQL-aware startup ordering in the bundled systemd unit so deployments can avoid boot-time races by starting `pg_exporter` after `postgresql.service`.
+- **`pg_stat_statements` Test Compatibility**: Fixed the test helper to use the correct `pg_stat_statements_reset` function signature across PostgreSQL 14-18.
+
+### CI
+- **Coverage Database Setup**: Added the missing `pg_stat_statements` preload and initialization steps to the coverage workflow so coverage runs match the normal PostgreSQL test matrix setup.
+- **Pre-commit SQL Check Scope**: Narrowed the `pg_stat_statements` cast warning in the pre-commit hook to staged collector source files so workflow and test-seed queries do not trigger false positives.
 
 ### Added
 - **Citus Collector** (disabled by default, enable with `--collector.citus`)
