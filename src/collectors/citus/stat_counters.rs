@@ -138,13 +138,11 @@ impl Collector for CitusStatCountersCollector {
             {
                 Ok(rows) => rows,
                 Err(e) => {
-                    // citus_stat_counters may not exist on older Citus versions
-                    debug!(
-                        collector = "citus_stat_counters",
-                        error = %e,
-                        "citus_stat_counters not available, skipping"
-                    );
-                    return Ok(());
+                    if e.to_string().contains("citus_stat_counters") {
+                        debug!("citus_stat_counters view not found, skipping (requires Citus 12+)");
+                        return Ok(());
+                    }
+                    return Err(e.into());
                 }
             };
 

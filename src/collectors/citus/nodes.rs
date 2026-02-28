@@ -96,12 +96,11 @@ impl Collector for CitusNodesCollector {
             {
                 Ok(rows) => rows,
                 Err(e) => {
-                    debug!(
-                        collector = "citus_nodes",
-                        error = %e,
-                        "pg_dist_node not available, skipping"
-                    );
-                    return Ok(());
+                    if e.to_string().contains("pg_dist_node") {
+                        debug!("pg_dist_node view not found, skipping");
+                        return Ok(());
+                    }
+                    return Err(e.into());
                 }
             };
 

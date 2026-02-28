@@ -99,13 +99,11 @@ impl Collector for CitusTablesCollector {
             {
                 Ok(rows) => rows,
                 Err(e) => {
-                    // citus_tables view may not exist on older Citus versions (requires Citus 10+)
-                    debug!(
-                        collector = "citus_tables",
-                        error = %e,
-                        "citus_tables not available, skipping"
-                    );
-                    return Ok(());
+                    if e.to_string().contains("citus_tables") {
+                        debug!("citus_tables view not found, skipping (requires Citus 10+)");
+                        return Ok(());
+                    }
+                    return Err(e.into());
                 }
             };
 

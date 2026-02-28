@@ -96,13 +96,11 @@ impl Collector for CitusActivityCollector {
             {
                 Ok(rows) => rows,
                 Err(e) => {
-                    // citus_dist_stat_activity may not exist on older Citus versions
-                    debug!(
-                        collector = "citus_activity",
-                        error = %e,
-                        "citus_dist_stat_activity not available, skipping"
-                    );
-                    return Ok(());
+                    if e.to_string().contains("citus_dist_stat_activity") {
+                        debug!("citus_dist_stat_activity view not found, skipping");
+                        return Ok(());
+                    }
+                    return Err(e.into());
                 }
             };
 

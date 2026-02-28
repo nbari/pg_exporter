@@ -101,13 +101,11 @@ impl Collector for CitusShardsCollector {
             {
                 Ok(rows) => rows,
                 Err(e) => {
-                    // citus_shards view may not exist on older Citus versions (requires Citus 10+)
-                    debug!(
-                        collector = "citus_shards",
-                        error = %e,
-                        "citus_shards not available, skipping"
-                    );
-                    return Ok(());
+                    if e.to_string().contains("citus_shards") {
+                        debug!("citus_shards view not found, skipping (requires Citus 10+)");
+                        return Ok(());
+                    }
+                    return Err(e.into());
                 }
             };
 
