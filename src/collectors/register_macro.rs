@@ -89,7 +89,7 @@ macro_rules! register_collectors {
             ///     }
             /// }
             /// ```
-            pub fn get_scraper(&self) -> Option<std::sync::Arc<crate::collectors::exporter::ScraperCollector>> {
+            #[must_use] pub fn get_scraper(&self) -> Option<std::sync::Arc<crate::collectors::exporter::ScraperCollector>> {
                 match self {
                     // ExporterCollector is the only collector that tracks scrape performance
                     CollectorType::ExporterCollector(c) => Some(c.get_scraper().clone()),
@@ -100,7 +100,7 @@ macro_rules! register_collectors {
         }
 
         // Generate the factory function map
-        pub fn all_factories() -> HashMap<&'static str, fn() -> CollectorType> {
+        #[must_use] pub fn all_factories() -> HashMap<&'static str, fn() -> CollectorType> {
             let mut map: HashMap<&'static str, fn() -> CollectorType> = HashMap::new();
             $(
                 map.insert(

@@ -15,3 +15,4 @@ pub mod stat;
 pub mod statements;
 pub mod tls;
 pub mod vacuum;
+pub mod citus;

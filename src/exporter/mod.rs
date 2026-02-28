@@ -266,7 +266,7 @@ fn on_response<B>(response: &axum::http::Response<B>, latency: Duration, span: &
 }
 
 async fn add_trace_headers(req: Request<Body>, next: Next) -> Response {
-    let mut res = next.run(req).await;
+    let mut response = next.run(req).await;
 
     let span = Span::current();
 
@@ -278,11 +278,11 @@ async fn add_trace_headers(req: Request<Body>, next: Next) -> Response {
     if span_context.is_valid()
         && let Ok(val) = HeaderValue::from_str(&span_context.trace_id().to_string())
     {
-        res.headers_mut()
+        response.headers_mut()
             .insert(HeaderName::from_static("x-trace-id"), val);
     }
 
-    res
+    response
 }
 
 #[cfg(test)]
