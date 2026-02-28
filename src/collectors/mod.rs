@@ -59,6 +59,7 @@ register_collectors! {
     statements => StatementsCollector,
     exporter => ExporterCollector,
     tls => TlsCollector,
+    citus => CitusCollector,
     // Add more collectors here - just follow the same pattern!
 }
 
