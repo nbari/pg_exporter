@@ -86,13 +86,24 @@ impl Collector for CitusNodesCollector {
                 db.sql.table = "pg_dist_node"
             );
 
-            let rows = sqlx::query(
+            let rows = match sqlx::query(
                 r"SELECT nodeid, nodename, nodeport, isactive, noderole::text, shouldhaveshards
                   FROM pg_dist_node",
             )
             .fetch_all(pool)
             .instrument(query_span)
-            .await?;
+            .await
+            {
+                Ok(rows) => rows,
+                Err(e) => {
+                    debug!(
+                        collector = "citus_nodes",
+                        error = %e,
+                        "pg_dist_node not available, skipping"
+                    );
+                    return Ok(());
+                }
+            };
 
             self.node_is_active.reset();
             self.node_should_have_shards.reset();
@@ -159,6 +170,6 @@ mod tests {
     fn test_citus_nodes_register_metrics() {
         let registry = Registry::new();
         let collector = CitusNodesCollector::new();
-        collector.register_metrics(&registry).unwrap();
+        assert!(collector.register_metrics(&registry).is_ok());
     }
 }

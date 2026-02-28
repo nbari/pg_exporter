@@ -163,6 +163,6 @@ mod tests {
     fn test_citus_tables_register_metrics() {
         let registry = Registry::new();
         let collector = CitusTablesCollector::new();
-        collector.register_metrics(&registry).unwrap();
+        assert!(collector.register_metrics(&registry).is_ok());
     }
 }

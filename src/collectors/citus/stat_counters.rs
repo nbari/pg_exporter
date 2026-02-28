@@ -33,48 +33,48 @@ impl CitusStatCountersCollector {
     pub fn new() -> Self {
         let connection_succeeded = GaugeVec::new(
             Opts::new(
-                "citus_connection_establishment_succeeded_total",
+                "citus_connection_establishment_succeeded",
                 "Successful inter-node connection establishments",
             ),
             &["database"],
         )
-        .expect("citus_connection_establishment_succeeded_total metric");
+        .expect("citus_connection_establishment_succeeded metric");
 
         let connection_failed = GaugeVec::new(
             Opts::new(
-                "citus_connection_establishment_failed_total",
+                "citus_connection_establishment_failed",
                 "Failed inter-node connection establishments",
             ),
             &["database"],
         )
-        .expect("citus_connection_establishment_failed_total metric");
+        .expect("citus_connection_establishment_failed metric");
 
         let connection_reused = GaugeVec::new(
             Opts::new(
-                "citus_connection_reused_total",
+                "citus_connection_reused",
                 "Reused inter-node connections",
             ),
             &["database"],
         )
-        .expect("citus_connection_reused_total metric");
+        .expect("citus_connection_reused metric");
 
         let query_single_shard = GaugeVec::new(
             Opts::new(
-                "citus_query_execution_single_shard_total",
+                "citus_query_execution_single_shard",
                 "Single-shard query executions",
             ),
             &["database"],
         )
-        .expect("citus_query_execution_single_shard_total metric");
+        .expect("citus_query_execution_single_shard metric");
 
         let query_multi_shard = GaugeVec::new(
             Opts::new(
-                "citus_query_execution_multi_shard_total",
+                "citus_query_execution_multi_shard",
                 "Multi-shard query executions",
             ),
             &["database"],
         )
-        .expect("citus_query_execution_multi_shard_total metric");
+        .expect("citus_query_execution_multi_shard metric");
 
         Self {
             connection_succeeded,
@@ -215,6 +215,6 @@ mod tests {
     fn test_citus_stat_counters_register_metrics() {
         let registry = Registry::new();
         let collector = CitusStatCountersCollector::new();
-        collector.register_metrics(&registry).unwrap();
+        assert!(collector.register_metrics(&registry).is_ok());
     }
 }

@@ -28,15 +28,9 @@ use tables::CitusTablesCollector;
 ///
 /// Disabled by default. When enabled, checks for the Citus extension
 /// before collecting metrics and gracefully skips if not installed.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct CitusCollector {
     subs: Vec<Arc<dyn Collector + Send + Sync>>,
-}
-
-impl Default for CitusCollector {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl CitusCollector {
@@ -72,7 +66,6 @@ impl Collector for CitusCollector {
     fn register_metrics(&self, registry: &Registry) -> Result<()> {
         for sub in &self.subs {
             let span = info_span!("collector.register_metrics", sub_collector = %sub.name());
-            let _guard = span.enter();
             let res = sub.register_metrics(registry);
             match res {
                 Ok(()) => {
@@ -83,6 +76,7 @@ impl Collector for CitusCollector {
                 }
             }
             res?;
+            drop(span);
         }
         Ok(())
     }
@@ -148,6 +142,6 @@ mod tests {
     fn test_citus_collector_register_metrics() {
         let registry = Registry::new();
         let collector = CitusCollector::new();
-        collector.register_metrics(&registry).unwrap();
+        assert!(collector.register_metrics(&registry).is_ok());
     }
 }

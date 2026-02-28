@@ -180,6 +180,6 @@ mod tests {
     fn test_citus_shards_register_metrics() {
         let registry = Registry::new();
         let collector = CitusShardsCollector::new();
-        collector.register_metrics(&registry).unwrap();
+        assert!(collector.register_metrics(&registry).is_ok());
     }
 }

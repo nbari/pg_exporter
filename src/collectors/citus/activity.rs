@@ -146,6 +146,6 @@ mod tests {
     fn test_citus_activity_register_metrics() {
         let registry = Registry::new();
         let collector = CitusActivityCollector::new();
-        collector.register_metrics(&registry).unwrap();
+        assert!(collector.register_metrics(&registry).is_ok());
     }
 }

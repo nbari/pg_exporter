@@ -317,16 +317,16 @@ async fn run_citus_collector_test(image_tag: &str) -> Result<()> {
     // doesn't exist, so we only verify when samples are present.
     let stat_counter_samples = gauge_vec_sample_count(
         &families,
-        "citus_connection_establishment_succeeded_total",
+        "citus_connection_establishment_succeeded",
     );
     if stat_counter_samples > 0 {
         ensure!(
             has_label(
                 &families,
-                "citus_connection_establishment_succeeded_total",
+                "citus_connection_establishment_succeeded",
                 "database"
             ),
-            "citus_connection_establishment_succeeded_total should have database label"
+            "citus_connection_establishment_succeeded should have database label"
         );
     }
 
