@@ -31,7 +31,8 @@
 ///
 /// # Threading and Locking
 ///
-/// We use `std::sync::{Mutex, RwLock}` for thread-safe access to shared state.
+/// `ProcessCollector` keeps a small `Mutex`-protected `sysinfo::System` cache.
+/// `ScraperCollector` updates `prometheus` metrics directly without an extra lock.
 ///
 /// ## Poison Error Handling
 ///

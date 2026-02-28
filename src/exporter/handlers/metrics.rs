@@ -2,7 +2,7 @@ use crate::collectors::registry::CollectorRegistry;
 use axum::{
     extract::Extension,
     http::{HeaderMap, HeaderValue, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use prometheus::Encoder;
 use sqlx::PgPool;
@@ -12,17 +12,17 @@ use tracing::{debug, error, instrument};
 pub async fn metrics(
     Extension(pool): Extension<PgPool>,
     Extension(registry): Extension<CollectorRegistry>,
-) -> impl IntoResponse {
+) -> Response {
     let mut headers = HeaderMap::new();
     headers.insert(
         "content-type",
         HeaderValue::from_static("text/plain; charset=utf-8"),
     );
 
-    match registry.collect_all(&pool).await {
+    match registry.collect_all_bytes(&pool).await {
         Ok(metrics) => {
             debug!("Successfully collected metrics");
-            (StatusCode::OK, headers, metrics)
+            (StatusCode::OK, headers, metrics).into_response()
         }
         Err(e) => {
             error!("Failed to collect metrics: {}", e);
@@ -39,11 +39,11 @@ pub async fn metrics(
                     format!(
                         "# Error collecting metrics: {e}\n# Error encoding metrics: {encode_err}"
                     ),
-                );
+                )
+                    .into_response();
             }
 
-            let output = String::from_utf8_lossy(&buffer).to_string();
-            (StatusCode::OK, headers, output)
+            (StatusCode::OK, headers, buffer).into_response()
         }
     }
 }

@@ -19,8 +19,8 @@ use opentelemetry::global;
 use opentelemetry::trace::{TraceContextExt, TraceId};
 use opentelemetry_http::HeaderExtractor;
 use secrecy::{ExposeSecret, SecretString};
-use sqlx::postgres::PgPoolOptions;
-use std::time::Duration;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use std::{str::FromStr, time::Duration};
 use tokio::{net::TcpListener, time::timeout};
 use tower::ServiceBuilder;
 use tower_http::{
@@ -51,16 +51,19 @@ pub async fn new(
     dsn: SecretString,
     collectors: Vec<String>,
 ) -> Result<()> {
+    let recovery_connect_options = PgConnectOptions::from_str(dsn.expose_secret())
+        .context("Failed to parse base DSN options")?;
     let pool = connect_pool(&dsn)?;
 
     // Try to initialize version, but don't block startup if DB is down
     let _ = timeout(Duration::from_secs(1), initialize_version(&pool)).await;
 
-    let _ = set_base_connect_options_from_dsn(&dsn);
+    set_base_connect_options_from_dsn(&dsn).context("Failed to parse base DSN options")?;
 
     let config = CollectorConfig::new().with_enabled(&collectors);
 
-    let registry = CollectorRegistry::new(&config);
+    let registry =
+        CollectorRegistry::new_with_recovery_options(&config, Some(recovery_connect_options));
 
     let app = build_router(pool.clone(), registry);
 
@@ -87,7 +90,7 @@ fn connect_pool(dsn: &SecretString) -> Result<sqlx::PgPool> {
         .max_connections(3)
         .acquire_timeout(Duration::from_secs(5))
         .max_lifetime(Duration::from_secs(120))
-        .test_before_acquire(true)
+        .test_before_acquire(false)
         .connect_lazy(&db_dsn)?;
 
     info!("Database connection pool initialized (lazy)");
