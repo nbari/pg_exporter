@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Citus Collector** (disabled by default, enable with `--collector.citus`)
+  - Worker node status tracking (`citus_node_is_active`, `citus_node_should_have_shards`, `citus_nodes_total`)
+  - Distributed table size and shard count monitoring (`citus_table_size_bytes`, `citus_table_shard_count`, `citus_tables_total`)
+  - Individual shard size and placement tracking (`citus_shard_size_bytes`, `citus_shards_per_node`, `citus_shards_total`)
+  - Inter-node connection and query execution statistics (`citus_connection_establishment_*_total`, `citus_query_execution_*_total`)
+  - Distributed query activity summary (`citus_dist_activity_count`, `citus_dist_activity_total`)
+  - Graceful skip when Citus extension is not installed (no errors, no metrics emitted)
+  - Graceful handling of older Citus versions where some views may not exist
+  - Uses `citus_table_size()` for accurate distributed table sizes
+  - Integration tests against Citus 12 and 13 via testcontainers
+
 ## [0.10.1] - 2026-02-24
 
 ### Changed
