@@ -194,7 +194,8 @@ impl PgStatementsCollector {
         if cleaned.len() <= max_len {
             cleaned
         } else {
-            format!("{}...", &cleaned[..max_len])
+            let trunc_at = cleaned.floor_char_boundary(max_len);
+            format!("{}...", &cleaned[..trunc_at])
         }
     }
 
@@ -489,5 +490,13 @@ mod tests {
         let multiline = "SELECT *\n  FROM users\n  WHERE id = 1";
         let result = PgStatementsCollector::truncate_query(multiline, 80);
         assert_eq!(result, "SELECT * FROM users WHERE id = 1");
+    }
+
+    #[test]
+    fn test_truncate_query_utf8_boundary() {
+        let prefix = "a".repeat(79);
+        let query = format!("{prefix}ı");
+        let result = PgStatementsCollector::truncate_query(&query, 80);
+        assert_eq!(result, format!("{prefix}..."));
     }
 }

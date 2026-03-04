@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.3] - 2026-03-04
+
+### Fixed
+- **`pg_stat_statements` UTF-8 Label Truncation Panic**: Fixed a panic when truncating `query_short` labels at 80 bytes if PostgreSQL returned text ending mid-multibyte UTF-8 character. Truncation now uses a safe character boundary (`floor_char_boundary`) before appending `...`.
+
+### Tests
+- **Issue #15 Regression Coverage**: Added collector regression tests for multibyte UTF-8 query text (including Cyrillic) to verify byte-80 boundary behavior and ensure `pg_statements` collection remains panic-free.
+
 ## [0.10.2] - 2026-02-28
 
 ### Fixed
