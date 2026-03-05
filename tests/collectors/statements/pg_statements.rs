@@ -3,6 +3,11 @@ use anyhow::Result;
 use pg_exporter::collectors::Collector;
 use pg_exporter::collectors::statements::pg_statements::PgStatementsCollector;
 use prometheus::Registry;
+use tokio::time::{Duration, sleep};
+
+async fn setup_pg_statements_test_db() -> Result<Option<common::IsolatedTestDatabase>> {
+    common::create_pg_statements_test_database("pg_statements").await
+}
 
 async fn setup_pg_statements_test_db() -> Result<Option<common::IsolatedTestDatabase>> {
     common::create_pg_statements_test_database("pg_statements").await
@@ -230,6 +235,79 @@ async fn test_pg_statements_handles_utility_statements() -> Result<()> {
     assert!(
         result.is_ok(),
         "Should handle utility statements without panicking"
+    );
+
+    test_db.cleanup().await?;
+    Ok(())
+}
+
+/// Reproduces issue #15:
+/// query text with multibyte UTF-8 where byte index 80 is not a char boundary.
+#[tokio::test]
+async fn test_pg_statements_handles_multibyte_utf8_query_boundary() -> Result<()> {
+    let Some(test_db) = setup_pg_statements_test_db().await? else {
+        println!("pg_stat_statements extension not installed, skipping test");
+        return Ok(());
+    };
+    let pool = test_db.pool();
+
+    let _ = sqlx::query("SELECT pg_stat_statements_reset()")
+        .execute(pool)
+        .await;
+
+    // `SELECT $1 AS "` is 14 ASCII chars in normalized query text.
+    // 65 ASCII chars + one Cyrillic char makes byte index 80 fall inside UTF-8.
+    let identifier = format!(
+        "{}сначала выбираем строки с которыми будем работать",
+        "a".repeat(65)
+    );
+    let sql = format!("SELECT 1 AS \"{identifier}\"");
+    let _ = sqlx::query(&sql).execute(pool).await;
+    let _ = sqlx::query("SELECT pg_stat_force_next_flush()")
+        .execute(pool)
+        .await;
+
+    let pattern = "%сначала выбираем строки с которыми будем работать%";
+    let mut query_short: Option<String> = None;
+    for _ in 0..20 {
+        query_short = sqlx::query_scalar::<_, String>(
+            "SELECT LEFT(query, 80)
+             FROM pg_stat_statements
+             WHERE query LIKE $1
+             ORDER BY calls DESC
+             LIMIT 1",
+        )
+        .bind(pattern)
+        .fetch_optional(pool)
+        .await?;
+
+        if query_short.is_some() {
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+
+    let query_short = query_short
+        .ok_or_else(|| anyhow::anyhow!("failed to find UTF-8 query in pg_stat_statements"))?;
+    assert!(
+        query_short.len() > 80,
+        "LEFT(query, 80) should exceed 80 bytes with multibyte UTF-8, got {}",
+        query_short.len()
+    );
+    assert!(
+        !query_short.is_char_boundary(80),
+        "expected byte index 80 to be inside a UTF-8 character"
+    );
+
+    let collector = PgStatementsCollector::new();
+    let registry = Registry::new();
+    collector.register_metrics(&registry)?;
+
+    let result = collector.collect(pool).await;
+    assert!(
+        result.is_ok(),
+        "Collector should handle multibyte UTF-8 query truncation without panicking: {:?}",
+        result.err()
     );
 
     test_db.cleanup().await?;

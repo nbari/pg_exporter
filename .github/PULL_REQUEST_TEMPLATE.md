@@ -1,3 +1,6 @@
-- [ ] Have you test the code?
-- [ ] Have you check that the existing tests are passing?
+- [ ] Have you tested the code?
+- [ ] Have you checked that the existing tests are passing? (`just test`)
+- [ ] Does `cargo clippy --all-targets --all-features` pass with no warnings?
+- [ ] Does `cargo fmt --all -- --check` pass?
+- [ ] Are your commits signed?
 - [ ] The destination branch is **develop**?
