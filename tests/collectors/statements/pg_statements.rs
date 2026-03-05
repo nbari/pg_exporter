@@ -9,6 +9,10 @@ async fn setup_pg_statements_test_db() -> Result<Option<common::IsolatedTestData
     common::create_pg_statements_test_database("pg_statements").await
 }
 
+async fn setup_pg_statements_test_db() -> Result<Option<common::IsolatedTestDatabase>> {
+    common::create_pg_statements_test_database("pg_statements").await
+}
+
 #[tokio::test]
 async fn test_pg_statements_collector_registers_without_error() -> Result<()> {
     let collector = PgStatementsCollector::new();

@@ -24,6 +24,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Coverage Database Setup**: Added the missing `pg_stat_statements` preload and initialization steps to the coverage workflow so coverage runs match the normal PostgreSQL test matrix setup.
 - **Pre-commit SQL Check Scope**: Narrowed the `pg_stat_statements` cast warning in the pre-commit hook to staged collector source files so workflow and test-seed queries do not trigger false positives.
 
+### Added
+- **Citus Sub-Collectors**: 4 new Citus sub-collectors for additional monitoring views
+  - `citus_lock_waits_total` — blocked distributed query count from `citus_lock_waits`
+  - `citus_schema_size_bytes`, `citus_schemas_total` — distributed schema sizes from `citus_schemas` (Citus 12+)
+  - `citus_stat_statements_calls_total`, `citus_stat_statements_total` — distributed statement statistics from `citus_stat_statements` (Citus 11+, requires `pg_stat_statements`)
+  - `citus_stat_tenants_*` — per-tenant read/query/CPU statistics from `citus_stat_tenants`
+- **Citus 14 Integration Test**: Added test coverage for Citus 14.0.0
+- **Citus Edge-Case Tests**: Added metric finiteness, non-negativity, and empty-table tests for all Citus sub-collectors
+- **`test-citus` Recipe**: Added justfile recipe for running Citus integration tests; `pg_stat_statements` preloaded in Citus test containers
+
+### Changed
+- **Container Runtime**: justfile now auto-detects Docker or Podman via `container_cmd`
+
+### Fixed
+- **Citus SQL Type Safety**: Added explicit `::bigint`, `::integer`, `::double precision`, and `::text` casts to all Citus sub-collector queries
+- **Citus Error Handling**: Improved error discrimination in `stat_statements`, `stat_counters`, and Citus parent collector
+
+### Development
+- Removed `no_extension` test (redundant with graceful-skip logic in Citus parent collector)
+
+## [0.10.2] - 2026-02-28
+
+### Fixed
+- **Startup / Reboot Resilience**: Improved behavior when the exporter starts before PostgreSQL is fully ready. The exporter now starts independently of immediate database availability, reports `pg_up = 0` during the outage window, and recovers on later scrapes once PostgreSQL becomes reachable again.
+- **Systemd Startup Ordering**: Documented PostgreSQL-aware startup ordering in the bundled systemd unit so deployments can avoid boot-time races by starting `pg_exporter` after `postgresql.service`.
+- **`pg_stat_statements` Test Compatibility**: Fixed the test helper to use the correct `pg_stat_statements_reset` function signature across PostgreSQL 14-18.
+
+### CI
+- **Coverage Database Setup**: Added the missing `pg_stat_statements` preload and initialization steps to the coverage workflow so coverage runs match the normal PostgreSQL test matrix setup.
+- **Pre-commit SQL Check Scope**: Narrowed the `pg_stat_statements` cast warning in the pre-commit hook to staged collector source files so workflow and test-seed queries do not trigger false positives.
+
+### Added
+- **Citus Collector** (disabled by default, enable with `--collector.citus`)
+  - Worker node status tracking (`citus_node_is_active`, `citus_node_should_have_shards`, `citus_nodes_total`)
+  - Distributed table size and shard count monitoring (`citus_table_size_bytes`, `citus_table_shard_count`, `citus_tables_total`)
+  - Individual shard size and placement tracking (`citus_shard_size_bytes`, `citus_shards_per_node`, `citus_shards_total`)
+  - Inter-node connection and query execution statistics (`citus_connection_establishment_*`, `citus_query_execution_*`)
+  - Distributed query activity summary (`citus_dist_activity_count`, `citus_dist_activity_total`)
+  - Graceful skip when Citus extension is not installed (no errors, no metrics emitted)
+  - Graceful handling of older Citus versions where some views may not exist
+  - Uses `citus_table_size()` for accurate distributed table sizes
+  - Integration tests against Citus 12 and 13 via testcontainers
+
 ## [0.10.1] - 2026-02-24
 
 ### Changed

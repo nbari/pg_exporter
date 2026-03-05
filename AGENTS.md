@@ -36,7 +36,7 @@ Clippy, or tests fail locally.
 - Tests must run against local PostgreSQL on `localhost:5432`.
 - Do not run the test suite against a remote `PG_EXPORTER_DSN`.
 - The local PostgreSQL instance must have `pg_stat_statements` preloaded and the extension created.
-- Rootless Podman is used in local workflows. Podman networking may invoke `pasta`; errors from `pasta` are container-networking failures, not Rust test failures by themselves.
+- Docker and Podman are both supported for local workflows. The `.justfile` auto-detects the available container runtime via `container_cmd`. Podman networking may invoke `pasta`; errors from `pasta` are container-networking failures, not Rust test failures by themselves.
 
 ## Coding Rules
 
