@@ -58,12 +58,13 @@ Tracks scrape performance and health across all collectors.
 
 **Implementation:**
 - RAII `ScrapeTimer` for automatic duration recording
-- `std::sync::RwLock` for concurrent read access (handles PoisonError)
+- Direct updates to `prometheus` metric types in the scrape hot path
 - Histogram automatically exports `_bucket`, `_sum`, `_count` suffixes
 
 ## Why Standard Library Instead of parking_lot?
 
-We use `std::sync::{Mutex, RwLock}` instead of external crates like `parking_lot`:
+We use `std::sync::Mutex` where shared process-state caching needs it instead of
+external crates like `parking_lot`:
 
 ### 1. No External Dependencies
 
@@ -98,9 +99,9 @@ Since internal metrics are supplementary (not core PostgreSQL monitoring):
 
 ### 4. Lock Usage Benefits
 
-- **RwLock** allows multiple concurrent readers (Prometheus scrapes)
-- **Mutex** protects the cached System object
-- Both handle poisoning with the `.into_inner()` pattern
+- **Mutex** protects the cached `sysinfo::System` object
+- Scrape counters update `prometheus` metrics directly, without an extra lock
+- Poison handling remains explicit with the `.into_inner()` pattern
 - Performance is identical for our use case (low contention)
 
 ## Usage

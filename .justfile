@@ -1,6 +1,7 @@
 # Get the current user's UID and GID
 uid := `id -u`
 gid := `id -g`
+container_cmd := if `command -v podman 2>/dev/null || true` != "" { "podman" } else { "docker" }
 
 default: test
   @just --list
@@ -8,7 +9,7 @@ default: test
 # Test suite
 test: clippy fmt
   @echo "🧪 Checking PostgreSQL..."
-  @if ! podman ps --filter "name=pg_exporter_postgres" --format "{{{{.Names}}}}" | grep -q "pg_exporter_postgres"; then \
+  @if ! {{container_cmd}} ps --filter "name=pg_exporter_postgres" --format "{{{{.Names}}}}" | grep -q "pg_exporter_postgres"; then \
     echo "🚀 PostgreSQL container not running, starting it..."; \
     just postgres; \
     echo "⏳ Waiting for PostgreSQL to be ready..."; \
@@ -52,6 +53,32 @@ test-replica:
       cargo test --test collectors_tests \
       replication::replica_topology::replication_lag_and_role_semantics_from_postgres_primary_replica_pair \
       -- --nocapture
+
+# Run Citus integration tests (all versions via testcontainers)
+test-citus:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    docker_host="${DOCKER_HOST:-}"
+
+    if [[ -z "${docker_host}" ]]; then
+        if [[ -S /var/run/docker.sock ]]; then
+            docker_host="unix:///var/run/docker.sock"
+        elif [[ -n "${XDG_RUNTIME_DIR:-}" && -S "${XDG_RUNTIME_DIR}/podman/podman.sock" ]]; then
+            docker_host="unix://${XDG_RUNTIME_DIR}/podman/podman.sock"
+        elif [[ -S "/run/user/$(id -u)/podman/podman.sock" ]]; then
+            docker_host="unix:///run/user/$(id -u)/podman/podman.sock"
+        else
+            echo "❌ No Docker/Podman socket found for testcontainers" >&2
+            echo "Set DOCKER_HOST, e.g.:" >&2
+            echo "  export DOCKER_HOST=unix:///run/user/\$UID/podman/podman.sock" >&2
+            exit 1
+        fi
+    fi
+
+    echo "🧪 Running Citus integration tests with DOCKER_HOST=${docker_host}"
+    DOCKER_HOST="${docker_host}" PG_EXPORTER_REQUIRE_TESTCONTAINERS=1 \
+      cargo test --test collectors_tests citus -- --nocapture
 
 # Linting
 clippy:
@@ -297,20 +324,19 @@ curl:
 
 postgres version="latest":
   mkdir -p db/log/postgres
-  podman run --rm -d --name pg_exporter_postgres \
+  {{container_cmd}} run --rm -d --name pg_exporter_postgres \
     -e POSTGRES_USER=postgres \
     -e POSTGRES_HOST_AUTH_METHOD=trust \
     -e PGDATA=/db/data/{{ version }} \
     -p 5432:5432 \
     -v $(pwd)/db:/db \
     -v $(pwd)/db/config/postgres:/etc/postgresql/config \
-    --userns keep-id:uid={{ uid }},gid={{ gid }} \
-    --user {{ uid }}:{{ gid }} \
+    {{ if container_cmd == "podman" { "--userns keep-id:uid=" + uid + ",gid=" + gid + " --user " + uid + ":" + gid } else { "" } }} \
     postgres:{{ version }} \
     postgres -c config_file=/etc/postgresql/config/postgresql.conf
 
 jaeger:
-  podman run --rm -d --name jaeger \
+  {{container_cmd}} run --rm -d --name jaeger \
     -e COLLECTOR_OTLP_ENABLED=true \
     -p 16686:16686 \
     -p 4317:4317 \
@@ -319,7 +345,7 @@ jaeger:
 
 stop-containers:
   @for c in pg_exporter_postgres jaeger; do \
-        podman stop $c 2>/dev/null || true; \
+        {{container_cmd}} stop $c 2>/dev/null || true; \
   done
 
 # Test against all PostgreSQL versions (14-18)
@@ -333,7 +359,7 @@ test-all-pg:
     echo "🚀 Starting all PostgreSQL versions..."
     for v in "${VERSIONS[@]}"; do
         PORT="54${v}"
-        podman run -d --name pg${v} \
+        {{container_cmd}} run -d --name pg${v} \
             -e POSTGRES_PASSWORD=postgres \
             -e POSTGRES_USER=postgres \
             -p ${PORT}:5432 \
@@ -345,7 +371,7 @@ test-all-pg:
 
     for v in "${VERSIONS[@]}"; do
         PORT="54${v}"
-        timeout 30 bash -c "until podman exec pg${v} pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done" || true
+        timeout 30 bash -c "until {{container_cmd}} exec pg${v} pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done" || true
     done
 
     echo ""
@@ -367,8 +393,8 @@ test-all-pg:
 
     echo "🧹 Cleaning up containers..."
     for v in "${VERSIONS[@]}"; do
-        podman stop pg${v} >/dev/null 2>&1 || true
-        podman rm pg${v} >/dev/null 2>&1 || true
+        {{container_cmd}} stop pg${v} >/dev/null 2>&1 || true
+        {{container_cmd}} rm pg${v} >/dev/null 2>&1 || true
     done
 
     if [ ${#FAILED[@]} -eq 0 ]; then
@@ -387,7 +413,7 @@ test-pg version:
     #!/usr/bin/env bash
     PORT="54{{version}}"
     echo "🐘 Starting PostgreSQL {{version}} on port ${PORT}..."
-    podman run -d --name pg{{version}} \
+    {{container_cmd}} run -d --name pg{{version}} \
         -e POSTGRES_PASSWORD=postgres \
         -e POSTGRES_USER=postgres \
         -p ${PORT}:5432 \
@@ -395,13 +421,13 @@ test-pg version:
 
     echo "⏳ Waiting for PostgreSQL to be ready..."
     sleep 3
-    timeout 30 bash -c "until podman exec pg{{version}} pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done"
+    timeout 30 bash -c "until {{container_cmd}} exec pg{{version}} pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done"
 
     echo "🧪 Running tests..."
     PG_EXPORTER_DSN="postgresql://postgres:postgres@localhost:${PORT}/postgres" cargo test
 
     echo "🧹 Cleaning up..."
-    podman stop pg{{version}} && podman rm pg{{version}}
+    {{container_cmd}} stop pg{{version}} && {{container_cmd}} rm pg{{version}}
 
 # Test TLS collector with SSL-enabled PostgreSQL
 test-tls version="16":
@@ -439,19 +465,19 @@ validate-dashboard:
 validate-all: test validate-dashboard
   @echo "✅ All validations passed!"
 
-# Run local Prometheus + Grafana stack against exporter (podman)
+# Run local Prometheus + Grafana stack against exporter
 metrics target="host.containers.internal:9432" image="pg-exporter-metrics-stack" name="metrics-stack" prom_volume="prom_data":
   # Build the stack image if it's missing so `just metrics` works without a manual build step
-  if ! podman image exists "{{image}}"; then \
-    podman build -t "{{image}}" grafana; \
+  if ! {{container_cmd}} image exists "{{image}}"; then \
+    {{container_cmd}} build -t "{{image}}" grafana; \
   fi
   # Replace any existing container with the same name to avoid conflicts
-  podman rm -f {{name}} 2>/dev/null || true
+  {{container_cmd}} rm -f {{name}} 2>/dev/null || true
   # Ensure a persistent volume for Prometheus data
-  if ! podman volume exists "{{prom_volume}}"; then \
-    podman volume create "{{prom_volume}}"; \
+  if ! {{container_cmd}} volume exists "{{prom_volume}}"; then \
+    {{container_cmd}} volume create "{{prom_volume}}"; \
   fi
-  podman run -d \
+  {{container_cmd}} run -d \
     --name {{name}} \
     --add-host=host.containers.internal:host-gateway \
     -e EXPORTER_TARGET={{target}} \
@@ -467,18 +493,18 @@ restart-metrics target="host.containers.internal:9432" image="pg-exporter-metric
   set -euo pipefail
 
   echo "🛑 Stopping existing metrics-stack container..."
-  podman rm -f {{name}} 2>/dev/null || true
+  {{container_cmd}} rm -f {{name}} 2>/dev/null || true
 
   echo "🔍 Checking if dashboard.json changed..."
   REBUILD=0
 
   # Check if image exists
-  if ! podman image exists "{{image}}"; then
+  if ! {{container_cmd}} image exists "{{image}}"; then
     echo "📦 Image doesn't exist, will build..."
     REBUILD=1
   else
     # Get image creation time
-    IMAGE_TIME=$(podman inspect {{image}} --format='{{{{.Created}}}}' 2>/dev/null || echo "")
+    IMAGE_TIME=$({{container_cmd}} inspect {{image}} --format='{{{{.Created}}}}' 2>/dev/null || echo "")
 
     if [ -n "$IMAGE_TIME" ]; then
       # Convert image time to epoch (works with ISO 8601 format)
@@ -501,16 +527,16 @@ restart-metrics target="host.containers.internal:9432" image="pg-exporter-metric
 
   if [ "$REBUILD" -eq 1 ]; then
     echo "🔨 Building Grafana stack image..."
-    podman build -t "{{image}}" grafana
+    {{container_cmd}} build -t "{{image}}" grafana
   fi
 
-  if ! podman volume exists "{{prom_volume}}"; then
+  if ! {{container_cmd}} volume exists "{{prom_volume}}"; then
     echo "📦 Creating Prometheus volume..."
-    podman volume create "{{prom_volume}}"
+    {{container_cmd}} volume create "{{prom_volume}}"
   fi
 
   echo "🚀 Starting metrics-stack container..."
-  podman run -d \
+  {{container_cmd}} run -d \
     --name {{name}} \
     --add-host=host.containers.internal:host-gateway \
     -e EXPORTER_TARGET={{target}} \

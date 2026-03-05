@@ -41,18 +41,37 @@ echo "🔎 Checking for unsafe patterns..."
 
 UNSAFE_PATTERNS=0
 
-# Check for row.get() without try_get
-if git diff --cached | grep -E "^\+.*row\.get\(" | grep -v "try_get" | grep -q .; then
+# Check staged Rust source for row.get() without try_get
+RUST_SOURCE_DIFF="$(
+    git diff --cached -- \
+        ':(glob)src/**/*.rs' \
+        ':(glob)src/*.rs' \
+        ':(glob)tests/**/*.rs' \
+        ':(glob)tests/*.rs'
+)"
+if printf '%s\n' "$RUST_SOURCE_DIFF" \
+    | grep -E "^\+.*row\.get\(" \
+    | grep -v "try_get" \
+    | grep -vE '^\+\s*(//|/\*|\*|//!|///)' \
+    | grep -q .; then
     echo "❌ Found unsafe row.get() usage!"
     echo "   Use row.try_get() instead to handle NULL values safely"
     echo ""
-    git diff --cached | grep -E "^\+.*row\.get\(" | grep -v "try_get"
+    printf '%s\n' "$RUST_SOURCE_DIFF" \
+        | grep -E "^\+.*row\.get\(" \
+        | grep -v "try_get" \
+        | grep -vE '^\+\s*(//|/\*|\*|//!|///)'
     UNSAFE_PATTERNS=1
 fi
 
-# Check for SQL without explicit type casts
-if git diff --cached | grep -E "^\+.*FROM pg_stat_statements" | grep -q "SELECT.*FROM pg_stat_statements"; then
-    if git diff --cached | grep -E "^\+.*FROM pg_stat_statements" | grep -v "::bigint\|::double precision" | grep -q .; then
+# Check collector SQL against pg_stat_statements without explicit type casts
+PG_STATEMENTS_COLLECTOR_DIFF="$(
+    git diff --cached -- \
+        ':(glob)src/collectors/**/*.rs' \
+        ':(glob)src/collectors/*.rs'
+)"
+if printf '%s\n' "$PG_STATEMENTS_COLLECTOR_DIFF" | grep -E "^\+.*FROM pg_stat_statements" | grep -q "SELECT.*FROM pg_stat_statements"; then
+    if printf '%s\n' "$PG_STATEMENTS_COLLECTOR_DIFF" | grep -E "^\+.*FROM pg_stat_statements" | grep -v "::bigint\|::double precision" | grep -q .; then
         echo "⚠️  Warning: Query to pg_stat_statements may need explicit type casts"
         echo "   Consider adding ::bigint or ::double precision to numeric columns"
         UNSAFE_PATTERNS=1

@@ -248,7 +248,6 @@ async fn my_function(pool: &PgPool) -> Result<()> {
 ## Documentation References
 - [CONTRIBUTING.md](../CONTRIBUTING.md) - Complete development guide
 - [tests/TESTING.md](../tests/TESTING.md) - Testing patterns and examples
-- [PRE_RELEASE_CHECKLIST.md](../PRE_RELEASE_CHECKLIST.md) - Release process
 
 ## Zero Tolerance for Panics
 All code must gracefully handle:

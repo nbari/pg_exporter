@@ -159,6 +159,7 @@ pub async fn get_or_create_pool_for_db(datname: &str) -> Result<PgPool> {
         .max_connections(1)
         .min_connections(0)
         .acquire_timeout(std::time::Duration::from_secs(5))
+        .test_before_acquire(false)
         .connect_with(opts)
         .await?;
 

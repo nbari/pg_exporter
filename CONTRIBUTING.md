@@ -234,8 +234,6 @@ git commit                             # Pre-commit hook runs
 # Install pre-commit hook
 cp scripts/pre-commit-hook.sh .git/hooks/pre-commit
 
-# Before release
-# See PRE_RELEASE_CHECKLIST.md
 ```
 
 ---
@@ -243,7 +241,6 @@ cp scripts/pre-commit-hook.sh .git/hooks/pre-commit
 ## Documentation
 
 - [tests/TESTING.md](tests/TESTING.md) - Comprehensive testing guide with examples
-- [PRE_RELEASE_CHECKLIST.md](PRE_RELEASE_CHECKLIST.md) - Release checklist
 - [README.md](README.md) - Project overview and usage
 
 ---

@@ -1,6 +1,5 @@
 use anyhow::Result;
 use prometheus::{CounterVec, GaugeVec, HistogramVec, IntGauge, Opts, Registry};
-use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 /// Tracks scrape performance and metrics cardinality
@@ -76,34 +75,9 @@ use std::time::Instant;
 ///
 /// # Thread Safety
 ///
-/// Uses `std::sync::RwLock` for the metrics state:
-/// - Multiple readers (metric reads) don't block each other
-/// - Single writer (updates) blocks readers briefly
-/// - Poison errors handled explicitly for resilience
-///
-/// Why `RwLock` instead of `Mutex`?
-/// - Scrape counters are read-heavy (`Prometheus` scrapes every 15-60s)
-/// - Writes only happen during collector execution
-/// - Better concurrency for high scrape rates
-///
-/// ## Poison Error Handling
-///
-/// If a panic occurs while holding the write lock, the `RwLock` becomes poisoned.
-/// We detect this and recover gracefully using `into_inner()`:
-///
-/// ```rust,no_run
-/// # use std::sync::RwLock;
-/// # let lock = RwLock::new(0);
-/// let mut guard = match lock.write() {
-///     Ok(guard) => guard,
-///     Err(poisoned) => {
-///         eprintln!("Lock poisoned, recovering");
-///         poisoned.into_inner()
-///     }
-/// };
-/// ```
-///
-/// This ensures one panic doesn't break all future metric updates.
+/// The collector updates `prometheus` metric types directly. Their internal
+/// synchronization is sufficient here, so scrape bookkeeping does not need an
+/// extra lock in the exporter hot path.
 ///
 /// # Example `Prometheus` Queries
 ///
@@ -130,28 +104,10 @@ pub struct ScraperCollector {
     scrape_errors_total: CounterVec,
     last_scrape_timestamp: GaugeVec,
     last_scrape_success: GaugeVec,
-    
+
     // Global metrics
     metrics_total: IntGauge,
     scrapes_total: IntGauge,
-    
-    /// Internal `state` for tracking total counts
-    ///
-    /// Protected by `RwLock` for concurrent reads:
-    /// - Reads: `Prometheus` scrapes metrics
-    /// - Writes: `update_metrics_count()`, `increment_scrapes()`
-    ///
-    /// We handle `PoisonError` explicitly to recover from panics:
-    /// - If a write panics, the lock becomes poisoned
-    /// - We detect this and recover via `into_inner()`
-    /// - This prevents one failed update from breaking all future scrapes
-    state: Arc<RwLock<ScraperState>>,
-}
-
-#[derive(Default)]
-struct ScraperState {
-    total_scrapes: i64,
-    total_metrics: i64,
 }
 
 impl Default for ScraperCollector {
@@ -225,7 +181,6 @@ impl ScraperCollector {
             last_scrape_success,
             metrics_total,
             scrapes_total,
-            state: Arc::new(RwLock::new(ScraperState::default())),
         }
     }
 
@@ -237,9 +192,9 @@ impl ScraperCollector {
 
     /// Record the start of a collector scrape
     #[must_use]
-    pub fn start_scrape(&self, collector_name: &str) -> ScrapeTimer {
+    pub fn start_scrape(&self, collector_name: &'static str) -> ScrapeTimer {
         ScrapeTimer {
-            collector_name: collector_name.to_string(),
+            collector_name,
             start: Instant::now(),
             scraper: self.clone(),
             recorded: false,
@@ -248,35 +203,17 @@ impl ScraperCollector {
 
     /// Update total metrics count
     /// Call this after each scrape to track cardinality
-    /// Handles lock poisoning gracefully.
     pub fn update_metrics_count(&self, count: i64) {
         self.metrics_total.set(count);
-        let mut state = match self.state.write() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                tracing::warn!("ScraperState write lock was poisoned, recovering");
-                poisoned.into_inner()
-            }
-        };
-        state.total_metrics = count;
     }
 
     /// Increment total scrapes counter
-    /// Handles lock poisoning gracefully.
     pub fn increment_scrapes(&self) {
-        let mut state = match self.state.write() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                tracing::warn!("ScraperState write lock was poisoned, recovering");
-                poisoned.into_inner()
-            }
-        };
-        state.total_scrapes += 1;
-        self.scrapes_total.set(state.total_scrapes);
+        self.scrapes_total.inc();
     }
 
     /// Record a successful scrape
-    fn record_success(&self, collector_name: &str, duration: f64) {
+    fn record_success(&self, collector_name: &'static str, duration: f64) {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -296,7 +233,7 @@ impl ScraperCollector {
     }
 
     /// Record a failed scrape
-    fn record_error(&self, collector_name: &str) {
+    fn record_error(&self, collector_name: &'static str) {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -355,7 +292,7 @@ impl crate::collectors::Collector for ScraperCollector {
 ///
 /// Automatically records duration and success/failure on drop
 pub struct ScrapeTimer {
-    collector_name: String,
+    collector_name: &'static str,
     start: Instant,
     scraper: ScraperCollector,
     recorded: bool,
@@ -367,14 +304,14 @@ impl ScrapeTimer {
     pub fn success(mut self) {
         self.recorded = true;
         let duration = self.start.elapsed().as_secs_f64();
-        self.scraper.record_success(&self.collector_name, duration);
+        self.scraper.record_success(self.collector_name, duration);
     }
 
     /// Mark scrape as failed
     /// Call this before timer drops if scrape failed
     pub fn error(mut self) {
         self.recorded = true;
-        self.scraper.record_error(&self.collector_name);
+        self.scraper.record_error(self.collector_name);
     }
 }
 
@@ -386,7 +323,7 @@ impl Drop for ScrapeTimer {
         // If neither success() nor error() was called explicitly,
         // default to success (optimistic)
         let duration = self.start.elapsed().as_secs_f64();
-        self.scraper.record_success(&self.collector_name, duration);
+        self.scraper.record_success(self.collector_name, duration);
     }
 }
 

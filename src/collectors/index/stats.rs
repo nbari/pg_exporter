@@ -97,15 +97,6 @@ impl Collector for IndexStatsCollector {
     }
 
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
-        #[derive(sqlx::FromRow)]
-        struct IndexStats {
-            total_scans: i64,
-            total_tup_read: i64,
-            total_tup_fetch: i64,
-            total_size_bytes: i64,
-            valid_count: i64,
-        }
-
         Box::pin(async move {
             // Query pg_stat_user_indexes joined with pg_class for size and pg_index for validity
             // Excludes system databases and tracks key index health metrics
@@ -123,14 +114,20 @@ impl Collector for IndexStatsCollector {
                 "
             );
 
-            let stats: IndexStats = sqlx::query_as(&query).fetch_one(pool).await?;
+            let (total_scans, total_tup_read, total_tup_fetch, total_size_bytes, valid_count): (
+                i64,
+                i64,
+                i64,
+                i64,
+                i64,
+            ) = sqlx::query_as(&query).fetch_one(pool).await?;
 
             // Update metrics
-            self.scans.set(i64_to_f64(stats.total_scans));
-            self.tuples_read.set(i64_to_f64(stats.total_tup_read));
-            self.tuples_fetched.set(i64_to_f64(stats.total_tup_fetch));
-            self.size_bytes.set(i64_to_f64(stats.total_size_bytes));
-            self.valid.set(i64_to_f64(stats.valid_count));
+            self.scans.set(i64_to_f64(total_scans));
+            self.tuples_read.set(i64_to_f64(total_tup_read));
+            self.tuples_fetched.set(i64_to_f64(total_tup_fetch));
+            self.size_bytes.set(i64_to_f64(total_size_bytes));
+            self.valid.set(i64_to_f64(valid_count));
 
             Ok(())
         })

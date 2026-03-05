@@ -1,6 +1,9 @@
 [Unit]
 Description=pg_exporter (PostgreSQL Prometheus exporter)
-After=network-online.target
+# Ensure exporter starts after network and PostgreSQL.
+# If your distro uses a versioned service name (e.g. postgresql-16.service),
+# replace postgresql.service accordingly.
+After=network-online.target postgresql.service
 Wants=network-online.target
 
 [Service]
