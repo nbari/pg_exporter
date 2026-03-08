@@ -1,0 +1,15 @@
+run_id=20260308T095633Z
+hours=24
+db_name=pgbench_test
+db_scale=20
+bench_rust_ssh=10.246.1.90
+bench_db_ssh=10.246.1.92
+bench_metrics_ssh=10.246.1.93
+db_script=/tmp/pg_exporter_rust_soak_20260308T095633Z.sh
+db_log=/tmp/pg_exporter_rust_soak_20260308T095633Z.log
+db_pid_file=/tmp/pg_exporter_rust_soak_20260308T095633Z.pid
+sampler_script=/tmp/pg_exporter_rust_soak_sampler_20260308T095633Z.sh
+sampler_log=/tmp/pg_exporter_rust_soak_sampler_20260308T095633Z.log
+sampler_pid_file=/tmp/pg_exporter_rust_soak_sampler_20260308T095633Z.pid
+dashboard_url=http://10.246.1.93:3000/d/pg-exp-soak-rust/pg-exporter-rust-soak-24h?orgId=1&from=now-6h&to=now&timezone=browser&refresh=30s
+started_at_utc=2026-03-08T09:56:45Z
