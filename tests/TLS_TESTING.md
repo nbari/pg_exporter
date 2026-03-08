@@ -8,7 +8,7 @@ The TLS collector provides SSL/TLS monitoring for PostgreSQL with three sub-coll
 
 1. **ServerTlsConfigCollector** - Server SSL configuration (works remotely)
 2. **CertificateCollector** - Certificate expiration monitoring (requires local filesystem access)
-3. **ConnectionTlsCollector** - Per-connection SSL statistics (works remotely, PostgreSQL 9.5+)
+3. **ConnectionTlsCollector** - Per-connection SSL statistics (works remotely, PostgreSQL 14+)
 
 ### Remote vs Local Installation
 
@@ -101,7 +101,7 @@ The TLS collector test suite includes:
 3. **ConnectionTlsCollector** (`connection_stats.rs`)
    - ✅ Metric registration
    - ✅ Per-connection SSL statistics
-   - ✅ Version-aware (PostgreSQL 9.5+ check)
+   - ✅ Version-aware (PostgreSQL 14+)
    - ✅ Cipher suite tracking
    - ✅ TLS version tracking
 
@@ -303,7 +303,7 @@ pg_ssl_certificate_not_before_timestamp 1704067200
 pg_ssl_certificate_not_after_timestamp 1735689600
 ```
 
-### Connection Statistics (PostgreSQL 9.5+, Always Available)
+### Connection Statistics (PostgreSQL 14+, Always Available)
 
 ```prometheus
 # Total number of SSL connections
@@ -413,7 +413,7 @@ SHOW ssl_ciphers;
 SHOW ssl_min_protocol_version;
 SHOW ssl_max_protocol_version;
 
--- View active SSL connections (PostgreSQL 9.5+)
+-- View active SSL connections (PostgreSQL 14+)
 SELECT * FROM pg_stat_ssl;
 ```
 

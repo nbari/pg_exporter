@@ -37,6 +37,14 @@ pub const TEMPLATE1: &str = "template1";
 /// Time conversion factors
 pub const MS_TO_SEC: f64 = 1000.0;
 
+const DEFAULT_APPLICATION_NAME: &str = env!("CARGO_PKG_NAME");
+
+#[inline]
+#[must_use]
+pub fn apply_default_application_name(opts: PgConnectOptions) -> PgConnectOptions {
+    opts.application_name(DEFAULT_APPLICATION_NAME)
+}
+
 /// Set the excluded databases from CLI/env. Call this once during startup.
 pub fn set_excluded_databases(list: Vec<String>) {
     let mut cleaned: Vec<String> = list
@@ -91,7 +99,7 @@ pub fn is_pg_version_at_least(min_version: i32) -> bool {
 /// Returns an error if DSN parsing fails
 pub fn set_base_connect_options_from_dsn(dsn: &SecretString) -> Result<()> {
     if BASE_OPTS.get().is_none() {
-        let opts = PgConnectOptions::from_str(dsn.expose_secret())?;
+        let opts = apply_default_application_name(PgConnectOptions::from_str(dsn.expose_secret())?);
         let _ = BASE_OPTS.set(opts.clone());
 
         // Record default database name if present, else fallback to "postgres".
@@ -156,7 +164,7 @@ pub async fn get_or_create_pool_for_db(datname: &str) -> Result<PgPool> {
     // Create tiny pool for this DB
     let opts = connect_options_for_db(datname)?;
     let pool = PgPoolOptions::new()
-        .max_connections(1)
+        .max_connections(2)
         .min_connections(0)
         .acquire_timeout(std::time::Duration::from_secs(5))
         .test_before_acquire(false)
@@ -171,9 +179,24 @@ pub async fn get_or_create_pool_for_db(datname: &str) -> Result<PgPool> {
     Ok(pool)
 }
 
+/// Remove and close a cached per-database pool, if one exists.
+pub async fn drop_cached_pool_for_db(datname: &str) {
+    if let Some(pools) = POOLS.get() {
+        let removed = {
+            let mut guard = pools.write().await;
+            guard.remove(datname)
+        };
+
+        if let Some(pool) = removed {
+            pool.close().await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     #[test]
     fn test_set_and_get_exclusions() {
@@ -202,5 +225,15 @@ mod tests {
         assert!(is_pg_version_at_least(140_000)); // >= 14
         assert!(is_pg_version_at_least(160_000)); // >= 16
         assert!(!is_pg_version_at_least(170_000)); // < 17
+    }
+
+    #[test]
+    fn test_apply_default_application_name_sets_pkg_name() -> Result<()> {
+        let opts = PgConnectOptions::from_str("postgresql://localhost/postgres")?;
+        let formatted = format!("{:?}", apply_default_application_name(opts));
+
+        assert!(formatted.contains("application_name"));
+        assert!(formatted.contains(DEFAULT_APPLICATION_NAME));
+        Ok(())
     }
 }

@@ -13,9 +13,9 @@ pub async fn handle(action: Action) -> Result<()> {
             port,
             listen,
             dsn,
-            collectors,
+            collector_config,
         } => {
-            new(port, listen, dsn, collectors).await?;
+            new(port, listen, dsn, collector_config).await?;
         }
     }
 
@@ -25,6 +25,7 @@ pub async fn handle(action: Action) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::collectors::config::CollectorConfig;
     use secrecy::SecretString;
 
     #[tokio::test]
@@ -36,7 +37,7 @@ mod tests {
             port: 9999,
             listen: None,
             dsn: SecretString::new("invalid-dsn".into()),
-            collectors: vec!["default".to_string()],
+            collector_config: CollectorConfig::new(25).with_enabled(&["default".to_string()]),
         };
 
         let result = handle(action).await;
@@ -51,7 +52,8 @@ mod tests {
             port: 9432,
             listen: Some("127.0.0.1".to_string()),
             dsn: SecretString::new("postgresql://user@host/db".into()),
-            collectors: vec!["default".to_string(), "vacuum".to_string()],
+            collector_config: CollectorConfig::new(25)
+                .with_enabled(&["default".to_string(), "vacuum".to_string()]),
         };
 
         match action {
@@ -59,13 +61,12 @@ mod tests {
                 port,
                 listen,
                 dsn: _,
-                collectors,
+                collector_config,
             } => {
                 assert_eq!(port, 9432);
                 assert_eq!(listen, Some("127.0.0.1".to_string()));
-                assert_eq!(collectors.len(), 2);
-                assert!(collectors.contains(&"default".to_string()));
-                assert!(collectors.contains(&"vacuum".to_string()));
+                assert!(collector_config.is_enabled("default"));
+                assert!(collector_config.is_enabled("vacuum"));
             }
         }
     }
@@ -77,12 +78,17 @@ mod tests {
             port: 8080,
             listen: None,
             dsn: SecretString::new("postgresql://localhost/db".into()),
-            collectors: vec![],
+            collector_config: CollectorConfig::new(25),
         };
 
         match action {
-            Action::Run { collectors, .. } => {
-                assert_eq!(collectors.len(), 0, "Should allow empty collectors list");
+            Action::Run {
+                collector_config, ..
+            } => {
+                assert!(
+                    collector_config.enabled_collectors.is_empty(),
+                    "Should allow empty collectors list"
+                );
             }
         }
     }

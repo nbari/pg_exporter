@@ -53,7 +53,7 @@ async fn test_index_stats_collector_has_all_metrics_after_collection() -> Result
 }
 
 #[tokio::test]
-async fn test_index_stats_collector_valid_is_boolean() -> Result<()> {
+async fn test_index_stats_collector_valid_is_non_negative() -> Result<()> {
     let pool = common::create_test_pool().await?;
     let registry = Registry::new();
     let collector = IndexStatsCollector::new();
@@ -65,7 +65,7 @@ async fn test_index_stats_collector_valid_is_boolean() -> Result<()> {
         if fam.name() == "pg_index_valid" {
             for m in fam.get_metric() {
                 let v = common::metric_value_to_i64(m.get_gauge().value());
-                assert!(v == 0 || v == 1, "valid should be 0 or 1, got {v}");
+                assert!(v >= 0, "valid index count should be non-negative, got {v}");
             }
         }
     }

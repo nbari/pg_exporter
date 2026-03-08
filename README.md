@@ -8,6 +8,12 @@
 
 A PostgreSQL metric exporter for Prometheus written in Rust
 
+## Supported PostgreSQL Versions
+
+`pg_exporter` supports PostgreSQL 14 and newer.
+
+PostgreSQL 13 and older are no longer supported.
+
 ## Goals
 
 `pg_exporter` is designed with a selective metrics approach:
@@ -153,13 +159,55 @@ The following collectors are available:
 * `--collector.replication` [replication](src/collectors/replication/mod.rs)
 * `--collector.index` [index](src/collectors/index/mod.rs)
 * `--collector.statements` [statements](src/collectors/statements/README.md) - Query performance metrics from `pg_stat_statements` (see [detailed guide](src/collectors/statements/README.md))
-* `--collector.tls` [tls](src/collectors/tls/mod.rs) - SSL/TLS certificate monitoring, connection encryption stats (PostgreSQL 9.5+)
+* `--collector.tls` [tls](src/collectors/tls/mod.rs) - SSL/TLS certificate monitoring and connection encryption stats (PostgreSQL 14+)
 * `--collector.exporter` [exporter](src/collectors/exporter/mod.rs) - Exporter self-monitoring (process metrics, scrape performance, cardinality tracking)
 
 You can enable `--collector.<name>` or disable `--no-collector.<name>` For example,
 to disable the `vacuum` collector:
 
     pg_exporter --dsn postgresql:///postgres?host=/var/run/postgresql&user=postgres_exporter --no-collector.vacuum
+
+Collector-specific runtime options use the `<collector>.<option>` long-flag format. For example,
+to reduce `pg_stat_statements` cardinality and scrape cost:
+
+    pg_exporter --collector.statements --statements.top-n 10
+
+The `statements` collector defaults to `--statements.top-n 25` if not specified. You can also use
+`PG_EXPORTER_STATEMENTS_TOP_N`.
+
+For local observability testing with Prometheus and Grafana, a practical flow is:
+
+    just postgres
+    cargo run -- --collector.statements --collector.activity --collector.locks --collector.database -v
+    just metrics
+    just workload duration=120 clients=10
+
+`just workload` reuses `pgbench` to populate `pg_stat_statements` and generate live activity while you inspect `/metrics`, Prometheus, or Grafana.
+
+For vacuum-specific testing, use:
+
+    just vacuum-workflow scale=20 rounds=5 sample_mod=5
+
+`just vacuum-workflow` creates dead tuples in `pgbench_accounts`, shows the table-level autovacuum pressure metrics, and then runs a manual `VACUUM (VERBOSE, ANALYZE)` so the vacuum collector and dashboard have real maintenance activity to display.
+
+For PostgreSQL-managed cleanup testing, use:
+
+    just autovacuum-workflow scale=20 rounds=5 sample_mod=5 timeout=180
+
+`just autovacuum-workflow` creates dead tuples, temporarily lowers the local autovacuum trigger for `pgbench_accounts`, shortens `autovacuum_naptime`, and then waits for PostgreSQL autovacuum to clean the table without a manual `VACUUM`.
+
+For reclaiming physical space:
+
+- `VACUUM` reclaims dead tuples for PostgreSQL reuse, but usually does not return table space to the OS.
+- `ANALYZE` only refreshes planner statistics; it does not reclaim space.
+- `pg_repack` is the preferred low-downtime option when a large table or index remains bloated and you need to compact it.
+- `VACUUM FULL` rewrites the table and can return space to the OS, but it takes an `ACCESS EXCLUSIVE` lock and should be planned in a maintenance window.
+
+In Grafana, the fastest way to spot likely `pg_repack` or `VACUUM FULL` candidates is the `Vacuum & Bloat Pressure` row, especially:
+
+- `Top Repack Candidates by Estimated Dead Space`
+- `Top Tables by Estimated Bloat Ratio`
+- `Top Tables by Table Size`
 
 ### Enabled by default
 

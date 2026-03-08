@@ -3,10 +3,19 @@
 #![allow(clippy::panic)]
 #![allow(clippy::indexing_slicing)]
 use anyhow::Result;
+use pg_exporter::collectors::config::CollectorConfig;
 use secrecy::SecretString;
 use serde_json::Value;
 
 mod common;
+
+fn collector_config(names: &[&str]) -> CollectorConfig {
+    let enabled = names
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect::<Vec<_>>();
+    CollectorConfig::new(25).with_enabled(&enabled)
+}
 
 #[tokio::test]
 async fn test_health_endpoint_returns_ok() -> Result<()> {
@@ -14,7 +23,7 @@ async fn test_health_endpoint_returns_ok() -> Result<()> {
     let dsn = common::get_test_dsn_secret();
 
     let handle = tokio::spawn(async move {
-        pg_exporter::exporter::new(port, None, dsn, vec!["default".to_string()]).await
+        pg_exporter::exporter::new(port, None, dsn, collector_config(&["default"])).await
     });
 
     assert!(
@@ -47,7 +56,7 @@ async fn test_health_endpoint_options_request() -> Result<()> {
     let dsn = common::get_test_dsn_secret();
 
     let handle = tokio::spawn(async move {
-        pg_exporter::exporter::new(port, None, dsn, vec!["default".to_string()]).await
+        pg_exporter::exporter::new(port, None, dsn, collector_config(&["default"])).await
     });
 
     assert!(common::wait_for_server(port, 50).await);
@@ -74,7 +83,7 @@ async fn test_health_endpoint_has_x_app_header() -> Result<()> {
     let dsn = common::get_test_dsn_secret();
 
     let handle = tokio::spawn(async move {
-        pg_exporter::exporter::new(port, None, dsn, vec!["default".to_string()]).await
+        pg_exporter::exporter::new(port, None, dsn, collector_config(&["default"])).await
     });
 
     assert!(common::wait_for_server(port, 50).await);
@@ -108,7 +117,7 @@ async fn test_health_endpoint_returns_503_when_db_down() -> Result<()> {
     ));
 
     let handle = tokio::spawn(async move {
-        pg_exporter::exporter::new(port, None, dsn, vec!["default".to_string()]).await
+        pg_exporter::exporter::new(port, None, dsn, collector_config(&["default"])).await
     });
 
     assert!(

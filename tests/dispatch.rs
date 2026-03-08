@@ -29,7 +29,7 @@ fn test_handler_happy_path_sets_exclusions_and_returns_action() -> Result<()> {
         port,
         listen: _,
         dsn,
-        collectors,
+        collector_config,
     } = action;
 
     assert_eq!(port, 9898);
@@ -39,9 +39,10 @@ fn test_handler_happy_path_sets_exclusions_and_returns_action() -> Result<()> {
     );
 
     // Defaults come from each collector's enabled_by_default()
-    assert!(collectors.contains(&"default".to_string()));
-    assert!(collectors.contains(&"activity".to_string()));
-    assert!(collectors.contains(&"vacuum".to_string()));
+    assert!(collector_config.is_enabled("default"));
+    assert!(collector_config.is_enabled("activity"));
+    assert!(collector_config.is_enabled("vacuum"));
+    assert_eq!(collector_config.statements.top_n, 25);
 
     // Verify init_excluded_databases() populated the global OnceCell (scoped to this test binary)
     // Note: In CI, there's no env var, and global state might be empty or from previous tests
@@ -53,9 +54,30 @@ fn test_handler_happy_path_sets_exclusions_and_returns_action() -> Result<()> {
     );
 
     // Defaults come from each collector's enabled_by_default()
-    assert!(collectors.contains(&"default".to_string()));
-    assert!(collectors.contains(&"activity".to_string()));
-    assert!(collectors.contains(&"vacuum".to_string()));
+    assert!(collector_config.is_enabled("default"));
+    assert!(collector_config.is_enabled("activity"));
+    assert!(collector_config.is_enabled("vacuum"));
+
+    Ok(())
+}
+
+#[test]
+fn test_handler_reads_statements_top_n() -> Result<()> {
+    let cmd = commands::new();
+    let matches = cmd.get_matches_from(vec![
+        "pg_exporter",
+        "--collector.statements",
+        "--statements.top-n",
+        "10",
+    ]);
+
+    let action = pg_exporter::cli::dispatch::handler(&matches)?;
+
+    let Action::Run {
+        collector_config, ..
+    } = action;
+    assert!(collector_config.is_enabled("statements"));
+    assert_eq!(collector_config.statements.top_n, 10);
 
     Ok(())
 }

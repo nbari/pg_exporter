@@ -5,7 +5,7 @@ use prometheus::{Gauge, IntGauge, Opts, Registry};
 use sqlx::PgPool;
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use sysinfo::{Pid, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tracing::{debug, instrument, warn};
 
 /// Monitors the `pg_exporter` process itself
@@ -106,8 +106,13 @@ impl ProcessCollector {
         ))
         .expect("pg_exporter_process_start_time_seconds");
 
-        let system = System::new_all();
-        let num_cpus = system.cpus().len().max(1);
+        // Do not pre-load all processes. On Linux, sysinfo keeps /proc/*/stat
+        // file descriptors open for indexed processes, so using `new_all` here
+        // can permanently inflate exporter FD usage.
+        let system = System::new();
+        let num_cpus = std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(1);
 
         let system = Arc::new(Mutex::new(SystemState {
             system,
@@ -167,8 +172,16 @@ impl ProcessCollector {
             return;
         }
 
-        // Refresh process data
-        state.system.refresh_all();
+        // Refresh only the exporter process. This avoids caching many `/proc/*/stat`
+        // file descriptors for unrelated PIDs on Linux.
+        state.system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[self.pid]),
+            true,
+            ProcessRefreshKind::nothing()
+                .with_memory()
+                .with_cpu()
+                .without_tasks(),
+        );
         state.last_refresh = Some(now);
 
         if let Some(process) = state.system.process(self.pid) {
@@ -321,5 +334,24 @@ mod tests {
 
         assert!(collector.resident_memory_bytes.get() > 0);
         assert!(collector.cpu_percent.get() >= 0.0);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_process_cache_kept_small_on_linux() {
+        let collector = ProcessCollector::new();
+        collector.collect_stats();
+
+        let state = match collector.system.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        let process_count = state.system.processes().len();
+        assert!(state.system.process(collector.pid).is_some());
+        assert!(
+            process_count <= 8,
+            "expected a small process cache, got {process_count}"
+        );
     }
 }

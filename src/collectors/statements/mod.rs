@@ -52,16 +52,21 @@ use pg_statements::PgStatementsCollector;
 /// - Performance optimization: "What's our top 10 slowest queries?"
 /// - Capacity planning: "Which queries will break first under load?"
 /// - Code review: "Did this deploy introduce slow queries?"
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct StatementsCollector {
     subs: Vec<Arc<dyn Collector + Send + Sync>>,
 }
 
 impl StatementsCollector {
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
+        Self::with_top_n(25)
+    }
+
+    #[must_use]
+    pub fn with_top_n(top_n: usize) -> Self {
         Self {
-            subs: vec![Arc::new(PgStatementsCollector::new())],
+            subs: vec![Arc::new(PgStatementsCollector::with_top_n(top_n))],
         }
     }
 }
@@ -129,13 +134,13 @@ mod tests {
 
     #[test]
     fn test_statements_collector_name() {
-        let collector = StatementsCollector::new();
+        let collector = StatementsCollector::with_top_n(25);
         assert_eq!(collector.name(), "statements");
     }
 
     #[test]
     fn test_statements_collector_not_enabled_by_default() {
-        let collector = StatementsCollector::new();
+        let collector = StatementsCollector::with_top_n(25);
         assert!(!collector.enabled_by_default());
     }
 }

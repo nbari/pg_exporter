@@ -61,6 +61,9 @@ pub fn get_test_dsn() -> String {
 /// Create a test database pool
 pub async fn create_test_pool() -> Result<PgPool> {
     let dsn = get_test_dsn();
+    pg_exporter::collectors::util::set_base_connect_options_from_dsn(&SecretString::new(
+        dsn.clone().into(),
+    ))?;
     let pool = PgPool::connect(&dsn).await?;
     Ok(pool)
 }
@@ -128,6 +131,8 @@ fn pg_stat_statements_requires_preload(error: &anyhow::Error) -> bool {
 }
 
 async fn drop_test_database(admin_dsn: &str, database_name: &str) -> Result<()> {
+    pg_exporter::collectors::util::drop_cached_pool_for_db(database_name).await;
+
     let admin_pool = PgPool::connect(admin_dsn)
         .await
         .context("Failed to connect to administrative test database")?;
@@ -144,7 +149,7 @@ async fn drop_test_database(admin_dsn: &str, database_name: &str) -> Result<()> 
     .with_context(|| format!("Failed to terminate connections to database {database_name}"))?;
 
     sqlx::query(&format!(
-        "DROP DATABASE IF EXISTS {}",
+        "DROP DATABASE IF EXISTS {} WITH (FORCE)",
         quoted_identifier(database_name)
     ))
     .execute(&admin_pool)

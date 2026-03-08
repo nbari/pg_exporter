@@ -15,7 +15,7 @@ use sqlx::PgPool;
 /// - `pg_index_tuples_read_total`: Number of index entries returned by scans
 /// - `pg_index_tuples_fetched_total`: Number of live table rows fetched by index scans
 /// - `pg_index_size_bytes`: Size of the index in bytes
-/// - `pg_index_valid`: Whether the index is valid (1) or invalid (0)
+/// - `pg_index_valid`: Count of valid user indexes
 ///
 /// **Why it matters:**
 /// - Low or zero scans indicate unused indexes that waste disk space and slow writes
@@ -75,7 +75,7 @@ impl IndexStatsCollector {
             .expect("Failed to create pg_index_size_bytes"),
             valid: Gauge::with_opts(Opts::new(
                 "pg_index_valid",
-                "Whether the index is valid (1) or invalid (0, from failed CREATE INDEX CONCURRENTLY)",
+                "Count of valid user indexes",
             ))
             .expect("Failed to create pg_index_valid"),
         }

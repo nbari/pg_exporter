@@ -2,6 +2,36 @@ use super::super::common;
 use anyhow::Result;
 use pg_exporter::collectors::{Collector, stat::user_tables::StatUserTablesCollector};
 use prometheus::Registry;
+use sqlx::postgres::PgPoolOptions;
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration as StdDuration,
+};
+
+static TEST_TABLE_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn unique_table_name(prefix: &str) -> String {
+    let counter = TEST_TABLE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}_{}_{}", std::process::id(), counter)
+}
+
+fn find_metric_for_table<'a>(
+    metric_families: &'a [prometheus::proto::MetricFamily],
+    metric_name: &str,
+    table_name: &str,
+) -> Option<&'a prometheus::proto::Metric> {
+    metric_families
+        .iter()
+        .find(|family| family.name() == metric_name)?
+        .get_metric()
+        .iter()
+        .find(|metric| {
+            metric
+                .get_label()
+                .iter()
+                .any(|label| label.name() == "relname" && label.value() == table_name)
+        })
+}
 
 #[tokio::test]
 async fn test_stat_user_tables_collector_registers_without_error() -> Result<()> {
@@ -34,15 +64,19 @@ async fn test_stat_user_tables_collector_collection_succeeds() -> Result<()> {
 async fn test_stat_user_tables_collector_with_created_table() -> Result<()> {
     let pool = common::create_test_pool().await?;
 
-    // Create a test table
-    sqlx::query("CREATE TABLE IF NOT EXISTS test_table (id INT PRIMARY KEY, data TEXT)")
-        .execute(&pool)
-        .await?;
+    let table_name = unique_table_name("test_table");
 
-    // Insert some data
-    sqlx::query("INSERT INTO test_table (id, data) VALUES (1, 'test') ON CONFLICT DO NOTHING")
-        .execute(&pool)
-        .await?;
+    sqlx::query(&format!(
+        "CREATE TABLE IF NOT EXISTS {table_name} (id INT PRIMARY KEY, data TEXT)"
+    ))
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(&format!(
+        "INSERT INTO {table_name} (id, data) VALUES (1, 'test') ON CONFLICT DO NOTHING"
+    ))
+    .execute(&pool)
+    .await?;
 
     let collector = StatUserTablesCollector::new();
     let registry = Registry::new();
@@ -84,7 +118,7 @@ async fn test_stat_user_tables_collector_with_created_table() -> Result<()> {
     }
 
     // Cleanup
-    sqlx::query("DROP TABLE IF EXISTS test_table")
+    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
         .execute(&pool)
         .await?;
 
@@ -96,8 +130,9 @@ async fn test_stat_user_tables_collector_with_created_table() -> Result<()> {
 async fn test_stat_user_tables_collector_metrics_have_correct_labels() -> Result<()> {
     let pool = common::create_test_pool().await?;
 
-    // Create a test table
-    sqlx::query("CREATE TABLE IF NOT EXISTS test_labels (id INT)")
+    let table_name = unique_table_name("test_labels");
+
+    sqlx::query(&format!("CREATE TABLE IF NOT EXISTS {table_name} (id INT)"))
         .execute(&pool)
         .await?;
 
@@ -139,7 +174,7 @@ async fn test_stat_user_tables_collector_metrics_have_correct_labels() -> Result
     }
 
     // Cleanup
-    sqlx::query("DROP TABLE IF EXISTS test_labels")
+    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
         .execute(&pool)
         .await?;
 
@@ -151,8 +186,9 @@ async fn test_stat_user_tables_collector_metrics_have_correct_labels() -> Result
 async fn test_stat_user_tables_collector_counts_are_non_negative() -> Result<()> {
     let pool = common::create_test_pool().await?;
 
-    // Create a test table
-    sqlx::query("CREATE TABLE IF NOT EXISTS test_counts (id INT)")
+    let table_name = unique_table_name("test_counts");
+
+    sqlx::query(&format!("CREATE TABLE IF NOT EXISTS {table_name} (id INT)"))
         .execute(&pool)
         .await?;
 
@@ -180,7 +216,7 @@ async fn test_stat_user_tables_collector_counts_are_non_negative() -> Result<()>
     }
 
     // Cleanup
-    sqlx::query("DROP TABLE IF EXISTS test_counts")
+    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
         .execute(&pool)
         .await?;
 
@@ -192,48 +228,71 @@ async fn test_stat_user_tables_collector_counts_are_non_negative() -> Result<()>
 async fn test_stat_user_tables_collector_tracks_inserts() -> Result<()> {
     let pool = common::create_test_pool().await?;
 
-    // Create a test table
-    sqlx::query("CREATE TABLE IF NOT EXISTS test_inserts (id SERIAL PRIMARY KEY, data TEXT)")
-        .execute(&pool)
-        .await?;
+    let table_name = unique_table_name("test_inserts");
+
+    sqlx::query(&format!(
+        "CREATE TABLE IF NOT EXISTS {table_name} (id SERIAL PRIMARY KEY, data TEXT)"
+    ))
+    .execute(&pool)
+    .await?;
 
     // Insert some rows
     for i in 1..=5 {
-        sqlx::query("INSERT INTO test_inserts (data) VALUES ($1)")
+        sqlx::query(&format!("INSERT INTO {table_name} (data) VALUES ($1)"))
             .bind(format!("test_{i}"))
             .execute(&pool)
             .await?;
     }
 
+    // Force PostgreSQL to flush stats so `n_tup_ins` is visible reliably in the full suite.
+    let _ = sqlx::query("SELECT pg_stat_force_next_flush()")
+        .execute(&pool)
+        .await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
     let collector = StatUserTablesCollector::new();
     let registry = Registry::new();
 
     collector.register_metrics(&registry)?;
-    collector.collect(&pool).await?;
+    let mut observed_inserts = 0;
+    for _ in 0..20 {
+        collector.collect(&pool).await?;
 
-    let metric_families = registry.gather();
+        let metric_families = registry.gather();
 
-    // Check if n_tup_ins metric exists and has a value
-    let n_tup_ins = metric_families
-        .iter()
-        .find(|m| m.name() == "pg_stat_user_tables_n_tup_ins");
+        observed_inserts = metric_families
+            .iter()
+            .find(|m| m.name() == "pg_stat_user_tables_n_tup_ins")
+            .and_then(|metric_family| {
+                metric_family.get_metric().iter().find(|metric| {
+                    metric
+                        .get_label()
+                        .iter()
+                        .any(|label| label.name() == "relname" && label.value() == table_name)
+                })
+            })
+            .map_or(0, |metric| {
+                common::metric_value_to_i64(metric.get_gauge().value())
+            });
 
-    if let Some(metric_family) = n_tup_ins {
-        // Find our test_inserts table
-        let our_table = metric_family.get_metric().iter().find(|m| {
-            m.get_label()
-                .iter()
-                .any(|l| l.name() == "relname" && l.value() == "test_inserts")
-        });
-
-        if let Some(metric) = our_table {
-            let value = common::metric_value_to_i64(metric.get_gauge().value());
-            assert!(value >= 5, "Should have at least 5 inserts, got: {value}");
+        if observed_inserts >= 5 {
+            break;
         }
+
+        let _ = sqlx::query("SELECT pg_stat_force_next_flush()")
+            .execute(&pool)
+            .await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
 
+    assert!(
+        observed_inserts >= 5,
+        "Should have at least 5 inserts, got: {observed_inserts}"
+    );
+
     // Cleanup
-    sqlx::query("DROP TABLE IF EXISTS test_inserts")
+    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
         .execute(&pool)
         .await?;
 
@@ -310,13 +369,14 @@ async fn test_stat_user_tables_collector_handles_empty_database() -> Result<()> 
 async fn test_stat_user_tables_collector_timestamp_values_are_reasonable() -> Result<()> {
     let pool = common::create_test_pool().await?;
 
-    // Create a test table and vacuum it
-    sqlx::query("CREATE TABLE IF NOT EXISTS test_timestamps (id INT)")
+    let table_name = unique_table_name("test_timestamps");
+
+    sqlx::query(&format!("CREATE TABLE IF NOT EXISTS {table_name} (id INT)"))
         .execute(&pool)
         .await?;
 
     // Run VACUUM and ANALYZE to generate timestamps
-    sqlx::query("VACUUM ANALYZE test_timestamps")
+    sqlx::query(&format!("VACUUM ANALYZE {table_name}"))
         .execute(&pool)
         .await?;
 
@@ -349,9 +409,10 @@ async fn test_stat_user_tables_collector_timestamp_values_are_reasonable() -> Re
                 // Value should be 0 (never run) or a reasonable Unix timestamp
                 if value > 0 {
                     let year_2000 = 946_684_800;
+                    let allowed_future_skew = 86_400;
                     assert!(
-                        value >= year_2000 && value <= now,
-                        "Timestamp {metric_name} should be between year 2000 and now, got {value}"
+                        value >= year_2000 && value <= now + allowed_future_skew,
+                        "Timestamp {metric_name} should be between year 2000 and near-now, got {value}"
                     );
                 }
             }
@@ -359,7 +420,7 @@ async fn test_stat_user_tables_collector_timestamp_values_are_reasonable() -> Re
     }
 
     // Cleanup
-    sqlx::query("DROP TABLE IF EXISTS test_timestamps")
+    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
         .execute(&pool)
         .await?;
 
@@ -666,6 +727,10 @@ async fn test_stat_user_tables_collector_autovacuum_threshold_metrics() -> Resul
         .execute(&pool)
         .await?;
 
+    sqlx::query(&format!("ANALYZE {table_name}"))
+        .execute(&pool)
+        .await?;
+
     let collector = StatUserTablesCollector::new();
     let registry = Registry::new();
 
@@ -717,6 +782,123 @@ async fn test_stat_user_tables_collector_autovacuum_threshold_metrics() -> Resul
     }
 
     // Cleanup
+    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
+        .execute(&pool)
+        .await?;
+
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_stat_user_tables_collector_marks_never_autovacuumed_tables() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+
+    let table_name = format!("test_never_autovac_{}", std::process::id());
+    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
+        .execute(&pool)
+        .await?;
+
+    sqlx::query(&format!("CREATE TABLE {table_name} (id INT)"))
+        .execute(&pool)
+        .await?;
+
+    let collector = StatUserTablesCollector::new();
+    let registry = Registry::new();
+    collector.register_metrics(&registry)?;
+    collector.collect(&pool).await?;
+
+    let metric_families = registry.gather();
+
+    let never_autovacuumed = find_metric_for_table(
+        &metric_families,
+        "pg_stat_user_tables_never_autovacuumed",
+        &table_name,
+    )
+    .map_or(0, |metric| {
+        common::metric_value_to_i64(metric.get_gauge().value())
+    });
+
+    assert_eq!(
+        never_autovacuumed, 1,
+        "new table should be marked as never autovacuumed"
+    );
+
+    let has_last_autovacuum_age = find_metric_for_table(
+        &metric_families,
+        "pg_stat_user_tables_last_autovacuum_seconds_ago",
+        &table_name,
+    )
+    .is_some();
+
+    assert!(
+        !has_last_autovacuum_age,
+        "table that was never autovacuumed should not expose last_autovacuum_seconds_ago"
+    );
+
+    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
+        .execute(&pool)
+        .await?;
+
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_stat_user_tables_collector_preserves_last_good_snapshot_on_query_failure()
+-> Result<()> {
+    let pool = common::create_test_pool().await?;
+
+    let table_name = format!("test_user_tables_snapshot_{}", std::process::id());
+    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
+        .execute(&pool)
+        .await?;
+    sqlx::query(&format!("CREATE TABLE {table_name} (id INT)"))
+        .execute(&pool)
+        .await?;
+    sqlx::query(&format!(
+        "INSERT INTO {table_name} (id) VALUES (1), (2), (3)"
+    ))
+    .execute(&pool)
+    .await?;
+
+    let collector = StatUserTablesCollector::new();
+    let registry = Registry::new();
+    collector.register_metrics(&registry)?;
+    collector.collect(&pool).await?;
+
+    let sample_count_before = registry
+        .gather()
+        .iter()
+        .find(|family| family.name() == "pg_stat_user_tables_table_size_bytes")
+        .map_or(0, |family| family.get_metric().len());
+
+    assert!(
+        sample_count_before > 0,
+        "expected initial table stats samples"
+    );
+
+    let broken_pool = PgPoolOptions::new()
+        .acquire_timeout(StdDuration::from_millis(100))
+        .connect_lazy("postgresql://postgres:postgres@localhost:54321/postgres")?;
+
+    let failed = collector.collect(&broken_pool).await;
+    assert!(
+        failed.is_err(),
+        "expected collection against broken pool to fail"
+    );
+
+    let sample_count_after = registry
+        .gather()
+        .iter()
+        .find(|family| family.name() == "pg_stat_user_tables_table_size_bytes")
+        .map_or(0, |family| family.get_metric().len());
+
+    assert_eq!(
+        sample_count_after, sample_count_before,
+        "failed collection should preserve the last good table-stats snapshot"
+    );
+
     sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
         .execute(&pool)
         .await?;

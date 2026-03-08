@@ -1,6 +1,7 @@
 # Get the current user's UID and GID
 uid := `id -u`
 gid := `id -g`
+container_cmd := `if [ -n "${PG_EXPORTER_CONTAINER_CMD:-}" ]; then echo "${PG_EXPORTER_CONTAINER_CMD}"; elif command -v podman >/dev/null 2>&1; then echo "podman"; else echo "docker"; fi`
 
 default: test
   @just --list
@@ -8,7 +9,7 @@ default: test
 # Test suite
 test: clippy fmt
   @echo "🧪 Checking PostgreSQL..."
-  @if ! podman ps --filter "name=pg_exporter_postgres" --format "{{{{.Names}}}}" | grep -q "pg_exporter_postgres"; then \
+  @if ! {{container_cmd}} ps --filter "name=pg_exporter_postgres" --format "{{{{.Names}}}}" | grep -q "pg_exporter_postgres"; then \
     echo "🚀 PostgreSQL container not running, starting it..."; \
     just postgres; \
     echo "⏳ Waiting for PostgreSQL to be ready..."; \
@@ -295,22 +296,111 @@ watch:
 curl:
   curl -s 0:9432/metrics
 
+# Run a live pgbench workload for local metrics testing
+workload duration="60" clients="5" scale="10" db="pgbench_test":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    duration="{{duration}}"
+    clients="{{clients}}"
+    scale="{{scale}}"
+    db="{{db}}"
+
+    duration="${duration#duration=}"
+    clients="${clients#clients=}"
+    scale="${scale#scale=}"
+    db="${db#db=}"
+
+    if ! command -v pgbench >/dev/null 2>&1; then
+        echo "❌ pgbench not found in PATH"
+        echo "Install postgresql-contrib (or equivalent) to use this recipe."
+        exit 1
+    fi
+
+    if ! psql -h localhost -p 5432 -U postgres -d postgres -c "SELECT 1" >/dev/null 2>&1; then
+        echo "❌ PostgreSQL is not reachable on localhost:5432"
+        echo "Start it first with: just postgres"
+        exit 1
+    fi
+
+    echo "🔧 Ensuring pgbench dataset exists (scale=${scale})..."
+    ./scripts/setup-local-test-db.sh --pgbench --pgbench-scale "${scale}"
+
+    echo "🚀 Running pgbench workload against ${db} for ${duration}s with ${clients} clients..."
+    pgbench -h localhost -p 5432 -U postgres -c "${clients}" -T "${duration}" "${db}"
+
+# Create table churn and run a manual vacuum for vacuum-related collector testing
+vacuum-workflow scale="20" rounds="5" sample_mod="5" db="pgbench_test" table="pgbench_accounts":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    scale="{{scale}}"
+    rounds="{{rounds}}"
+    sample_mod="{{sample_mod}}"
+    db="{{db}}"
+    table="{{table}}"
+
+    scale="${scale#scale=}"
+    rounds="${rounds#rounds=}"
+    sample_mod="${sample_mod#sample_mod=}"
+    db="${db#db=}"
+    table="${table#table=}"
+
+    bash ./scripts/run-vacuum-workflow.sh \
+        --scale "${scale}" \
+        --rounds "${rounds}" \
+        --sample-mod "${sample_mod}" \
+        --db "${db}" \
+        --table "${table}"
+
+# Create churn and wait for PostgreSQL autovacuum to clean it up without manual VACUUM
+autovacuum-workflow scale="20" rounds="5" sample_mod="5" timeout="180" poll="5" naptime="5s" db="pgbench_test" table="pgbench_accounts":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    scale="{{scale}}"
+    rounds="{{rounds}}"
+    sample_mod="{{sample_mod}}"
+    timeout="{{timeout}}"
+    poll="{{poll}}"
+    naptime="{{naptime}}"
+    db="{{db}}"
+    table="{{table}}"
+
+    scale="${scale#scale=}"
+    rounds="${rounds#rounds=}"
+    sample_mod="${sample_mod#sample_mod=}"
+    timeout="${timeout#timeout=}"
+    poll="${poll#poll=}"
+    naptime="${naptime#naptime=}"
+    db="${db#db=}"
+    table="${table#table=}"
+
+    bash ./scripts/run-autovacuum-workflow.sh \
+        --scale "${scale}" \
+        --rounds "${rounds}" \
+        --sample-mod "${sample_mod}" \
+        --timeout "${timeout}" \
+        --poll "${poll}" \
+        --naptime "${naptime}" \
+        --db "${db}" \
+        --table "${table}"
+
 postgres version="latest":
   mkdir -p db/log/postgres
-  podman run --rm -d --name pg_exporter_postgres \
+  {{container_cmd}} run --rm -d --name pg_exporter_postgres \
     -e POSTGRES_USER=postgres \
     -e POSTGRES_HOST_AUTH_METHOD=trust \
     -e PGDATA=/db/data/{{ version }} \
     -p 5432:5432 \
     -v $(pwd)/db:/db \
     -v $(pwd)/db/config/postgres:/etc/postgresql/config \
-    --userns keep-id:uid={{ uid }},gid={{ gid }} \
-    --user {{ uid }}:{{ gid }} \
+    {{ if container_cmd == "podman" { "--userns keep-id:uid=" + uid + ",gid=" + gid + " --user " + uid + ":" + gid } else { "" } }} \
     postgres:{{ version }} \
     postgres -c config_file=/etc/postgresql/config/postgresql.conf
 
 jaeger:
-  podman run --rm -d --name jaeger \
+  {{container_cmd}} run --rm -d --name jaeger \
     -e COLLECTOR_OTLP_ENABLED=true \
     -p 16686:16686 \
     -p 4317:4317 \
@@ -319,7 +409,7 @@ jaeger:
 
 stop-containers:
   @for c in pg_exporter_postgres jaeger; do \
-        podman stop $c 2>/dev/null || true; \
+        {{container_cmd}} stop $c 2>/dev/null || true; \
   done
 
 # Test against all PostgreSQL versions (14-18)
@@ -333,7 +423,7 @@ test-all-pg:
     echo "🚀 Starting all PostgreSQL versions..."
     for v in "${VERSIONS[@]}"; do
         PORT="54${v}"
-        podman run -d --name pg${v} \
+        {{container_cmd}} run -d --name pg${v} \
             -e POSTGRES_PASSWORD=postgres \
             -e POSTGRES_USER=postgres \
             -p ${PORT}:5432 \
@@ -345,7 +435,7 @@ test-all-pg:
 
     for v in "${VERSIONS[@]}"; do
         PORT="54${v}"
-        timeout 30 bash -c "until podman exec pg${v} pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done" || true
+        timeout 30 bash -c "until {{container_cmd}} exec pg${v} pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done" || true
     done
 
     echo ""
@@ -367,8 +457,8 @@ test-all-pg:
 
     echo "🧹 Cleaning up containers..."
     for v in "${VERSIONS[@]}"; do
-        podman stop pg${v} >/dev/null 2>&1 || true
-        podman rm pg${v} >/dev/null 2>&1 || true
+        {{container_cmd}} stop pg${v} >/dev/null 2>&1 || true
+        {{container_cmd}} rm pg${v} >/dev/null 2>&1 || true
     done
 
     if [ ${#FAILED[@]} -eq 0 ]; then
@@ -387,7 +477,7 @@ test-pg version:
     #!/usr/bin/env bash
     PORT="54{{version}}"
     echo "🐘 Starting PostgreSQL {{version}} on port ${PORT}..."
-    podman run -d --name pg{{version}} \
+    {{container_cmd}} run -d --name pg{{version}} \
         -e POSTGRES_PASSWORD=postgres \
         -e POSTGRES_USER=postgres \
         -p ${PORT}:5432 \
@@ -395,13 +485,13 @@ test-pg version:
 
     echo "⏳ Waiting for PostgreSQL to be ready..."
     sleep 3
-    timeout 30 bash -c "until podman exec pg{{version}} pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done"
+    timeout 30 bash -c "until {{container_cmd}} exec pg{{version}} pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done"
 
     echo "🧪 Running tests..."
     PG_EXPORTER_DSN="postgresql://postgres:postgres@localhost:${PORT}/postgres" cargo test
 
     echo "🧹 Cleaning up..."
-    podman stop pg{{version}} && podman rm pg{{version}}
+    {{container_cmd}} stop pg{{version}} && {{container_cmd}} rm pg{{version}}
 
 # Test TLS collector with SSL-enabled PostgreSQL
 test-tls version="16":
@@ -439,19 +529,19 @@ validate-dashboard:
 validate-all: test validate-dashboard
   @echo "✅ All validations passed!"
 
-# Run local Prometheus + Grafana stack against exporter (podman)
+# Run local Prometheus + Grafana stack against exporter
 metrics target="host.containers.internal:9432" image="pg-exporter-metrics-stack" name="metrics-stack" prom_volume="prom_data":
   # Build the stack image if it's missing so `just metrics` works without a manual build step
-  if ! podman image exists "{{image}}"; then \
-    podman build -t "{{image}}" grafana; \
+  if ! {{container_cmd}} image inspect "{{image}}" >/dev/null 2>&1; then \
+    {{container_cmd}} build -t "{{image}}" grafana; \
   fi
   # Replace any existing container with the same name to avoid conflicts
-  podman rm -f {{name}} 2>/dev/null || true
+  {{container_cmd}} rm -f {{name}} 2>/dev/null || true
   # Ensure a persistent volume for Prometheus data
-  if ! podman volume exists "{{prom_volume}}"; then \
-    podman volume create "{{prom_volume}}"; \
+  if ! {{container_cmd}} volume inspect "{{prom_volume}}" >/dev/null 2>&1; then \
+    {{container_cmd}} volume create "{{prom_volume}}"; \
   fi
-  podman run -d \
+  {{container_cmd}} run -d \
     --name {{name}} \
     --add-host=host.containers.internal:host-gateway \
     -e EXPORTER_TARGET={{target}} \
@@ -467,18 +557,18 @@ restart-metrics target="host.containers.internal:9432" image="pg-exporter-metric
   set -euo pipefail
 
   echo "🛑 Stopping existing metrics-stack container..."
-  podman rm -f {{name}} 2>/dev/null || true
+  {{container_cmd}} rm -f {{name}} 2>/dev/null || true
 
   echo "🔍 Checking if dashboard.json changed..."
   REBUILD=0
 
   # Check if image exists
-  if ! podman image exists "{{image}}"; then
+  if ! {{container_cmd}} image inspect "{{image}}" >/dev/null 2>&1; then
     echo "📦 Image doesn't exist, will build..."
     REBUILD=1
   else
     # Get image creation time
-    IMAGE_TIME=$(podman inspect {{image}} --format='{{{{.Created}}}}' 2>/dev/null || echo "")
+    IMAGE_TIME=$({{container_cmd}} inspect {{image}} --format='{{{{.Created}}}}' 2>/dev/null || echo "")
 
     if [ -n "$IMAGE_TIME" ]; then
       # Convert image time to epoch (works with ISO 8601 format)
@@ -501,16 +591,16 @@ restart-metrics target="host.containers.internal:9432" image="pg-exporter-metric
 
   if [ "$REBUILD" -eq 1 ]; then
     echo "🔨 Building Grafana stack image..."
-    podman build -t "{{image}}" grafana
+    {{container_cmd}} build -t "{{image}}" grafana
   fi
 
-  if ! podman volume exists "{{prom_volume}}"; then
+  if ! {{container_cmd}} volume inspect "{{prom_volume}}" >/dev/null 2>&1; then
     echo "📦 Creating Prometheus volume..."
-    podman volume create "{{prom_volume}}"
+    {{container_cmd}} volume create "{{prom_volume}}"
   fi
 
   echo "🚀 Starting metrics-stack container..."
-  podman run -d \
+  {{container_cmd}} run -d \
     --name {{name}} \
     --add-host=host.containers.internal:host-gateway \
     -e EXPORTER_TARGET={{target}} \

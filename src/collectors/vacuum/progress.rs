@@ -101,6 +101,15 @@ impl VacuumProgressCollector {
             duration_seconds,
         }
     }
+
+    fn reset_progress_metrics(&self) {
+        self.in_progress.reset();
+        self.heap_progress.reset();
+        self.heap_vacuumed.reset();
+        self.index_vacuum_count.reset();
+        self.is_autovacuum.reset();
+        self.duration_seconds.reset();
+    }
 }
 
 impl Collector for VacuumProgressCollector {
@@ -160,7 +169,7 @@ impl Collector for VacuumProgressCollector {
                     p.heap_blks_scanned,
                     p.heap_blks_vacuumed,
                     p.index_vacuum_count,
-                    COALESCE(a.query LIKE 'autovacuum:%', false) AS is_autovacuum,
+                    COALESCE(a.backend_type = 'autovacuum worker', false) AS is_autovacuum,
                     COALESCE(EXTRACT(EPOCH FROM (now() - a.xact_start))::bigint, 0) AS duration_seconds
                 FROM pg_stat_progress_vacuum p
                 LEFT JOIN pg_database d ON d.oid = p.datid
@@ -179,14 +188,10 @@ impl Collector for VacuumProgressCollector {
                 info_span!("vacuum_progress.update_metrics", active_rows = rows.len());
             let _g = update_span.enter();
 
+            // Replace the full point-in-time snapshot only after the query succeeded.
+            self.reset_progress_metrics();
+
             if rows.is_empty() {
-                // Reset "none" placeholder metrics
-                self.in_progress.with_label_values(&["none", "none"]).set(0);
-                self.heap_progress.with_label_values(&["none", "none"]).set(0.0);
-                self.heap_vacuumed.with_label_values(&["none", "none"]).set(0);
-                self.index_vacuum_count.with_label_values(&["none", "none"]).set(0);
-                self.is_autovacuum.with_label_values(&["none", "none"]).set(0);
-                self.duration_seconds.with_label_values(&["none", "none"]).set(0);
                 self.global_active.set(0);
                 debug!("no active vacuum operations");
             } else {
@@ -243,5 +248,51 @@ impl Collector for VacuumProgressCollector {
 
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_reset_progress_metrics_clears_previous_table_series() -> Result<()> {
+        let collector = VacuumProgressCollector::new();
+        let registry = Registry::new();
+
+        collector.register_metrics(&registry)?;
+        collector
+            .in_progress
+            .with_label_values(&["postgres", "public.test_table"])
+            .set(1);
+        collector
+            .heap_progress
+            .with_label_values(&["postgres", "public.test_table"])
+            .set(0.5);
+        collector
+            .duration_seconds
+            .with_label_values(&["postgres", "public.test_table"])
+            .set(42);
+
+        collector.reset_progress_metrics();
+
+        for metric_name in [
+            "pg_vacuum_in_progress",
+            "pg_vacuum_heap_progress",
+            "pg_vacuum_duration_seconds",
+        ] {
+            let metric_family = registry
+                .gather()
+                .into_iter()
+                .find(|family| family.name() == metric_name);
+            if let Some(metric_family) = metric_family {
+                assert!(
+                    metric_family.get_metric().is_empty(),
+                    "metric {metric_name} should have no stale series after reset"
+                );
+            }
+        }
+
+        Ok(())
     }
 }

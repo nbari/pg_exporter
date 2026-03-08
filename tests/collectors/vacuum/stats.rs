@@ -2,6 +2,7 @@ use super::super::common;
 use anyhow::Result;
 use pg_exporter::collectors::{Collector, vacuum::stats::VacuumStatsCollector};
 use prometheus::Registry;
+use sqlx::postgres::PgPoolOptions;
 
 #[tokio::test]
 async fn test_vacuum_stats_collector_registers_without_error() -> Result<()> {
@@ -264,5 +265,52 @@ async fn test_vacuum_stats_collector_collects_from_test_database() -> Result<()>
     );
 
     pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vacuum_stats_collector_preserves_last_good_snapshot_on_query_failure() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+
+    let collector = VacuumStatsCollector::new();
+    let registry = Registry::new();
+
+    collector.register_metrics(&registry)?;
+    collector.collect(&pool).await?;
+
+    let initial_metric_families = registry.gather();
+    let initial_sample_count = initial_metric_families
+        .iter()
+        .find(|m| m.name() == "pg_vacuum_database_freeze_age_xids")
+        .map_or(0, |m| m.get_metric().len());
+    assert!(
+        initial_sample_count > 0,
+        "expected initial freeze-age metrics before simulating failure"
+    );
+
+    pool.close().await;
+
+    let broken_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_lazy("postgresql://localhost:1/does_not_exist")?;
+
+    let result = collector.collect(&broken_pool).await;
+    assert!(
+        result.is_err(),
+        "collection should fail against invalid pool"
+    );
+
+    let metric_families_after_failure = registry.gather();
+    let sample_count_after_failure = metric_families_after_failure
+        .iter()
+        .find(|m| m.name() == "pg_vacuum_database_freeze_age_xids")
+        .map_or(0, |m| m.get_metric().len());
+
+    assert_eq!(
+        sample_count_after_failure, initial_sample_count,
+        "failed scrape should preserve the last good freeze-age snapshot"
+    );
+
+    broken_pool.close().await;
     Ok(())
 }

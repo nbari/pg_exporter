@@ -3,6 +3,8 @@ use anyhow::Result;
 use pg_exporter::collectors::Collector;
 use pg_exporter::collectors::statements::pg_statements::PgStatementsCollector;
 use prometheus::Registry;
+use sqlx::postgres::PgPoolOptions;
+use std::time::Duration as StdDuration;
 use tokio::time::{Duration, sleep};
 
 async fn setup_pg_statements_test_db() -> Result<Option<common::IsolatedTestDatabase>> {
@@ -11,7 +13,7 @@ async fn setup_pg_statements_test_db() -> Result<Option<common::IsolatedTestData
 
 #[tokio::test]
 async fn test_pg_statements_collector_registers_without_error() -> Result<()> {
-    let collector = PgStatementsCollector::new();
+    let collector = PgStatementsCollector::with_top_n(25);
     let registry = Registry::new();
 
     // Should not error when registering
@@ -28,7 +30,7 @@ async fn test_pg_statements_collector_has_all_metrics_after_collection() -> Resu
     };
     let pool = test_db.pool();
 
-    let collector = PgStatementsCollector::new();
+    let collector = PgStatementsCollector::with_top_n(25);
     let registry = Registry::new();
 
     collector.register_metrics(&registry)?;
@@ -76,7 +78,7 @@ async fn test_pg_statements_collector_gracefully_handles_missing_extension() -> 
     let test_db = common::IsolatedTestDatabase::new("pg_statements_missing").await?;
     let pool = test_db.pool();
 
-    let collector = PgStatementsCollector::new();
+    let collector = PgStatementsCollector::with_top_n(25);
     let registry = Registry::new();
 
     collector.register_metrics(&registry)?;
@@ -116,6 +118,60 @@ async fn test_pg_statements_collector_with_top_n_configuration() -> Result<()> {
 }
 
 #[tokio::test]
+async fn test_pg_statements_preserves_last_good_snapshot_on_query_failure() -> Result<()> {
+    let Some(test_db) = setup_pg_statements_test_db().await? else {
+        println!("pg_stat_statements extension not installed, skipping test");
+        return Ok(());
+    };
+    let pool = test_db.pool();
+
+    for _ in 0..5 {
+        let _ = sqlx::query("SELECT 1").execute(pool).await;
+    }
+
+    let collector = PgStatementsCollector::with_top_n(25);
+    let registry = Registry::new();
+    collector.register_metrics(&registry)?;
+
+    collector.collect(pool).await?;
+
+    let sample_count_before = registry
+        .gather()
+        .iter()
+        .find(|family| family.name() == "postgres_pg_stat_statements_calls_total")
+        .map_or(0, |family| family.get_metric().len());
+
+    assert!(
+        sample_count_before > 0,
+        "expected initial statement samples"
+    );
+
+    let broken_pool = PgPoolOptions::new()
+        .acquire_timeout(StdDuration::from_millis(100))
+        .connect_lazy("postgresql://postgres:postgres@localhost:54321/postgres")?;
+
+    let failed = collector.collect(&broken_pool).await;
+    assert!(
+        failed.is_err(),
+        "expected collection against broken pool to fail"
+    );
+
+    let sample_count_after = registry
+        .gather()
+        .iter()
+        .find(|family| family.name() == "postgres_pg_stat_statements_calls_total")
+        .map_or(0, |family| family.get_metric().len());
+
+    assert_eq!(
+        sample_count_after, sample_count_before,
+        "failed collection should preserve last good snapshot"
+    );
+
+    test_db.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_pg_statements_collector_metrics_have_proper_labels() -> Result<()> {
     let Some(test_db) = setup_pg_statements_test_db().await? else {
         println!("pg_stat_statements extension not installed, skipping test");
@@ -127,7 +183,7 @@ async fn test_pg_statements_collector_metrics_have_proper_labels() -> Result<()>
     let _ = sqlx::query("SELECT 1").execute(pool).await;
     let _ = sqlx::query("SELECT current_timestamp").execute(pool).await;
 
-    let collector = PgStatementsCollector::new();
+    let collector = PgStatementsCollector::with_top_n(25);
     let registry = Registry::new();
 
     collector.register_metrics(&registry)?;
@@ -181,7 +237,7 @@ async fn test_pg_statements_collector_cache_hit_ratio_is_valid() -> Result<()> {
     };
     let pool = test_db.pool();
 
-    let collector = PgStatementsCollector::new();
+    let collector = PgStatementsCollector::with_top_n(25);
     let registry = Registry::new();
 
     collector.register_metrics(&registry)?;
@@ -221,7 +277,7 @@ async fn test_pg_statements_handles_utility_statements() -> Result<()> {
     let _ = sqlx::query("VACUUM").execute(pool).await;
     let _ = sqlx::query("ANALYZE").execute(pool).await;
 
-    let collector = PgStatementsCollector::new();
+    let collector = PgStatementsCollector::with_top_n(25);
     let registry = Registry::new();
 
     collector.register_metrics(&registry)?;
@@ -295,7 +351,7 @@ async fn test_pg_statements_handles_multibyte_utf8_query_boundary() -> Result<()
         "expected byte index 80 to be inside a UTF-8 character"
     );
 
-    let collector = PgStatementsCollector::new();
+    let collector = PgStatementsCollector::with_top_n(25);
     let registry = Registry::new();
     collector.register_metrics(&registry)?;
 
@@ -331,7 +387,7 @@ async fn test_pg_statements_handles_numeric_types_correctly() -> Result<()> {
             .await;
     }
 
-    let collector = PgStatementsCollector::new();
+    let collector = PgStatementsCollector::with_top_n(25);
     let registry = Registry::new();
 
     collector.register_metrics(&registry)?;
@@ -371,7 +427,7 @@ async fn test_pg_statements_handles_edge_case_values() -> Result<()> {
     // Generate a minimal query
     let _ = sqlx::query("SELECT 1").execute(pool).await;
 
-    let collector = PgStatementsCollector::new();
+    let collector = PgStatementsCollector::with_top_n(25);
     let registry = Registry::new();
 
     collector.register_metrics(&registry)?;
@@ -436,7 +492,7 @@ async fn test_pg_statements_with_realistic_workload() -> Result<()> {
             .await;
     }
 
-    let collector = PgStatementsCollector::new();
+    let collector = PgStatementsCollector::with_top_n(25);
     let registry = Registry::new();
 
     collector.register_metrics(&registry)?;

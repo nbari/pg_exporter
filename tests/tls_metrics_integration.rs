@@ -10,16 +10,25 @@
 mod common;
 
 use anyhow::Result;
+use pg_exporter::collectors::config::CollectorConfig;
+
+fn collector_config(names: &[&str]) -> CollectorConfig {
+    let enabled = names
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect::<Vec<_>>();
+    CollectorConfig::new(25).with_enabled(&enabled)
+}
 
 #[tokio::test]
 async fn test_tls_metrics_endpoint_returns_ssl_metrics() -> Result<()> {
     let port = common::get_available_port();
     let dsn = common::get_test_dsn_secret();
 
-    let collectors = vec!["default".to_string(), "tls".to_string()];
+    let config = collector_config(&["default", "tls"]);
 
     let handle =
-        tokio::spawn(async move { pg_exporter::exporter::new(port, None, dsn, collectors).await });
+        tokio::spawn(async move { pg_exporter::exporter::new(port, None, dsn, config).await });
 
     assert!(
         common::wait_for_server(port, 50).await,
@@ -68,10 +77,10 @@ async fn test_tls_collector_can_be_enabled() -> Result<()> {
     let dsn = common::get_test_dsn_secret();
 
     // Enable only TLS collector
-    let collectors = vec!["tls".to_string()];
+    let config = collector_config(&["tls"]);
 
     let handle =
-        tokio::spawn(async move { pg_exporter::exporter::new(port, None, dsn, collectors).await });
+        tokio::spawn(async move { pg_exporter::exporter::new(port, None, dsn, config).await });
 
     assert!(
         common::wait_for_server(port, 50).await,
@@ -104,10 +113,10 @@ async fn test_metrics_format_is_valid_prometheus() -> Result<()> {
     let port = common::get_available_port();
     let dsn = common::get_test_dsn_secret();
 
-    let collectors = vec!["tls".to_string()];
+    let config = collector_config(&["tls"]);
 
     let handle =
-        tokio::spawn(async move { pg_exporter::exporter::new(port, None, dsn, collectors).await });
+        tokio::spawn(async move { pg_exporter::exporter::new(port, None, dsn, config).await });
 
     assert!(common::wait_for_server(port, 50).await);
 

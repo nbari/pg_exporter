@@ -19,7 +19,7 @@ use tracing_futures::Instrument;
 /// This collector provides comprehensive SSL/TLS monitoring for `PostgreSQL`:
 /// - Server SSL/TLS configuration (works remotely)
 /// - Certificate expiration and validity monitoring (requires local access to cert files)
-/// - Per-connection SSL/TLS statistics (`PostgreSQL` 9.5+, works remotely)
+/// - Per-connection SSL/TLS statistics (`PostgreSQL` 14+, works remotely)
 ///
 /// **Note:** The certificate collector requires filesystem access to the certificate files.
 /// When running the exporter remotely, certificate metrics will not be available unless

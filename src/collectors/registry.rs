@@ -3,6 +3,7 @@ use crate::{
         Collector, CollectorType, all_factories,
         config::CollectorConfig,
         exporter::ScraperCollector,
+        statements::StatementsCollector,
         util::{connect_options_for_db, get_default_database, get_pg_version, set_pg_version},
     },
     exporter::GIT_COMMIT_HASH,
@@ -21,6 +22,19 @@ use std::{
 use tokio::sync::RwLock;
 use tracing::{debug, debug_span, error, info, info_span, instrument, warn};
 use tracing_futures::Instrument as _;
+
+fn build_collector(
+    name: &str,
+    config: &CollectorConfig,
+    factories: &std::collections::HashMap<&'static str, fn() -> CollectorType>,
+) -> Option<CollectorType> {
+    match name {
+        "statements" => Some(CollectorType::StatementsCollector(
+            StatementsCollector::with_top_n(config.statements.top_n),
+        )),
+        _ => factories.get(name).map(|factory| factory()),
+    }
+}
 
 #[derive(Clone)]
 pub struct CollectorRegistry {
@@ -100,27 +114,25 @@ impl CollectorRegistry {
 
         // Build all requested collectors and register their metrics.
         let collectors = config
-            .enabled_collectors
-            .iter()
+            .enabled_collectors_in_order()
+            .into_iter()
             .filter_map(|name| {
-                factories.get(name.as_str()).map(|f| {
-                    let collector = f();
+                let collector = build_collector(&name, config, &factories)?;
 
-                    // If this collector provides a scraper, extract it
-                    if let Some(scraper) = collector.get_scraper() {
-                        scraper_opt = Some(scraper);
-                    }
+                // If this collector provides a scraper, extract it
+                if let Some(scraper) = collector.get_scraper() {
+                    scraper_opt = Some(scraper);
+                }
 
-                    // Register metrics per collector under a span so failures surface in traces.
-                    let reg_span = debug_span!("collector.register_metrics", collector = %name);
-                    let guard = reg_span.enter();
-                    if let Err(e) = collector.register_metrics(&registry) {
-                        warn!("Failed to register metrics for collector '{}': {}", name, e);
-                    }
-                    drop(guard);
+                // Register metrics per collector under a span so failures surface in traces.
+                let reg_span = debug_span!("collector.register_metrics", collector = %name);
+                let guard = reg_span.enter();
+                if let Err(e) = collector.register_metrics(&registry) {
+                    warn!("Failed to register metrics for collector '{}': {}", name, e);
+                }
+                drop(guard);
 
-                    collector
-                })
+                Some(collector)
             })
             .collect();
 
@@ -399,7 +411,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn test_pg_up_indicator_on_failure() {
-        let config = CollectorConfig::new().with_enabled(&["default".to_string()]);
+        let config = CollectorConfig::new(25).with_enabled(&["default".to_string()]);
         let registry = CollectorRegistry::new(&config);
 
         // Use a pool that will definitely fail
@@ -417,7 +429,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn test_pg_up_not_overwritten_by_collector_success() {
         // "exporter" collector always runs and should "succeed" even if DB is down
-        let config = CollectorConfig::new().with_enabled(&["exporter".to_string()]);
+        let config = CollectorConfig::new(25).with_enabled(&["exporter".to_string()]);
         let registry = CollectorRegistry::new(&config);
 
         // Use a pool that will definitely fail
@@ -439,7 +451,7 @@ mod tests {
         let dsn = std::env::var("PG_EXPORTER_DSN").unwrap_or_else(|_| {
             "postgresql://postgres:postgres@localhost:5432/postgres".to_string()
         });
-        let config = CollectorConfig::new().with_enabled(&["exporter".to_string()]);
+        let config = CollectorConfig::new(25).with_enabled(&["exporter".to_string()]);
 
         // 1. Start with a broken pool
         let registry = CollectorRegistry::new(&config);
@@ -472,7 +484,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn test_scrape_count_increments() {
-        let config = CollectorConfig::new().with_enabled(&["exporter".to_string()]);
+        let config = CollectorConfig::new(25).with_enabled(&["exporter".to_string()]);
         let registry = CollectorRegistry::new(&config);
 
         let pool = PgPoolOptions::new()
@@ -515,8 +527,8 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn test_outage_filtering() {
         // Enabled both exporter (DB-independent) and database (DB-dependent)
-        let config =
-            CollectorConfig::new().with_enabled(&["exporter".to_string(), "database".to_string()]);
+        let config = CollectorConfig::new(25)
+            .with_enabled(&["exporter".to_string(), "database".to_string()]);
         let registry = CollectorRegistry::new(&config);
 
         // Use a pool that will definitely fail

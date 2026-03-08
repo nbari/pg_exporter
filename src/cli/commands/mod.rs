@@ -4,6 +4,7 @@ use clap::{
 };
 
 mod collectors;
+mod options;
 
 pub mod built_info {
     #![allow(clippy::doc_markdown)]
@@ -106,7 +107,8 @@ pub fn new() -> Command {
                 .action(ArgAction::Count),
         );
 
-    collectors::add_collectors_args(cmd)
+    let cmd = collectors::add_collectors_args(cmd);
+    options::add_collector_option_args(cmd)
 }
 
 #[cfg(test)]

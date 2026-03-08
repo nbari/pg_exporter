@@ -165,10 +165,13 @@ SELECT * FROM pg_extension;
 
 ## PostgreSQL Version Compatibility
 
-We test against PostgreSQL 16, 17, and 18. Some features may vary:
+`pg_exporter` supports PostgreSQL 14 and newer.
 
-- `pg_stat_statements.wal_bytes` - Added in PostgreSQL 13
-- Always use COALESCE for version-specific columns:
+The test matrix currently covers PostgreSQL 16, 17, and 18. Some features may vary across supported versions:
+
+- `pg_stat_checkpointer` - Added in PostgreSQL 17
+- Use explicit version guards only for features that vary across supported versions
+- Always use COALESCE for nullable or version-specific columns when applicable:
   ```sql
   COALESCE(wal_bytes, 0)::bigint as wal_bytes
   ```
@@ -177,7 +180,7 @@ We test against PostgreSQL 16, 17, and 18. Some features may vary:
 
 Tests should be skipped (not fail) when:
 - Required extension is not installed
-- PostgreSQL version doesn't support a feature
+- PostgreSQL version doesn't support a feature within the supported PostgreSQL 14+ range
 - Running in a restricted environment
 
 ```rust

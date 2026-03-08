@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-03-07
+
+### Added
+- **Configurable Statements Top-N**: Added `--statements.top-n` and `PG_EXPORTER_STATEMENTS_TOP_N` so `pg_stat_statements` export cardinality can be tuned without code changes.
+- **Recent Query Pressure Dashboard Row**: Added a second Grafana `pg_stat_statements` row focused on recent 5-minute pressure (DB time added, mean time, call rate, WAL added, temp blocks added) to complement the existing cumulative "since reset" view.
+- **Vacuum Workflows for Local Testing**: Added `just vacuum-workflow` for deterministic manual vacuum testing and `just autovacuum-workflow` for PostgreSQL-managed cleanup testing against local `pgbench` data.
+- **Vacuum / Bloat Dashboard Panels**: Added Grafana panels for estimated bloat ratio, estimated dead space, table size, autovacuum threshold pressure, and time since last autovacuum to make repack and `VACUUM FULL` candidates easier to identify.
+- **Never-Autovacuumed Visibility**: Added `pg_stat_user_tables_never_autovacuumed` and `pg_stat_user_tables_never_autoanalyzed` so neglected tables are no longer indistinguishable from recently maintained ones.
+
+### Changed
+- **Statements Default Scope**: Reduced the default `pg_stat_statements` exporter-side top-N from 100 to 25 to lower scrape cost and time-series cardinality while keeping query-level visibility useful by default.
+- **CLI Option Layout**: Documented the collector-specific option convention using long-only flags in `src/cli/commands/options.rs` with typed values carried through `src/collectors/config.rs`.
+- **Statements Query Coverage**: Switched statement role resolution from `pg_user` to `pg_roles` with `LEFT JOIN` semantics so valid statement rows are not dropped when login-user views are too narrow.
+- **Statements Extension Detection Overhead**: Cached `pg_stat_statements` extension availability inside the collector to avoid querying `pg_extension` on every scrape while still rechecking periodically if the extension is missing.
+- **Query Dashboard Semantics**: Clarified Grafana `pg_stat_statements` panel titles, descriptions, and legends so cumulative panels explicitly mean "since reset" and legends include `datname` for better disambiguation.
+- **PostgreSQL Support Floor**: Updated documentation and dashboard wording to reflect the supported PostgreSQL range of 14+.
+- **Exporter Session Tagging**: Applied a default PostgreSQL `application_name` of `pg_exporter` to exporter-managed connections so logs and `pg_stat_activity` identify exporter sessions explicitly.
+- **Vacuum Dashboard Focus**: Reworked the Grafana vacuum row to prioritize predictive vacuum debt and bloat signals before active vacuum execution, matching real-world repack and autovacuum troubleshooting better.
+- **`stat_user_tables` Threshold Semantics**: Autovacuum and autoanalyze threshold ratios now honor per-table reloptions instead of assuming only global PostgreSQL settings.
+- **Table DML Dashboard Semantics**: Switched the table DML panel from `rate(...)` to reset-safe `delta(...)/300` queries to avoid PromQL warnings on exporter snapshot metrics.
+- **Activity Dashboard Semantics**: Reworked the long-running query panel to show the real exported metrics (`pg_stat_activity_oldest_query_age_seconds` and per-database max query duration) instead of duplicating one series under two labels.
+
+### Fixed
+- **Exporter Open-FD Inflation**: Fixed high `pg_exporter_process_open_fds` values on Linux by narrowing self-monitoring refresh scope to the exporter PID only (instead of refreshing all processes via `sysinfo`). This removes persistent `/proc/*/stat` descriptor caching for unrelated processes.
+- **Statements Self-Observation Noise**: Excluded the statements collector's own `pg_stat_statements` query from exported top-N results so quiet systems are less likely to show the exporter itself as a top query.
+- **Statements Failed-Scrape Data Loss**: Statement metrics are now reset only after a replacement query succeeds, preserving the last good snapshot across transient query failures.
+- **Vacuum Progress Stale Series**: `pg_stat_progress_vacuum`-based metrics now clear finished table series instead of leaving stale vacuum progress visible after the vacuum ends.
+- **Vacuum Stats Failed-Scrape Data Loss**: Vacuum freeze-age and autovacuum-worker metrics are now replaced only after all source queries succeed, preserving the last good snapshot across transient failures.
+- **Autovacuum Detection Accuracy**: Vacuum progress now identifies autovacuum using backend type instead of query-text matching.
+- **`stat_user_tables` Failed-Scrape Data Loss**: Table statistics are now fetched before reset so a full collection failure preserves the last good snapshot instead of blanking the metrics.
+- **`stat_user_tables` Dynamic Database Churn**: Partial per-database failures (for example, databases dropped between discovery and scrape) are now logged while still publishing the successful portion of the snapshot.
+- **Long-Running Query Stale Series**: `activity/queries` now clears finished long-running query label sets before publishing the current snapshot, preventing stale wait/state/duration series from lingering after incidents end.
+
 ## [0.10.3] - 2026-03-04
 
 ### Fixed

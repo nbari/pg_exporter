@@ -2,6 +2,8 @@
 
 The `statements` collector tracks query performance metrics from PostgreSQL's `pg_stat_statements` extension. It's one of the most powerful tools for identifying and optimizing slow queries in production.
 
+`pg_exporter` supports PostgreSQL 14 and newer, so all metrics documented here assume PostgreSQL 14+.
+
 ## Why This Matters
 
 - **Find slow queries during incidents** - "What query is causing high load?"
@@ -45,13 +47,16 @@ Enable the collector:
 pg_exporter --dsn postgresql:///postgres?user=postgres_exporter --collector.statements
 ```
 
-By default, it tracks the **top 100 queries** by total execution time.
+By default, it tracks the **top 25 queries** by total execution time.
 
 Configure the number of queries to track:
 
 ```bash
-# Track top 50 queries
-pg_exporter --dsn postgresql://... --collector.statements --statements.top-n=50
+# Track top 10 queries
+pg_exporter --dsn postgresql://... --collector.statements --statements.top-n=10
+
+# Environment variable form
+PG_EXPORTER_STATEMENTS_TOP_N=50 pg_exporter --dsn postgresql://... --collector.statements
 ```
 
 ## Key Metrics
@@ -73,7 +78,7 @@ pg_exporter --dsn postgresql://... --collector.statements --statements.top-n=50
 - `pg_stat_statements_cache_hit_ratio` - Query cache effectiveness (0.0-1.0)
 
 ### Resource Usage
-- `pg_stat_statements_wal_bytes_total` - WAL generation (PostgreSQL 13+)
+- `pg_stat_statements_wal_bytes_total` - WAL generation
 
 ## Use Cases
 
@@ -132,6 +137,42 @@ All metrics include these labels:
 - `usename` - User/role name
 - `query_short` - First 80 characters of the query (or `<utility>` for VACUUM/ANALYZE)
 
+`query_short` is intentionally capped at 80 characters to keep Prometheus label
+cardinality and label size under control. It is meant for fast identification in
+Prometheus and Grafana, not as a full SQL text export.
+
+When you need the full normalized statement text, use the `queryid` label from
+the metric and query `pg_stat_statements` directly.
+
+Example:
+
+```sql
+SELECT
+    queryid::text,
+    d.datname,
+    r.rolname,
+    s.query
+FROM pg_stat_statements s
+JOIN pg_database d ON d.oid = s.dbid
+LEFT JOIN pg_roles r ON r.oid = s.userid
+WHERE queryid::text = '<queryid-from-metric>';
+```
+
+If you want to narrow the search further, also filter by `datname`:
+
+```sql
+SELECT
+    queryid::text,
+    d.datname,
+    r.rolname,
+    s.query
+FROM pg_stat_statements s
+JOIN pg_database d ON d.oid = s.dbid
+LEFT JOIN pg_roles r ON r.oid = s.userid
+WHERE queryid::text = '<queryid-from-metric>'
+  AND d.datname = '<database-from-metric>';
+```
+
 ## Important Notes
 
 ### Query Text Normalization
@@ -156,7 +197,7 @@ Utility statements (VACUUM, ANALYZE, CREATE INDEX, etc.) may appear as `<utility
 The collector tracks the top N queries **by total execution time**. This means:
 - Long-running infrequent queries appear at the top
 - Fast but frequent queries also appear if their total time is high
-- Adjust `--statements.top-n` based on your query diversity
+- Adjust `--statements.top-n` based on your query diversity and scrape budget
 
 ### Performance Impact
 

@@ -108,11 +108,6 @@ impl Collector for VacuumStatsCollector {
     )]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            // 0) Reset all metrics to clear stale data (e.g. dropped databases)
-            self.db_freeze_age_xids.reset();
-            self.db_freeze_age_pct_of_max.reset();
-            self.autovac_workers.reset();
-
             let excluded: Vec<String> = get_excluded_databases().to_vec();
 
             // Query 1: global autovacuum_freeze_max_age (xids)
@@ -128,9 +123,7 @@ impl Collector for VacuumStatsCollector {
             )
             .fetch_one(pool)
             .instrument(q_freeze_max)
-            .await
-            .unwrap_or(200_000_000); // default if missing, very unlikely
-            self.freeze_max_age_xids.set(freeze_max_age_xids);
+            .await?;
 
             // Query 2: per-database freeze age (xids) from pg_database
             let q_db_freeze_age = info_span!(
@@ -159,6 +152,8 @@ impl Collector for VacuumStatsCollector {
             .await?;
 
             let mut seen_dbs: HashSet<String> = HashSet::new();
+            let mut freeze_age_values: HashMap<String, i64> = HashMap::new();
+            let mut freeze_pct_values: HashMap<String, i64> = HashMap::new();
 
             for row in &rows {
                 let datname: String = row
@@ -167,10 +162,7 @@ impl Collector for VacuumStatsCollector {
                 let age_xids: i64 = row.try_get::<i64, _>("freeze_age").unwrap_or(0);
 
                 seen_dbs.insert(datname.clone());
-
-                self.db_freeze_age_xids
-                    .with_label_values(&[&datname])
-                    .set(age_xids);
+                freeze_age_values.insert(datname.clone(), age_xids);
 
                 // integer percent; cap to 100 (can exceed in theory; cap keeps dashboards sane)
                 let pct = if freeze_max_age_xids > 0 {
@@ -185,9 +177,7 @@ impl Collector for VacuumStatsCollector {
                 } else {
                     0
                 };
-                self.db_freeze_age_pct_of_max
-                    .with_label_values(&[&datname])
-                    .set(pct);
+                freeze_pct_values.insert(datname.clone(), pct);
 
                 debug!(
                     datname = %datname,
@@ -233,16 +223,35 @@ impl Collector for VacuumStatsCollector {
                 let workers: i64 = row.try_get::<i64, _>("workers").unwrap_or(0);
                 worker_map.insert(datname.clone(), workers);
 
-                self.autovac_workers
-                    .with_label_values(&[&datname])
-                    .set(workers);
             }
 
             // Ensure we emit zeros for DBs with no workers visible this scrape
             for db in seen_dbs {
-                if !worker_map.contains_key(&db) {
-                    self.autovac_workers.with_label_values(&[&db]).set(0);
-                }
+                worker_map.entry(db).or_insert(0);
+            }
+
+            // Replace the full point-in-time snapshot only after all queries succeeded.
+            self.db_freeze_age_xids.reset();
+            self.db_freeze_age_pct_of_max.reset();
+            self.autovac_workers.reset();
+            self.freeze_max_age_xids.set(freeze_max_age_xids);
+
+            for (datname, age_xids) in freeze_age_values {
+                self.db_freeze_age_xids
+                    .with_label_values(&[&datname])
+                    .set(age_xids);
+            }
+
+            for (datname, pct) in freeze_pct_values {
+                self.db_freeze_age_pct_of_max
+                    .with_label_values(&[&datname])
+                    .set(pct);
+            }
+
+            for (datname, workers) in worker_map {
+                self.autovac_workers
+                    .with_label_values(&[&datname])
+                    .set(workers);
             }
 
             Ok(())

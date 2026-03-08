@@ -3,13 +3,23 @@
 #![allow(clippy::panic)]
 #![allow(clippy::indexing_slicing)]
 use anyhow::Result;
+use pg_exporter::collectors::config::CollectorConfig;
 use secrecy::SecretString;
 
 mod common;
 
+fn collector_config(names: &[&str]) -> CollectorConfig {
+    let enabled = names
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect::<Vec<_>>();
+    CollectorConfig::new(25).with_enabled(&enabled)
+}
+
 #[tokio::test]
 async fn test_exporter_database_connection() -> Result<()> {
-    let pool = common::create_test_pool().await?;
+    let pool =
+        sqlx::PgPool::connect("postgresql://postgres:postgres@localhost:5432/postgres").await?;
 
     let row: (i32,) = sqlx::query_as("SELECT 1").fetch_one(&pool).await?;
 
@@ -26,7 +36,7 @@ async fn test_exporter_starts_and_stops() -> Result<()> {
     let dsn = common::get_test_dsn_secret();
 
     let handle = tokio::spawn(async move {
-        pg_exporter::exporter::new(port, None, dsn, vec!["default".to_string()]).await
+        pg_exporter::exporter::new(port, None, dsn, collector_config(&["default"])).await
     });
 
     assert!(
@@ -54,7 +64,7 @@ async fn test_exporter_with_excluded_databases() -> Result<()> {
     let dsn = common::get_test_dsn_secret();
 
     let handle = tokio::spawn(async move {
-        pg_exporter::exporter::new(port, None, dsn, vec!["default".to_string()]).await
+        pg_exporter::exporter::new(port, None, dsn, collector_config(&["default"])).await
     });
 
     assert!(
@@ -88,7 +98,7 @@ async fn test_exporter_bind_to_ipv4_localhost() -> Result<()> {
             port,
             Some("127.0.0.1".to_string()),
             dsn,
-            vec!["default".to_string()],
+            collector_config(&["default"]),
         )
         .await
     });
@@ -117,7 +127,7 @@ async fn test_exporter_bind_to_ipv4_all_interfaces() -> Result<()> {
             port,
             Some("0.0.0.0".to_string()),
             dsn,
-            vec!["default".to_string()],
+            collector_config(&["default"]),
         )
         .await
     });
@@ -146,7 +156,7 @@ async fn test_exporter_bind_to_ipv6_localhost() -> Result<()> {
             port,
             Some("::1".to_string()),
             dsn,
-            vec!["default".to_string()],
+            collector_config(&["default"]),
         )
         .await
     });
@@ -180,7 +190,7 @@ async fn test_exporter_invalid_ip_address() -> Result<()> {
         port,
         Some("invalid-ip".to_string()),
         dsn,
-        vec!["default".to_string()],
+        collector_config(&["default"]),
     )
     .await;
 
@@ -202,7 +212,7 @@ async fn test_exporter_default_bind_auto_detect() -> Result<()> {
 
     // None = auto-detect (try IPv6, fallback to IPv4)
     let handle = tokio::spawn(async move {
-        pg_exporter::exporter::new(port, None, dsn, vec!["default".to_string()]).await
+        pg_exporter::exporter::new(port, None, dsn, collector_config(&["default"])).await
     });
 
     assert!(
@@ -232,7 +242,7 @@ async fn test_exporter_starts_even_when_db_down() -> Result<()> {
     let dsn = SecretString::from("postgresql://postgres:postgres@localhost:54321/postgres");
 
     let handle = tokio::spawn(async move {
-        pg_exporter::exporter::new(port, None, dsn, vec!["default".to_string()]).await
+        pg_exporter::exporter::new(port, None, dsn, collector_config(&["default"])).await
     });
 
     // Wait for server to start
@@ -267,5 +277,52 @@ async fn test_exporter_starts_even_when_db_down() -> Result<()> {
     );
 
     handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_exporter_sets_application_name_on_database_sessions() -> Result<()> {
+    let port = common::get_available_port();
+    let dsn = common::get_test_dsn_secret();
+
+    let handle = tokio::spawn(async move {
+        pg_exporter::exporter::new(port, None, dsn, collector_config(&["default"])).await
+    });
+
+    assert!(
+        common::wait_for_server(port, 50).await,
+        "Server failed to start on port {port}"
+    );
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("{}/metrics", common::get_test_url(port)))
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), 200);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let pool =
+        sqlx::PgPool::connect("postgresql://postgres:postgres@localhost:5432/postgres").await?;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint
+         FROM pg_stat_activity
+         WHERE application_name = $1",
+    )
+    .bind(env!("CARGO_PKG_NAME"))
+    .fetch_one(&pool)
+    .await?;
+
+    assert!(
+        count >= 1,
+        "expected at least one exporter session tagged with application_name={}, got {count}",
+        env!("CARGO_PKG_NAME")
+    );
+
+    pool.close().await;
+    handle.abort();
+
     Ok(())
 }

@@ -3,7 +3,10 @@ use crate::{
     collectors::{
         config::CollectorConfig,
         registry::CollectorRegistry,
-        util::{get_excluded_databases, set_base_connect_options_from_dsn, set_pg_version},
+        util::{
+            apply_default_application_name, get_excluded_databases,
+            set_base_connect_options_from_dsn, set_pg_version,
+        },
     },
 };
 use anyhow::{Context, Result, anyhow};
@@ -49,21 +52,23 @@ pub async fn new(
     port: u16,
     listen: Option<String>,
     dsn: SecretString,
-    collectors: Vec<String>,
+    collector_config: CollectorConfig,
 ) -> Result<()> {
-    let recovery_connect_options = PgConnectOptions::from_str(dsn.expose_secret())
-        .context("Failed to parse base DSN options")?;
+    let recovery_connect_options = apply_default_application_name(
+        PgConnectOptions::from_str(dsn.expose_secret())
+            .context("Failed to parse base DSN options")?,
+    );
     let pool = connect_pool(&dsn)?;
 
     // Try to initialize version, but don't block startup if DB is down
     let _ = timeout(Duration::from_secs(1), initialize_version(&pool)).await;
 
     set_base_connect_options_from_dsn(&dsn).context("Failed to parse base DSN options")?;
-
-    let config = CollectorConfig::new().with_enabled(&collectors);
-
-    let registry =
-        CollectorRegistry::new_with_recovery_options(&config, Some(recovery_connect_options));
+    let enabled_collectors = collector_config.enabled_collectors_in_order();
+    let registry = CollectorRegistry::new_with_recovery_options(
+        &collector_config,
+        Some(recovery_connect_options),
+    );
 
     let app = build_router(pool.clone(), registry);
 
@@ -71,7 +76,7 @@ pub async fn new(
 
     let excluded = get_excluded_databases();
 
-    print_startup(&bind_addr, &collectors, excluded);
+    print_startup(&bind_addr, &enabled_collectors, excluded);
 
     run_server(listener, app).await;
 
@@ -83,7 +88,10 @@ pub async fn new(
 }
 
 fn connect_pool(dsn: &SecretString) -> Result<sqlx::PgPool> {
-    let db_dsn = dsn.expose_secret().to_string();
+    let opts = apply_default_application_name(
+        PgConnectOptions::from_str(dsn.expose_secret())
+            .context("Failed to parse base DSN options")?,
+    );
 
     let pool = PgPoolOptions::new()
         .min_connections(0)
@@ -91,7 +99,7 @@ fn connect_pool(dsn: &SecretString) -> Result<sqlx::PgPool> {
         .acquire_timeout(Duration::from_secs(5))
         .max_lifetime(Duration::from_secs(120))
         .test_before_acquire(false)
-        .connect_lazy(&db_dsn)?;
+        .connect_lazy_with(opts);
 
     info!("Database connection pool initialized (lazy)");
 

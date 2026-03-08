@@ -149,6 +149,18 @@ impl QueriesCollector {
             long_running_by_wait_event,
         }
     }
+
+    fn reset_metrics(&self) {
+        self.queries_over_5m.reset();
+        self.queries_over_15m.reset();
+        self.queries_over_1h.reset();
+        self.queries_over_6h.reset();
+        self.max_query_duration.reset();
+        self.oldest_query_age.set(0.0);
+        self.total_long_running.set(0);
+        self.long_running_by_state.reset();
+        self.long_running_by_wait_event.reset();
+    }
 }
 
 impl Collector for QueriesCollector {
@@ -217,6 +229,10 @@ impl Collector for QueriesCollector {
             .fetch_all(pool)
             .instrument(query_span)
             .await?;
+
+            // Point-in-time collector semantics:
+            // clear previous label sets only after the replacement snapshot is ready.
+            self.reset_metrics();
 
             // Track metrics per database
             let mut db_counts_5m: HashMap<String, i64> = HashMap::new();
@@ -325,5 +341,59 @@ impl Collector for QueriesCollector {
 
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::QueriesCollector;
+    use prometheus::core::Collector;
+
+    fn collected_metric_count(metric_families: &[prometheus::proto::MetricFamily]) -> usize {
+        metric_families
+            .first()
+            .map_or(0, |metric_family| metric_family.get_metric().len())
+    }
+
+    #[test]
+    fn test_reset_metrics_clears_previous_long_running_series() {
+        let collector = QueriesCollector::new();
+
+        collector.queries_over_5m.with_label_values(&["postgres"]).set(1);
+        collector
+            .max_query_duration
+            .with_label_values(&["postgres"])
+            .set(601.0);
+        collector
+            .long_running_by_state
+            .with_label_values(&["postgres", "active"])
+            .set(1);
+        collector
+            .long_running_by_wait_event
+            .with_label_values(&["postgres", "Lock"])
+            .set(1);
+        collector.oldest_query_age.set(601.0);
+        collector.total_long_running.set(1);
+
+        collector.reset_metrics();
+
+        assert_eq!(collected_metric_count(&collector.queries_over_5m.collect()), 0);
+        assert_eq!(
+            collected_metric_count(&collector.max_query_duration.collect()),
+            0
+        );
+        assert_eq!(
+            collected_metric_count(&collector.long_running_by_state.collect()),
+            0
+        );
+        assert_eq!(
+            collected_metric_count(&collector.long_running_by_wait_event.collect()),
+            0
+        );
+        assert!(
+            (collector.oldest_query_age.get() - 0.0).abs() < f64::EPSILON,
+            "oldest_query_age should reset to zero"
+        );
+        assert_eq!(collector.total_long_running.get(), 0);
     }
 }

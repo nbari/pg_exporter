@@ -14,9 +14,9 @@ invariants intact, and keep the workspace consistent over time.
 
 Before making non-trivial changes:
 
-1. Read [CONTRIBUTING.md](/home/nbari/projects/rust/pg_exporter/CONTRIBUTING.md).
-2. Read [tests/TESTING.md](/home/nbari/projects/rust/pg_exporter/tests/TESTING.md) if touching collectors or tests.
-3. Check [.justfile](/home/nbari/projects/rust/pg_exporter/.justfile) for the supported local workflows.
+1. Read [CONTRIBUTING.md](CONTRIBUTING.md).
+2. Read [tests/TESTING.md](tests/TESTING.md) if touching collectors or tests.
+3. Check [.justfile](.justfile) for the supported local workflows.
 
 ## Local Commands
 
@@ -87,10 +87,14 @@ If you modify files under `src/collectors/`:
 - Run `./scripts/setup-local-test-db.sh` before committing if there is any doubt about local DB state.
 - Do not add `row.get(...)` calls; the hook treats that as unsafe.
 - If you touch queries against `pg_stat_statements`, add explicit numeric casts such as `::bigint` or `::double precision`.
+- Collectors are internal to `pg_exporter`; they are not treated as a standalone library API.
+- Clap is the authoritative runtime configuration entrypoint for collector options.
+- If a collector needs user-facing runtime options, define long-only CLI flags and their defaults in `src/cli/commands/options.rs`.
+- `src/collectors/config.rs` should carry typed values resolved from Clap; do not introduce a second source of truth for collector-option defaults there.
 
 ## Pre-Commit Expectations
 
-The installed hook in [scripts/pre-commit-hook.sh](/home/nbari/projects/rust/pg_exporter/scripts/pre-commit-hook.sh) enforces or warns about:
+The installed hook in [scripts/pre-commit-hook.sh](scripts/pre-commit-hook.sh) enforces or warns about:
 
 - collector changes without a running local PostgreSQL instance
 - missing `pg_stat_statements` in the local test database
@@ -109,7 +113,7 @@ In practice, new PRs often fail because generated code introduces `unwrap()`,
 
 ## Release Flow
 
-- The repository release flow is defined in [.justfile](/home/nbari/projects/rust/pg_exporter/.justfile).
+- The repository release flow is defined in [.justfile](.justfile).
 - Version bumps happen from `develop` via `just bump`, `just bump-minor`, or `just bump-major`.
 - Release tagging and merge flow happen via `just deploy`, `just deploy-minor`, or `just deploy-major`.
 - Keep docs aligned with the real release flow; do not add references to missing checklist files.

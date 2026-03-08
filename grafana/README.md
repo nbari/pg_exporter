@@ -93,7 +93,7 @@ Monitor pg_exporter's own health and performance:
 - **Query Call Rate**: Most frequently executed queries
 - **Queries with Low Cache Hit Ratio (<90%)**: Queries doing excessive disk I/O
 - **Queries Spilling to Disk**: Using temp files (may need more `work_mem`)
-- **WAL Generation by Query**: Write-heavy queries (PostgreSQL 13+)
+- **WAL Generation by Query**: Write-heavy queries (available on all supported PostgreSQL versions: 14+)
 
 **Additional PromQL Queries** (copy to create custom panels):
 

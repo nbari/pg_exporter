@@ -26,29 +26,18 @@ async fn test_vacuum_progress_collector_has_all_metrics_after_collection() -> Re
 
     let metric_families = registry.gather();
 
-    // Should have all vacuum progress metrics
-    let expected_metrics = vec![
-        "pg_vacuum_in_progress",
-        "pg_vacuum_heap_progress",
-        "pg_vacuum_heap_vacuumed",
-        "pg_vacuum_index_vacuum_count",
-        "pg_vacuum_active",
-        "pg_vacuum_is_autovacuum",
-        "pg_vacuum_duration_seconds",
-    ];
-
-    for metric_name in expected_metrics {
-        let found = metric_families.iter().any(|m| m.name() == metric_name);
-        assert!(
-            found,
-            "Metric {} should exist. Found: {:?}",
-            metric_name,
-            metric_families
-                .iter()
-                .map(prometheus::proto::MetricFamily::name)
-                .collect::<Vec<_>>()
-        );
-    }
+    // The global active flag should always exist. Per-table metric families are only
+    // exported when a vacuum is active.
+    assert!(
+        metric_families
+            .iter()
+            .any(|m| m.name() == "pg_vacuum_active"),
+        "pg_vacuum_active should exist. Found: {:?}",
+        metric_families
+            .iter()
+            .map(prometheus::proto::MetricFamily::name)
+            .collect::<Vec<_>>()
+    );
 
     pool.close().await;
     Ok(())
@@ -280,10 +269,20 @@ async fn test_vacuum_progress_collector_captures_actual_vacuum() -> Result<()> {
 
             // If we caught a vacuum in progress, verify database label exists
             if let Some(db) = database_label {
-                // Should have database label set to "postgres", "pgbench_test" or "none"
+                if db == "none" || db == "unknown" {
+                    continue;
+                }
+
+                let database_exists = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)",
+                )
+                .bind(db)
+                .fetch_one(&pool)
+                .await?;
+
                 assert!(
-                    db == "postgres" || db == "pgbench_test" || db == "none",
-                    "Database label should be 'postgres', 'pgbench_test' or 'none', got: {db}"
+                    database_exists,
+                    "Database label should resolve to an existing database, got: {db}"
                 );
             }
         }

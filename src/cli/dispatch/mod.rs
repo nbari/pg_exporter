@@ -2,6 +2,7 @@ use crate::{
     cli::actions::Action,
     collectors::{
         COLLECTOR_NAMES, Collector, all_factories,
+        config::CollectorConfig,
         util::{get_excluded_databases, set_excluded_databases},
     },
 };
@@ -9,6 +10,7 @@ use anyhow::{Result, anyhow};
 use clap::ArgMatches;
 use secrecy::SecretString;
 use std::fs;
+use std::num::NonZeroUsize;
 use tracing::info;
 
 /// Read DSN with priority: `PG_EXPORTER_DSN_FILE` > `PG_EXPORTER_DSN`/--dsn > default
@@ -58,7 +60,7 @@ pub fn handler(matches: &clap::ArgMatches) -> Result<Action> {
         port,
         listen,
         dsn,
-        collectors: get_enabled_collectors(matches),
+        collector_config: get_collector_config(matches)?,
     })
 }
 
@@ -97,6 +99,10 @@ pub fn get_enabled_collectors(matches: &ArgMatches) -> Vec<String> {
                 return true;
             }
 
+            if *name == "statements" {
+                return false;
+            }
+
             // Otherwise, check the collector's default setting
             factories.get(name).is_some_and(|factory| {
                 let collector = factory();
@@ -105,6 +111,25 @@ pub fn get_enabled_collectors(matches: &ArgMatches) -> Vec<String> {
         })
         .map(|&name| name.to_string())
         .collect()
+}
+
+/// Build typed collector config from Clap-resolved arguments.
+///
+/// # Errors
+///
+/// Returns an error if a required collector option is unexpectedly missing from
+/// the resolved CLI matches.
+pub fn get_collector_config(matches: &ArgMatches) -> Result<CollectorConfig> {
+    let enabled = get_enabled_collectors(matches);
+    let statements_top_n = matches
+        .get_one::<NonZeroUsize>("statements.top-n")
+        .copied()
+        .ok_or_else(|| {
+            anyhow!("internal CLI error: missing resolved value for --statements.top-n")
+        })?
+        .get();
+
+    Ok(CollectorConfig::new(statements_top_n).with_enabled(&enabled))
 }
 
 #[cfg(test)]
@@ -160,6 +185,35 @@ mod tests {
         assert!(!enabled.contains(&"default".to_string()));
         assert!(!enabled.contains(&"activity".to_string()));
         assert!(!enabled.contains(&"vacuum".to_string()));
+    }
+
+    #[test]
+    fn test_get_collector_config_defaults() -> Result<()> {
+        temp_env::with_var("PG_EXPORTER_STATEMENTS_TOP_N", None::<String>, || {
+            let command = commands::new();
+            let matches = command.get_matches_from(vec!["pg_exporter"]);
+            let config = get_collector_config(&matches)?;
+
+            assert_eq!(config.statements.top_n, 25);
+            assert!(config.is_enabled("default"));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_get_collector_config_with_statements_top_n_override() -> Result<()> {
+        let command = commands::new();
+        let matches = command.get_matches_from(vec![
+            "pg_exporter",
+            "--collector.statements",
+            "--statements.top-n",
+            "10",
+        ]);
+        let config = get_collector_config(&matches)?;
+
+        assert_eq!(config.statements.top_n, 10);
+        assert!(config.is_enabled("statements"));
+        Ok(())
     }
 
     #[test]

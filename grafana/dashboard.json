@@ -1388,7 +1388,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Maximum transaction and query duration across all connections.\n\nGOAL: No queries running >5 minutes (adjust for workload)\n- Long transactions: Block vacuum, cause bloat\n- Long queries: May indicate missing indexes or inefficient SQL\n\nACTIONS TO IMPROVE:\n1. Identify long queries: SELECT pid, now() - xact_start, query FROM pg_stat_activity WHERE state = 'active' ORDER BY xact_start;\n2. Add missing indexes (use EXPLAIN)\n3. Optimize query logic\n4. Set statement_timeout = 30s (adjust per workload)\n5. Monitor for blocking queries\n\nMETRICS: Max transaction duration, max query duration",
+      "description": "Oldest long-running query globally and maximum long-running query duration per database.\n\nGOAL: No queries running >5 minutes (adjust for workload)\n- Long-running queries can block maintenance and indicate missing indexes or inefficient SQL\n- Global oldest query age is the fastest way to spot incident-level query buildup\n\nACTIONS TO IMPROVE:\n1. Identify long queries: SELECT pid, now() - query_start, query FROM pg_stat_activity WHERE state = 'active' ORDER BY query_start;\n2. Add missing indexes (use EXPLAIN)\n3. Optimize query logic\n4. Set statement_timeout = 30s (adjust per workload)\n5. Monitor for blocking queries and wait events\n\nMETRICS: global oldest query age, per-database max query duration",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1475,8 +1475,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_stat_activity_max_query_duration_seconds{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}",
-          "legendFormat": "{{datname}} - max transaction duration",
+          "expr": "pg_stat_activity_oldest_query_age_seconds{job=\"$job\", instance=\"$instance\"}",
+          "legendFormat": "global oldest query age",
           "refId": "A"
         },
         {
@@ -1489,7 +1489,7 @@
           "refId": "B"
         }
       ],
-      "title": "Long-Running Queries",
+      "title": "Long-Running Query Age",
       "type": "timeseries"
     },
     {
@@ -1832,7 +1832,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 119
+        "y": 140
       },
       "id": 102,
       "panels": [
@@ -1841,7 +1841,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "description": "Queries consuming the most database time overall",
+          "description": "Queries consuming the most cumulative database time since the last pg_stat_statements reset",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -1893,7 +1893,7 @@
           },
           "gridPos": {
             "h": 8,
-            "w": 12,
+            "w": 24,
             "x": 0,
             "y": 27
           },
@@ -1921,11 +1921,11 @@
                 "uid": "${DS_PROMETHEUS}"
               },
               "expr": "topk(10, postgres_pg_stat_statements_total_exec_time_seconds{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
-              "legendFormat": "{{query_short}}",
+              "legendFormat": "{{datname}} | {{query_short}}",
               "refId": "A"
             }
           ],
-          "title": "Top 10 Queries by Total Execution Time",
+          "title": "Top 10 Queries by Total Execution Time Since Reset",
           "type": "timeseries"
         },
         {
@@ -1933,7 +1933,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "description": "Queries with highest average execution time",
+          "description": "Queries with the highest average execution time per call from the current pg_stat_statements snapshot",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -1985,9 +1985,9 @@
           },
           "gridPos": {
             "h": 8,
-            "w": 12,
-            "x": 12,
-            "y": 27
+            "w": 24,
+            "x": 0,
+            "y": 35
           },
           "id": 7,
           "options": {
@@ -2013,7 +2013,7 @@
                 "uid": "${DS_PROMETHEUS}"
               },
               "expr": "topk(10, postgres_pg_stat_statements_mean_exec_time_seconds{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
-              "legendFormat": "{{query_short}}",
+              "legendFormat": "{{datname}} | {{query_short}}",
               "refId": "A"
             }
           ],
@@ -2025,7 +2025,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "description": "Most frequently executed queries",
+          "description": "Queries with the highest recent execution rate over the last 5 minutes",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -2077,9 +2077,9 @@
           },
           "gridPos": {
             "h": 8,
-            "w": 12,
+            "w": 24,
             "x": 0,
-            "y": 36
+            "y": 43
           },
           "id": 8,
           "options": {
@@ -2104,7 +2104,7 @@
                 "uid": "${DS_PROMETHEUS}"
               },
               "expr": "topk(10, rate(postgres_pg_stat_statements_calls_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m]))",
-              "legendFormat": "{{query_short}}",
+              "legendFormat": "{{datname}} | {{query_short}}",
               "refId": "A"
             }
           ],
@@ -2116,200 +2116,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "description": "Queries doing excessive disk I/O",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "drawStyle": "line",
-                "fillOpacity": 10,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "tooltip": false,
-                  "viz": false,
-                  "legend": false
-                },
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "never",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              },
-              "unit": "percentunit"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 12,
-            "y": 36
-          },
-          "id": 9,
-          "options": {
-            "legend": {
-              "calcs": [
-                "last",
-                "min"
-              ],
-              "displayMode": "table",
-              "placement": "right",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            }
-          },
-          "pluginVersion": "10.0.0",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
-              },
-              "expr": "postgres_pg_stat_statements_cache_hit_ratio{job=\"$job\", instance=\"$instance\", datname=~\"$database\"} < 0.9",
-              "legendFormat": "{{query_short}}",
-              "refId": "A"
-            }
-          ],
-          "title": "Queries with Low Cache Hit Ratio (<90%)",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "description": "Queries using temp files - may need more work_mem",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "drawStyle": "line",
-                "fillOpacity": 10,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "tooltip": false,
-                  "viz": false,
-                  "legend": false
-                },
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "never",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              },
-              "unit": "short"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 0,
-            "y": 45
-          },
-          "id": 10,
-          "options": {
-            "legend": {
-              "calcs": [
-                "last",
-                "max"
-              ],
-              "displayMode": "table",
-              "placement": "right",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            }
-          },
-          "pluginVersion": "10.0.0",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
-              },
-              "expr": "topk(10, postgres_pg_stat_statements_temp_blks_written_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
-              "legendFormat": "{{query_short}} - temp writes",
-              "refId": "A"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
-              },
-              "expr": "topk(10, postgres_pg_stat_statements_temp_blks_read_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
-              "legendFormat": "{{query_short}} - temp reads",
-              "refId": "B"
-            }
-          ],
-          "title": "Queries Spilling to Disk (Temp Blocks)",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "description": "Queries generating the most WAL (PostgreSQL 13+)",
+          "description": "Queries generating the most cumulative WAL since the last pg_stat_statements reset",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -2361,9 +2168,9 @@
           },
           "gridPos": {
             "h": 8,
-            "w": 12,
-            "x": 12,
-            "y": 45
+            "w": 24,
+            "x": 0,
+            "y": 51
           },
           "id": 11,
           "options": {
@@ -2389,11 +2196,204 @@
                 "uid": "${DS_PROMETHEUS}"
               },
               "expr": "topk(10, postgres_pg_stat_statements_wal_bytes_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
-              "legendFormat": "{{query_short}}",
+              "legendFormat": "{{datname}} | {{query_short}}",
               "refId": "A"
             }
           ],
-          "title": "WAL Generation by Query (Top Write-Heavy)",
+          "title": "WAL Generation by Query Since Reset",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Queries with cumulative temp block usage since the last pg_stat_statements reset; sustained growth usually indicates spill-heavy plans",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 59
+          },
+          "id": 10,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "topk(10, postgres_pg_stat_statements_temp_blks_written_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
+              "legendFormat": "{{datname}} | {{query_short}} - temp writes",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "topk(10, postgres_pg_stat_statements_temp_blks_read_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
+              "legendFormat": "{{datname}} | {{query_short}} - temp reads",
+              "refId": "B"
+            }
+          ],
+          "title": "Queries Spilling to Disk Since Reset",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Queries whose current snapshot cache hit ratio is below 90%",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "percentunit"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 67
+          },
+          "id": 9,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "min"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "postgres_pg_stat_statements_cache_hit_ratio{job=\"$job\", instance=\"$instance\", datname=~\"$database\"} < 0.9",
+              "legendFormat": "{{datname}} | {{query_short}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Queries with Low Cache Hit Ratio (<90%)",
           "type": "timeseries"
         }
       ],
@@ -2407,7 +2407,582 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 120
+        "y": 141
+      },
+      "id": 2122,
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Queries that added the most cumulative execution time during the last 5 minutes",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 27
+          },
+          "id": 2123,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "topk(10, clamp_min(delta(postgres_pg_stat_statements_total_exec_time_seconds{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m]), 0))",
+              "legendFormat": "{{datname}} | {{query_short}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Top 10 Queries by DB Time Added (Last 5m)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Average execution time per call during the last 5 minutes; useful for catching newly slow queries",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 35
+          },
+          "id": 2124,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "topk(10, clamp_min(delta(postgres_pg_stat_statements_total_exec_time_seconds{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m]), 0) / clamp_min(delta(postgres_pg_stat_statements_calls_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m]), 1))",
+              "legendFormat": "{{datname}} | {{query_short}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Top 10 Queries by Mean Time (Last 5m)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Queries with the highest recent execution rate over the last 5 minutes",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 43
+          },
+          "id": 2125,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "topk(10, rate(postgres_pg_stat_statements_calls_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m]))",
+              "legendFormat": "{{datname}} | {{query_short}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Top 10 Queries by Call Rate (Last 5m)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Queries that generated the most WAL during the last 5 minutes",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 51
+          },
+          "id": 2126,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "topk(10, clamp_min(delta(postgres_pg_stat_statements_wal_bytes_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m]), 0))",
+              "legendFormat": "{{datname}} | {{query_short}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Top 10 Queries by WAL Added (Last 5m)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Queries that added the most temp block reads or writes during the last 5 minutes",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 59
+          },
+          "id": 2127,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "topk(10, clamp_min(delta(postgres_pg_stat_statements_temp_blks_written_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m]), 0))",
+              "legendFormat": "{{datname}} | {{query_short}} - temp writes",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "topk(10, clamp_min(delta(postgres_pg_stat_statements_temp_blks_read_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m]), 0))",
+              "legendFormat": "{{datname}} | {{query_short}} - temp reads",
+              "refId": "B"
+            }
+          ],
+          "title": "Top 10 Queries by Temp Blocks Added (Last 5m)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Queries whose current snapshot cache hit ratio is below 90%; pair this with the recent-pressure panels to identify active disk-heavy queries",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "percentunit"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 67
+          },
+          "id": 2128,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "min"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "postgres_pg_stat_statements_cache_hit_ratio{job=\"$job\", instance=\"$instance\", datname=~\"$database\"} < 0.9",
+              "legendFormat": "{{datname}} | {{query_short}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Queries with Low Cache Hit Ratio (Current Snapshot)",
+          "type": "timeseries"
+        }
+      ],
+      "title": "Recent Query Pressure (last 5m, requires --collector.statements)",
+      "type": "row",
+      "description": "Recent query pressure for incident response. These panels focus on activity observed in the last 5 minutes rather than lifetime totals since pg_stat_statements_reset()."
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 142
       },
       "id": 103,
       "panels": [
@@ -3618,7 +4193,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 121
+        "y": 143
       },
       "id": 104,
       "panels": [
@@ -3729,16 +4304,789 @@
       },
       "id": 105,
       "panels": [],
-      "title": "Vacuum & Maintenance",
+      "title": "Vacuum & Bloat Pressure (requires --collector.vacuum + --collector.stat)",
       "type": "row",
-      "description": "Autovacuum effectiveness and table bloat monitoring. Critical for preventing bloat and wraparound."
+      "description": "Predictive autovacuum pressure, dead tuple accumulation, estimated wasted space, freeze-age risk, and active vacuum execution. Use this row first for bloat diagnosis and repack candidates, then correlate with Table Statistics, Activity, and Database Size."
     },
     {
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Vacuum progress by table (0-100%). Shows the percentage of heap blocks scanned during active vacuum operations.\n\nThis metric tracks ongoing VACUUM operations and helps identify:\n- Long-running vacuum processes that may need attention\n- Progress of manual or autovacuum operations\n- Tables currently undergoing maintenance\n\nMETRIC: pg_vacuum_heap_progress (0.0-1.0 ratio)\n- 0.0 = Just started (0%)\n- 0.5 = Half complete (50%)\n- 1.0 = Fully scanned (100%)\n\nLABEL: table = schema.table name (e.g., public.users)\n\nNote: Only shows data when a VACUUM operation is actively running. When no vacuum is active, shows \"none\" with value 0.",
+      "description": "Ratio of dead tuples to the autovacuum trigger threshold. 1.0 means vacuum should trigger now, >1.0 means the table is overdue. This is the most useful early-warning panel for bloat pressure.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 102
+      },
+      "id": 2129,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "topk(10, pg_stat_user_tables_autovacuum_threshold_ratio{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
+          "legendFormat": "{{datname}}.{{schemaname}}.{{relname}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Top Tables by Autovacuum Threshold Ratio",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Absolute dead tuple count by table. High values indicate vacuum debt and table churn. Use together with autovacuum threshold ratio to distinguish large healthy tables from overdue ones.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 102
+      },
+      "id": 2130,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "topk(10, pg_stat_user_tables_n_dead_tup{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
+          "legendFormat": "{{datname}}.{{schemaname}}.{{relname}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Top Tables by Dead Tuples",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Ratio of modified tuples to autoanalyze trigger threshold. 1.0 means autoanalyze should trigger now, >1.0 means table statistics are overdue and planner quality can degrade.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 108
+      },
+      "id": 2135,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "topk(10, pg_stat_user_tables_autoanalyze_threshold_ratio{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
+          "legendFormat": "{{datname}}.{{schemaname}}.{{relname}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Top Tables by Autoanalyze Threshold Ratio",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Time since the last autovacuum by table. Large values on write-heavy tables suggest maintenance is not keeping up or is being blocked.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 108
+      },
+      "id": 2131,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "topk(10, pg_stat_user_tables_last_autovacuum_seconds_ago{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
+          "legendFormat": "{{datname}}.{{schemaname}}.{{relname}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Tables Since Last Autovacuum",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Database freeze age as a percentage of autovacuum_freeze_max_age. Rising values indicate wraparound risk and make vacuum health a database-level concern, not just a table-level one.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 114
+      },
+      "id": 2132,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "pg_vacuum_database_freeze_age_pct_of_max{job=\"$job\", instance=\"$instance\"}",
+          "legendFormat": "{{datname}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Database Freeze Age (% of Max)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Number of tables that have never been autovacuumed. Should usually trend to 0 except for very new or static tables.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 0,
+        "y": 128
+      },
+      "id": 2136,
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "fields": "",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(pg_stat_user_tables_never_autovacuumed{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}) or vector(0)",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Never Autovacuumed Tables",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Number of tables that have never been autoanalyzed. Persistent non-zero values can indicate stale planner stats risk.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 128
+      },
+      "id": 2137,
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "fields": "",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(pg_stat_user_tables_never_autoanalyzed{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}) or vector(0)",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Never Autoanalyzed Tables",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Estimated disk space consumed by dead tuples. This is the best single ranking for tables that may justify pg_repack or, if repack is unavailable, a planned VACUUM FULL in a maintenance window.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 114
+      },
+      "id": 2133,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "topk(10, pg_stat_user_tables_dead_tuple_size_bytes{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
+          "legendFormat": "{{datname}}.{{schemaname}}.{{relname}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Top Repack Candidates by Estimated Dead Space",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Largest tables by on-disk size. Use together with bloat ratio and estimated dead space to prioritize which large tables are worth repacking first.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 120
+      },
+      "id": 2134,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "topk(10, pg_stat_user_tables_table_size_bytes{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
+          "legendFormat": "{{datname}}.{{schemaname}}.{{relname}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Top Tables by Table Size",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Progress of currently running vacuum operations (0.0-1.0 ratio). Useful only while a manual vacuum or autovacuum is actively running. If this panel is empty and vacuum pressure panels are high, vacuum is not currently catching up.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3791,8 +5139,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
-        "y": 102
+        "x": 12,
+        "y": 120
       },
       "id": 17,
       "options": {
@@ -3817,11 +5165,11 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "expr": "pg_vacuum_heap_progress{job=\"$job\", instance=\"$instance\"}",
-          "legendFormat": "{{table}}",
+          "legendFormat": "{{database}}.{{table}}",
           "refId": "A"
         }
       ],
-      "title": "Vacuum Progress",
+      "title": "Active Vacuum Progress",
       "type": "timeseries"
     },
     {
@@ -3829,7 +5177,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Number of heap blocks vacuumed during active vacuum operations. This metric shows the absolute count of 8KB heap blocks that have been vacuumed. Higher values indicate more aggressive vacuum activity, which may correlate with: - High table bloat - Frequent UPDATE/DELETE operations - Autovacuum threshold being reached Note: This is a point-in-time metric during active vacuum operations. Use in conjunction with 'Vacuum Progress' to understand vacuum efficiency. Formula: heap_blks_vacuumed from pg_stat_progress_vacuum",
+      "description": "Estimated bloat ratio derived from dead tuples versus total tuples. 0.5 means roughly 50% of tuples are dead, which is a practical threshold for tables that deserve immediate review for vacuum tuning or repack planning.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3875,15 +5223,15 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "percentunit"
         },
         "overrides": []
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 110
+        "w": 24,
+        "x": 0,
+        "y": 132
       },
       "id": 18,
       "options": {
@@ -3907,12 +5255,12 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_vacuum_heap_vacuumed{job=\"$job\", instance=\"$instance\"}",
-          "legendFormat": "{{table}}",
+          "expr": "topk(10, pg_stat_user_tables_bloat_ratio{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
+          "legendFormat": "{{datname}}.{{schemaname}}.{{relname}}",
           "refId": "A"
         }
       ],
-      "title": "Heap Blocks Vacuumed",
+      "title": "Top Tables by Estimated Bloat Ratio",
       "type": "timeseries"
     },
     {
@@ -3921,7 +5269,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 122
+        "y": 144
       },
       "id": 106,
       "panels": [
@@ -4094,7 +5442,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 123
+        "y": 145
       },
       "id": 107,
       "panels": [
@@ -4182,7 +5530,7 @@
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "rate(pg_stat_user_tables_n_tup_ins{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m])",
+              "expr": "clamp_min(delta(pg_stat_user_tables_n_tup_ins{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m]), 0) / 300",
               "legendFormat": "{{datname}}.{{schemaname}}.{{relname}} - inserts",
               "refId": "A"
             },
@@ -4191,7 +5539,7 @@
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "rate(pg_stat_user_tables_n_tup_upd{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m])",
+              "expr": "clamp_min(delta(pg_stat_user_tables_n_tup_upd{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m]), 0) / 300",
               "legendFormat": "{{datname}}.{{schemaname}}.{{relname}} - updates",
               "refId": "B"
             },
@@ -4200,7 +5548,7 @@
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "rate(pg_stat_user_tables_n_tup_del{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m])",
+              "expr": "clamp_min(delta(pg_stat_user_tables_n_tup_del{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m]), 0) / 300",
               "legendFormat": "{{datname}}.{{schemaname}}.{{relname}} - deletes",
               "refId": "C"
             }
@@ -4219,7 +5567,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 124
+        "y": 146
       },
       "id": 108,
       "panels": [
@@ -4417,7 +5765,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 125
+        "y": 147
       },
       "id": 110,
       "panels": [
@@ -4482,7 +5830,7 @@
             "x": 0,
             "y": 131
           },
-          "id": 111,
+          "id": 2138,
           "options": {
             "legend": {
               "calcs": [
@@ -5077,7 +6425,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 126
+        "y": 148
       },
       "id": 1000,
       "panels": [
@@ -5709,7 +7057,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 145
+        "y": 167
       },
       "id": 200,
       "panels": [
@@ -6646,5 +7994,5 @@
   "uid": "pg_exporter_monitoring",
   "version": 1,
   "weekStart": "",
-  "description": "PostgreSQL Performance Monitoring Dashboard This dashboard provides comprehensive monitoring for PostgreSQL databases using pg_exporter metrics. KEY SECTIONS: - Instance Information: PostgreSQL version, settings, and uptime - Critical Alerts: Connection pool utilization and performance warnings - Connection Analysis: Active connections, idle transactions, and connection age - Query Performance: Top queries by execution time, calls, and I/O (requires pg_stat_statements extension) - Cache & I/O: Buffer cache hit ratios, shared buffers, and I/O operations - Locks & Blocking: Lock monitoring and blocking query detection - Vacuum & Maintenance: Autovacuum activity, table bloat, and maintenance statistics - WAL: WAL throughput, record activity, buffer pressure, and FPI ratio - Replication: lag, role, and max replication lag bytes (requires replication collector) - Table Statistics: DML operations and table-level activity - Database Size: Database growth and size trends REQUIREMENTS: - PostgreSQL 12+ recommended - pg_stat_statements extension enabled for query performance metrics - Appropriate monitoring user permissions For more information, visit: https://github.com/nbari/pg_exporter"
+  "description": "PostgreSQL Performance Monitoring Dashboard This dashboard provides comprehensive monitoring for PostgreSQL databases using pg_exporter metrics. KEY SECTIONS: - Instance Information: PostgreSQL version, settings, and uptime - Critical Alerts: Connection pool utilization and performance warnings - Connection Analysis: Active connections, idle transactions, and connection age - Query Performance: Top queries by execution time, calls, and I/O (requires pg_stat_statements extension) - Cache & I/O: Buffer cache hit ratios, shared buffers, and I/O operations - Locks & Blocking: Lock monitoring and blocking query detection - Vacuum & Maintenance: Autovacuum activity, table bloat, and maintenance statistics - WAL: WAL throughput, record activity, buffer pressure, and FPI ratio - Replication: lag, role, and max replication lag bytes (requires replication collector) - Table Statistics: DML operations and table-level activity - Database Size: Database growth and size trends REQUIREMENTS: - PostgreSQL 14+ - pg_stat_statements extension enabled for query performance metrics - Appropriate monitoring user permissions For more information, visit: https://github.com/nbari/pg_exporter"
 }

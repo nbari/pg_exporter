@@ -8,7 +8,7 @@ use tracing::{info_span, warn};
 use tracing_futures::Instrument;
 
 /// Collector for active `PostgreSQL` connection SSL/TLS statistics
-/// Requires `PostgreSQL` 9.5+ for `pg_stat_ssl` view
+/// Requires `PostgreSQL` 14+ for `pg_stat_ssl` view
 #[derive(Clone)]
 #[allow(clippy::struct_field_names)]
 pub struct ConnectionTlsCollector {
@@ -83,10 +83,10 @@ impl Collector for ConnectionTlsCollector {
 
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            // pg_stat_ssl is available since PostgreSQL 9.5 (version 90500)
+            // pg_stat_ssl is available on all supported PostgreSQL versions (14+)
             if !is_pg_version_at_least(90_500) {
                 warn!(
-                    "pg_stat_ssl view requires PostgreSQL 9.5+, skipping connection TLS stats"
+                    "pg_stat_ssl view requires PostgreSQL 14+, skipping connection TLS stats"
                 );
                 return Ok(());
             }

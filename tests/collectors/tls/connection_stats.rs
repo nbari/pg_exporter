@@ -80,7 +80,7 @@ async fn test_connection_tls_collector_handles_old_postgres_gracefully() -> Resu
 async fn test_connection_tls_collector_collects_from_database() -> Result<()> {
     let pool = common::create_test_pool().await?;
 
-    // Check if pg_stat_ssl view exists (PostgreSQL 9.5+)
+    // Check if pg_stat_ssl view exists (supported PostgreSQL 14+)
     let has_pg_stat_ssl = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM pg_catalog.pg_class WHERE relname = 'pg_stat_ssl'",
     )
