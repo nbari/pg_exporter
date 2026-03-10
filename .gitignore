@@ -15,6 +15,7 @@ flycheck*.rs
 # test artifacts
 /tests/tmp/
 *.db
+bench-artifacts/
 
 # Ai tools
 .claude/
