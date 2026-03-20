@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Cache Rust toolchain
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/bin/
@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Cache Rust dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/bin/
@@ -68,7 +68,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Cache Rust dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/bin/
@@ -124,7 +124,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Cache Rust dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/bin/
@@ -214,5 +214,5 @@ jobs:
       - name: Run tests
         env:
           PG_EXPORTER_DSN: postgresql://postgres:postgres@localhost:5432/postgres
-          PG_EXPORTER_REQUIRE_TESTCONTAINERS: "1"
+          PG_EXPORTER_REQUIRE_TESTCONTAINERS: '1'
         run: cargo test

@@ -44,9 +44,9 @@ large_stack_arrays = "deny"
 anyhow = "1.0"
 axum = { version = "0.8.8", features = ["tracing"] }
 chrono = "0.4.44"
-clap = { version = "4.5.60", features = ["env"] }
+clap = { version = "4.6.0", features = ["env"] }
 opentelemetry = "0.31.0"
-opentelemetry-otlp = { version = "0.31.0", default-features = false, features = ["grpc-tonic", "gzip-tonic", "tls", "tls-roots", "trace"] }
+opentelemetry-otlp = { version = "0.31.1", default-features = false, features = ["grpc-tonic", "gzip-tonic", "tls", "tls-roots", "trace"] }
 opentelemetry_sdk = { version = "0.31.0", features = ["rt-tokio"] }
 secrecy = "0.10"
 serde = "1.0"
@@ -57,7 +57,7 @@ tower = "0.5.3"
 tower-http = { version = "0.6.8", features = ["request-id", "set-header", "trace"] }
 tracing = "0.1.44"
 tracing-opentelemetry = "0.32.1"
-tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 ulid = "1.2.1"
 url = "2.5.8"
 prometheus = "0.14.0"
@@ -101,7 +101,7 @@ prometheus = "0.14"
 reqwest = { version = "0.13", features = ["json"] }
 serde_json = "1.0"
 temp-env = "0.3"
-tempfile = "3.26"
+tempfile = "3.27"
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
 tokio = { version = "1", features = ["full", "test-util"] }
