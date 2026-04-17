@@ -159,7 +159,7 @@ impl CollectorRegistry {
             .min_connections(0)
             .max_connections(3)
             .acquire_timeout(Duration::from_secs(5))
-            .max_lifetime(Duration::from_secs(120))
+            .max_lifetime(Duration::from_mins(2))
             .test_before_acquire(false)
             .connect_lazy_with(opts))
     }

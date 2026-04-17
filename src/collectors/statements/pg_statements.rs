@@ -73,7 +73,7 @@ enum ExtensionState {
     Missing { last_checked: Instant },
 }
 
-const MISSING_EXTENSION_RECHECK_AFTER: Duration = Duration::from_secs(60);
+const MISSING_EXTENSION_RECHECK_AFTER: Duration = Duration::from_mins(1);
 
 impl PgStatementsCollector {
     /// Create a new `pg_statements` collector

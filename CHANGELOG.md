@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **24h Rust Soak Toolkit**: Added `scripts/benchmark/run-rust-soak.sh`, `scripts/benchmark/check-rust-soak.sh`, and a dedicated Grafana soak dashboard (`scripts/benchmark/rust-soak-dashboard.json`) to run phased long-duration stress tests and collect reliability/performance artifacts.
+- **Idle Connection Triage Panel**: Added a dedicated Grafana panel ranking databases by idle, idle-in-transaction, and aborted-idle-in-transaction connection pressure so connection culprits are visible without drilling into broader state charts.
 
 ## [0.11.0] - 2026-03-07
 
