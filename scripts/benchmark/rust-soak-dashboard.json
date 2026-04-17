@@ -1,0 +1,597 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-local"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "expr": "up{job=\"pg_exporter_rust\",instance=~\"$instance\"}",
+          "refId": "A"
+        }
+      ],
+      "title": "Exporter Up",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-local"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "expr": "pg_up{job=\"pg_exporter_rust\",instance=~\"$instance\"}",
+          "refId": "A"
+        }
+      ],
+      "title": "PostgreSQL Up",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-local"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(changes(pg_exporter_collector_last_scrape_success{job=\"pg_exporter_rust\",instance=~\"$instance\"}[12h]))",
+          "refId": "A"
+        }
+      ],
+      "title": "Collector Success Flips (12h)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-local"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(pg_exporter_collector_scrape_errors_total{job=\"pg_exporter_rust\",instance=~\"$instance\"}[1h]))",
+          "refId": "A"
+        }
+      ],
+      "title": "Collector Errors (1h)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-local"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 4
+      },
+      "id": 5,
+      "targets": [
+        {
+          "expr": "pg_exporter_process_resident_memory_bytes{job=\"pg_exporter_rust\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Exporter RSS",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-local"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 4
+      },
+      "id": 6,
+      "targets": [
+        {
+          "expr": "pg_exporter_process_cpu_percent{job=\"pg_exporter_rust\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Exporter CPU Percent",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-local"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 4
+      },
+      "id": 7,
+      "targets": [
+        {
+          "expr": "pg_exporter_process_open_fds{job=\"pg_exporter_rust\",instance=~\"$instance\"}",
+          "legendFormat": "fds",
+          "refId": "A"
+        },
+        {
+          "expr": "pg_exporter_process_cpu_cores{job=\"pg_exporter_rust\",instance=~\"$instance\"}",
+          "legendFormat": "cpu_cores",
+          "refId": "B"
+        }
+      ],
+      "title": "Exporter FDs / Cores",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-local"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "id": 8,
+      "targets": [
+        {
+          "expr": "scrape_duration_seconds{job=\"pg_exporter_rust\",instance=~\"$instance\"}",
+          "legendFormat": "target",
+          "refId": "A"
+        }
+      ],
+      "title": "Target Scrape Duration",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-local"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "id": 9,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, collector) (rate(pg_exporter_collector_scrape_duration_seconds_bucket{job=\"pg_exporter_rust\",instance=~\"$instance\"}[5m])))",
+          "legendFormat": "p95 {{collector}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, collector) (rate(pg_exporter_collector_scrape_duration_seconds_bucket{job=\"pg_exporter_rust\",instance=~\"$instance\"}[5m])))",
+          "legendFormat": "p99 {{collector}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Collector Scrape Duration (p95/p99)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-local"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "id": 10,
+      "targets": [
+        {
+          "expr": "sum(rate(postgres_pg_stat_statements_calls_total{job=\"pg_exporter_rust\",instance=~\"$instance\",datname=~\"$database\"}[5m]))",
+          "legendFormat": "calls/sec",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(postgres_pg_stat_statements_wal_bytes_total{job=\"pg_exporter_rust\",instance=~\"$instance\",datname=~\"$database\"}[5m]))",
+          "legendFormat": "wal bytes/sec",
+          "refId": "B"
+        }
+      ],
+      "title": "Statements Pressure",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-local"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "id": 11,
+      "targets": [
+        {
+          "expr": "max(pg_stat_activity_oldest_query_age_seconds{job=\"pg_exporter_rust\",instance=~\"$instance\",datname=~\"$database\"})",
+          "legendFormat": "oldest age",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(pg_stat_activity_blocked_connections{job=\"pg_exporter_rust\",instance=~\"$instance\",datname=~\"$database\"})",
+          "legendFormat": "blocked conns",
+          "refId": "B"
+        }
+      ],
+      "title": "Activity / Blocking",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-local"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 28
+      },
+      "id": 12,
+      "targets": [
+        {
+          "expr": "sum(pg_locks_count{job=\"pg_exporter_rust\",instance=~\"$instance\",datname=~\"$database\"}) by (mode)",
+          "legendFormat": "{{mode}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Locks by Mode",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-local"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 28
+      },
+      "id": 13,
+      "targets": [
+        {
+          "expr": "topk(10, pg_stat_user_tables_n_dead_tup{job=\"pg_exporter_rust\",instance=~\"$instance\",datname=~\"$database\"})",
+          "legendFormat": "{{datname}}.{{schemaname}}.{{relname}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Top Dead Tuples",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-local"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      },
+      "id": 14,
+      "targets": [
+        {
+          "expr": "topk(10, pg_stat_user_tables_autovacuum_threshold_ratio{job=\"pg_exporter_rust\",instance=~\"$instance\",datname=~\"$database\"})",
+          "legendFormat": "{{datname}}.{{schemaname}}.{{relname}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Autovacuum Threshold Ratio",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-local"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 36
+      },
+      "id": 15,
+      "targets": [
+        {
+          "expr": "sum(pg_stat_user_tables_never_autovacuumed{job=\"pg_exporter_rust\",instance=~\"$instance\",datname=~\"$database\"}) or vector(0)",
+          "legendFormat": "never_autovacuumed",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(pg_stat_user_tables_never_autoanalyzed{job=\"pg_exporter_rust\",instance=~\"$instance\",datname=~\"$database\"}) or vector(0)",
+          "legendFormat": "never_autoanalyzed",
+          "refId": "B"
+        }
+      ],
+      "title": "Never-Maintained Tables",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-local"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 44
+      },
+      "id": 16,
+      "targets": [
+        {
+          "expr": "pg_vacuum_heap_progress{job=\"pg_exporter_rust\",instance=~\"$instance\"}",
+          "legendFormat": "{{datname}}.{{relid}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Active Vacuum Progress",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "pg_exporter",
+    "soak",
+    "benchmark"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": true,
+          "text": "10.246.1.90:9432",
+          "value": "10.246.1.90:9432"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus-local"
+        },
+        "definition": "label_values(up{job=\"pg_exporter_rust\"}, instance)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Instance",
+        "multi": false,
+        "name": "instance",
+        "options": [],
+        "query": {
+          "query": "label_values(up{job=\"pg_exporter_rust\"}, instance)",
+          "refId": "Prometheus-instance-Variable-Query"
+        },
+        "refresh": 1,
+        "skipUrlSync": false,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus-local"
+        },
+        "definition": "label_values(pg_stat_database_numbackends{job=\"pg_exporter_rust\",instance=~\"$instance\"}, datname)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Database",
+        "multi": true,
+        "name": "database",
+        "options": [],
+        "query": {
+          "query": "label_values(pg_stat_database_numbackends{job=\"pg_exporter_rust\",instance=~\"$instance\"}, datname)",
+          "refId": "Prometheus-database-Variable-Query"
+        },
+        "refresh": 1,
+        "skipUrlSync": false,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "PG Exporter Rust Soak (24h)",
+  "uid": "pg-exp-soak-rust",
+  "version": 1,
+  "weekStart": ""
+}

@@ -75,6 +75,7 @@ Monitor pg_exporter's own health and performance:
 - **Connection Pool Status**: Max/Used/Available connections
 
 ### 🔌 Connection Analysis & Idle Age
+- **Top Databases by Idle Connection State**: Surface which databases are accumulating the most idle sessions right now, including dangerous `idle in transaction` states
 - **Connections by Application**: Identify connection hogs (useful in K8s environments)
 - **Idle Connection Age Buckets**: Detect connection leaks
   - `<1min` - Normal
@@ -261,11 +262,12 @@ pg_exporter --enable-collector=statements
 When responding to incidents, focus on these panels:
 
 1. **Connection Pool Utilization** - Are we running out of connections?
-2. **Idle in Transaction** - Are there stuck transactions holding locks?
-3. **Top Queries by Total Execution Time** - What's killing the database right now?
-4. **Waiting & Blocked Connections** - Is there lock contention?
-5. **Transaction Throughput** - What's the write load?
-6. **Idle Connection Age Buckets** - Are there connection leaks?
+2. **Top Databases by Idle Connection State** - Which database is creating the idle-pressure incident?
+3. **Idle in Transaction** - Are there stuck transactions holding locks?
+4. **Top Queries by Total Execution Time** - What's killing the database right now?
+5. **Waiting & Blocked Connections** - Is there lock contention?
+6. **Transaction Throughput** - What's the write load?
+7. **Idle Connection Age Buckets** - Are there connection leaks?
 
 ## Alert Recommendations
 

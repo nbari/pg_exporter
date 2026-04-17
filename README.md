@@ -196,6 +196,12 @@ For PostgreSQL-managed cleanup testing, use:
 
 `just autovacuum-workflow` creates dead tuples, temporarily lowers the local autovacuum trigger for `pgbench_accounts`, shortens `autovacuum_naptime`, and then waits for PostgreSQL autovacuum to clean the table without a manual `VACUUM`.
 
+For long-running benchmark VM soak tests (Rust exporter only), use:
+
+    ./scripts/benchmark/run-rust-soak.sh --hours 24
+
+This orchestrates a phased 24h workload (statements, locks/activity, vacuum debt, autovacuum recovery, mixed churn), deploys a dedicated Grafana soak dashboard, and starts a Prometheus sampler for post-run analysis.
+
 For reclaiming physical space:
 
 - `VACUUM` reclaims dead tuples for PostgreSQL reuse, but usually does not return table space to the OS.

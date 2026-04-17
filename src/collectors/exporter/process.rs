@@ -111,8 +111,7 @@ impl ProcessCollector {
         // can permanently inflate exporter FD usage.
         let system = System::new();
         let num_cpus = std::thread::available_parallelism()
-            .map(std::num::NonZeroUsize::get)
-            .unwrap_or(1);
+            .map_or(1, std::num::NonZeroUsize::get);
 
         let system = Arc::new(Mutex::new(SystemState {
             system,
