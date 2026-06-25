@@ -120,7 +120,9 @@ impl Collector for IndexStatsCollector {
                 i64,
                 i64,
                 i64,
-            ) = sqlx::query_as(&query).fetch_one(pool).await?;
+            ) = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
+                .fetch_one(pool)
+                .await?;
 
             // Update metrics
             self.scans.set(i64_to_f64(total_scans));

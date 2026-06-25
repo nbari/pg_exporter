@@ -2,17 +2,24 @@ use crate::collectors::Collector;
 use crate::collectors::util::is_pg_version_at_least;
 use anyhow::Result;
 use futures::future::BoxFuture;
-use prometheus::{IntCounter, Opts, Registry};
+use prometheus::{Gauge, IntCounter, Opts, Registry};
 use sqlx::{PgPool, Row};
-use tracing::{debug, info_span, instrument};
+use tracing::{debug, info_span, instrument, warn};
 use tracing_futures::Instrument as _;
 
-/// Exposes `PostgreSQL` checkpointer statistics from `pg_stat_checkpointer`:
+/// Exposes `PostgreSQL` checkpointer statistics.
+///
+/// From `pg_stat_checkpointer` (`PostgreSQL` 17+):
 /// - `pg_stat_checkpointer_timed_total` (`Counter`)
 /// - `pg_stat_checkpointer_requested_total` (`Counter`)
 /// - `pg_stat_checkpointer_buffers_written_total` (`Counter`)
 /// - `pg_stat_checkpointer_write_time_seconds_total` (`Counter`)
 /// - `pg_stat_checkpointer_sync_time_seconds_total` (`Counter`)
+///
+/// From `pg_control_checkpoint()` (tuning-insight metrics, independent of the
+/// `PostgreSQL` 17 requirement above):
+/// - `pg_last_checkpoint_age_seconds` (`Gauge`)
+/// - `pg_wal_bytes_since_last_checkpoint` (`Gauge`)
 #[derive(Clone)]
 pub struct CheckpointerCollector {
     timed: IntCounter,           // pg_stat_checkpointer_timed_total
@@ -20,6 +27,8 @@ pub struct CheckpointerCollector {
     buffers_written: IntCounter,  // pg_stat_checkpointer_buffers_written_total
     write_time: IntCounter,       // pg_stat_checkpointer_write_time_seconds_total
     sync_time: IntCounter,        // pg_stat_checkpointer_sync_time_seconds_total
+    last_checkpoint_age: Gauge,   // pg_last_checkpoint_age_seconds
+    wal_bytes_since_checkpoint: Gauge, // pg_wal_bytes_since_last_checkpoint
 }
 
 impl Default for CheckpointerCollector {
@@ -67,13 +76,94 @@ impl CheckpointerCollector {
         ))
         .expect("Failed to create pg_stat_checkpointer_sync_time_seconds_total");
 
+        let last_checkpoint_age = Gauge::with_opts(Opts::new(
+            "pg_last_checkpoint_age_seconds",
+            "Seconds since the last completed checkpoint (now() - pg_control_checkpoint().checkpoint_time). \
+             Reflects the achieved checkpoint interval and checkpointer liveness; grows unbounded if the checkpointer stalls",
+        ))
+        .expect("Failed to create pg_last_checkpoint_age_seconds");
+
+        let wal_bytes_since_checkpoint = Gauge::with_opts(Opts::new(
+            "pg_wal_bytes_since_last_checkpoint",
+            "WAL bytes generated since the last checkpoint's redo point (must be replayed on crash recovery). \
+             Proxy for recovery time (RTO) and headroom against max_wal_size",
+        ))
+        .expect("Failed to create pg_wal_bytes_since_last_checkpoint");
+
         Self {
             timed,
             requested,
             buffers_written,
             write_time,
             sync_time,
+            last_checkpoint_age,
+            wal_bytes_since_checkpoint,
         }
+    }
+
+    /// Collects checkpoint age and WAL-since-checkpoint from `pg_control_checkpoint()`.
+    ///
+    /// These metrics are best-effort: `pg_control_checkpoint()` may require
+    /// `pg_monitor`/superuser on older `PostgreSQL` versions, and the WAL position
+    /// functions differ on standbys. Any failure is logged and skipped so the rest
+    /// of the checkpointer collector keeps working.
+    async fn collect_control_checkpoint(&self, pool: &PgPool) {
+        let query_span = info_span!(
+            "db.query",
+            otel.kind = "client",
+            db.system = "postgresql",
+            db.operation = "SELECT",
+            db.statement = "SELECT ... FROM pg_control_checkpoint()",
+            db.sql.table = "pg_control_checkpoint"
+        );
+
+        let row = match sqlx::query(
+            r"
+            SELECT
+                EXTRACT(EPOCH FROM (now() - checkpoint_time))::double precision AS age_seconds,
+                GREATEST(
+                    pg_wal_lsn_diff(
+                        CASE WHEN pg_is_in_recovery()
+                             THEN pg_last_wal_replay_lsn()
+                             ELSE pg_current_wal_lsn()
+                        END,
+                        redo_lsn
+                    ), 0
+                )::bigint AS wal_bytes_since_checkpoint
+            FROM pg_control_checkpoint()
+            ",
+        )
+        .fetch_optional(pool)
+        .instrument(query_span)
+        .await
+        {
+            Ok(Some(row)) => row,
+            Ok(None) => {
+                debug!("pg_control_checkpoint() returned no rows; skipping checkpoint age metrics");
+                return;
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "Could not read pg_control_checkpoint() (insufficient privilege or unsupported); \
+                     skipping pg_last_checkpoint_age_seconds and pg_wal_bytes_since_last_checkpoint"
+                );
+                return;
+            }
+        };
+
+        if let Ok(age_seconds) = row.try_get::<f64, _>("age_seconds") {
+            self.last_checkpoint_age.set(age_seconds.max(0.0));
+        }
+
+        // NULL on a standby that has not replayed any WAL yet.
+        if let Ok(Some(wal_bytes)) = row.try_get::<Option<i64>, _>("wal_bytes_since_checkpoint") {
+            #[allow(clippy::cast_precision_loss)]
+            self.wal_bytes_since_checkpoint
+                .set(wal_bytes.max(0) as f64);
+        }
+
+        debug!("updated checkpoint age / wal-since-checkpoint metrics");
     }
 }
 
@@ -94,6 +184,8 @@ impl Collector for CheckpointerCollector {
         registry.register(Box::new(self.buffers_written.clone()))?;
         registry.register(Box::new(self.write_time.clone()))?;
         registry.register(Box::new(self.sync_time.clone()))?;
+        registry.register(Box::new(self.last_checkpoint_age.clone()))?;
+        registry.register(Box::new(self.wal_bytes_since_checkpoint.clone()))?;
         Ok(())
     }
 
@@ -105,9 +197,14 @@ impl Collector for CheckpointerCollector {
     )]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            // Tuning-insight metrics from pg_control_checkpoint() are available on
+            // all supported PostgreSQL versions and do not depend on
+            // pg_stat_checkpointer (PostgreSQL 17+), so collect them first.
+            self.collect_control_checkpoint(pool).await;
+
             // pg_stat_checkpointer was introduced in PostgreSQL 17
             if !is_pg_version_at_least(170_000) {
-                debug!("Skipping checkpointer collector (requires PostgreSQL 17+)");
+                debug!("Skipping pg_stat_checkpointer metrics (requires PostgreSQL 17+)");
                 return Ok(());
             }
 

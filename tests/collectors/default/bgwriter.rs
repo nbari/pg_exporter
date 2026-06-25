@@ -383,14 +383,14 @@ async fn test_bgwriter_collector_all_counters_valid_after_activity() -> Result<(
     // Generate some database activity within a transaction
     let mut tx = pool.begin().await?;
     for i in 0..10 {
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(&*format!(
             "CREATE TEMP TABLE bgwriter_activity_{i} (data TEXT)"
-        ))
+        )))
         .execute(&mut *tx)
         .await?;
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(&*format!(
             "INSERT INTO bgwriter_activity_{i} SELECT 'test' FROM generate_series(1, 50)"
-        ))
+        )))
         .execute(&mut *tx)
         .await?;
     }

@@ -20,6 +20,11 @@ VERBOSE=false
 SKIP_DATA_GEN=false
 USE_PGBENCH=auto # auto, true, or false
 PGBENCH_SCALE=10
+# pgbench initialization steps (see `pgbench --help`). Default is the standard
+# client-side data generation (dtgvp). Set PGBENCH_INIT_STEPS=dtGvp (capital G)
+# for server-side generation, which avoids bulk-COPY stalls when PostgreSQL is
+# reached through a port-forward (e.g. rootless podman/pasta on Fedora Atomic).
+PGBENCH_INIT_STEPS="${PGBENCH_INIT_STEPS:-dtgvp}"
 
 log_info() {
     echo -e "${GREEN}[INFO]${NC} $*"
@@ -301,12 +306,22 @@ generate_pgbench_data() {
     log_debug "Ensuring pg_stat_statements extension in pgbench_test..."
     PGOPTIONS='--client-min-messages=warning' psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d pgbench_test --no-psqlrc -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;" >/dev/null
 
-    # Initialize pgbench schema
-    log_info "Initializing pgbench schema (this may take a moment)..."
+    # Clear any leftover connections to pgbench_test (e.g. a stalled or killed
+    # previous pgbench run whose backend is still holding table locks). Without
+    # this, "pgbench -i" blocks indefinitely on "dropping old tables..." waiting
+    # for the lock instead of failing fast.
+    log_debug "Clearing leftover connections to pgbench_test..."
+    run_psql -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'pgbench_test' AND pid <> pg_backend_pid();" >/dev/null 2>&1 || true
+
+    # Initialize pgbench schema. Defaults to standard client-side data generation
+    # (PGBENCH_INIT_STEPS=dtgvp). Set PGBENCH_INIT_STEPS=dtGvp for server-side
+    # generation if the client-to-server bulk COPY stalls (e.g. behind a rootless
+    # podman/pasta port-forward on Fedora Atomic).
+    log_info "Initializing pgbench schema (init steps: ${PGBENCH_INIT_STEPS})..."
     if [ "$VERBOSE" = true ]; then
-        pgbench -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -i -s "$PGBENCH_SCALE" pgbench_test
+        pgbench -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -i -I "$PGBENCH_INIT_STEPS" -s "$PGBENCH_SCALE" pgbench_test
     else
-        pgbench -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -i -s "$PGBENCH_SCALE" pgbench_test -q
+        pgbench -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -i -I "$PGBENCH_INIT_STEPS" -s "$PGBENCH_SCALE" pgbench_test -q
     fi
 
     # Reset stats for clean baseline

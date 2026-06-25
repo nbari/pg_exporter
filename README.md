@@ -150,7 +150,7 @@ Priority order: `PG_EXPORTER_DSN_FILE` > `PG_EXPORTER_DSN` > `--dsn` flag > defa
 
 The following collectors are available:
 
-* `--collector.default` [default](src/collectors/default/mod.rs)
+* `--collector.default` [default](src/collectors/default/README.md) - Cheap, always-on signals (version, settings, bgwriter, checkpointer, archiver, WAL). Includes checkpoint tuning-insight metrics; see the [checkpoint tuning guide](src/collectors/default/README.md#why-tune-checkpoint_timeout-5m-vs-30m).
 * `--collector.activity` [activity](src/collectors/activity/mod.rs)
 * `--collector.database` [database](src/collectors/database/mod.rs)
 * `--collector.vacuum` [vacuum](src/collectors/vacuum/mod.rs)

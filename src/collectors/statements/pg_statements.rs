@@ -464,7 +464,8 @@ impl Collector for PgStatementsCollector {
                 }
 
                 let query = self.build_pg_statements_query();
-                let rows: Vec<PgRow> = sqlx::query(&query).fetch_all(pool).await?;
+                let rows: Vec<PgRow> =
+                    sqlx::query(sqlx::AssertSqlSafe(query.as_str())).fetch_all(pool).await?;
                 let row_count = rows.len();
 
                 // Only clear previous series after we have fresh replacement rows.

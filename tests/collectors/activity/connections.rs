@@ -90,8 +90,10 @@ async fn test_connections_collector_collects_from_database() -> Result<()> {
         "Should have at least one active connection, found: {total_connections}"
     );
 
-    // Clean up - wait for the query to complete
-    let _conn = query_handle.await?;
+    // Clean up - wait for the query to complete and release the connection
+    // before closing the pool (sqlx 0.9's Pool::close waits for checked-out
+    // connections to be returned).
+    drop(query_handle.await?);
 
     pool.close().await;
     Ok(())

@@ -84,6 +84,15 @@ Monitor pg_exporter's own health and performance:
   - `15min-1h` - Likely leak
   - `>1h` - Definite leak!
 
+### ⏱️ Checkpoints
+Insight into the `checkpoint_timeout` / `max_wal_size` / storage tradeoff. Yellow dashed lines plot the live server settings so they track configuration changes automatically.
+- **Avg Checkpoint Write+Sync Time per Checkpoint**: Real I/O work per checkpoint (from `pg_stat_checkpointer`). Should stay well below `checkpoint_timeout` (yellow line); approaching it means checkpoint I/O can't keep up (storage bottleneck). Requires PostgreSQL 17+.
+- **Time Since Last Checkpoint**: `pg_last_checkpoint_age_seconds`. Healthy on a primary it oscillates between 0 and `checkpoint_timeout` (yellow); climbing far past it signals a stalled/lagging checkpointer.
+- **WAL Since Last Checkpoint (Recovery Volume)**: `pg_wal_bytes_since_last_checkpoint` — the WAL replayed on crash recovery (RTO proxy). A peak approaching `max_wal_size` (yellow) means WAL volume, not the timeout, is triggering checkpoints — raise `max_wal_size` before `checkpoint_timeout`.
+- **Checkpoints by Trigger (Timed vs Requested)**: If `requested` dominates, checkpoints are WAL-driven; tune `max_wal_size`, not just `checkpoint_timeout`. Requires PostgreSQL 17+.
+
+See the [checkpoint tuning guide](../src/collectors/default/README.md#why-tune-checkpoint_timeout-5m-vs-30m) for the full decision tree.
+
 ### 🔍 Query Performance - pg_stat_statements
 
 **Note**: Requires `pg_stat_statements` extension and the `statements` collector enabled.
@@ -174,6 +183,7 @@ Different sections require different collectors to be enabled:
 | Database Activity | `database`, `activity` | Partial |
 | Locks | `locks` | ❌ No |
 | Vacuum | `vacuum` | ✅ Yes |
+| Checkpoints | `default` | ✅ Yes |
 | WAL | `default` | ✅ Yes |
 | Replication | `default`, `replication` | Partial |
 | Table Statistics | `stat` | ❌ No |

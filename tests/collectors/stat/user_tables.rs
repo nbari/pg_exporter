@@ -66,15 +66,15 @@ async fn test_stat_user_tables_collector_with_created_table() -> Result<()> {
 
     let table_name = unique_table_name("test_table");
 
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
         "CREATE TABLE IF NOT EXISTS {table_name} (id INT PRIMARY KEY, data TEXT)"
-    ))
+    )))
     .execute(&pool)
     .await?;
 
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
         "INSERT INTO {table_name} (id, data) VALUES (1, 'test') ON CONFLICT DO NOTHING"
-    ))
+    )))
     .execute(&pool)
     .await?;
 
@@ -118,9 +118,11 @@ async fn test_stat_user_tables_collector_with_created_table() -> Result<()> {
     }
 
     // Cleanup
-    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "DROP TABLE IF EXISTS {table_name}"
+    )))
+    .execute(&pool)
+    .await?;
 
     pool.close().await;
     Ok(())
@@ -132,9 +134,11 @@ async fn test_stat_user_tables_collector_metrics_have_correct_labels() -> Result
 
     let table_name = unique_table_name("test_labels");
 
-    sqlx::query(&format!("CREATE TABLE IF NOT EXISTS {table_name} (id INT)"))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "CREATE TABLE IF NOT EXISTS {table_name} (id INT)"
+    )))
+    .execute(&pool)
+    .await?;
 
     let collector = StatUserTablesCollector::new();
     let registry = Registry::new();
@@ -174,9 +178,11 @@ async fn test_stat_user_tables_collector_metrics_have_correct_labels() -> Result
     }
 
     // Cleanup
-    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "DROP TABLE IF EXISTS {table_name}"
+    )))
+    .execute(&pool)
+    .await?;
 
     pool.close().await;
     Ok(())
@@ -188,9 +194,11 @@ async fn test_stat_user_tables_collector_counts_are_non_negative() -> Result<()>
 
     let table_name = unique_table_name("test_counts");
 
-    sqlx::query(&format!("CREATE TABLE IF NOT EXISTS {table_name} (id INT)"))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "CREATE TABLE IF NOT EXISTS {table_name} (id INT)"
+    )))
+    .execute(&pool)
+    .await?;
 
     let collector = StatUserTablesCollector::new();
     let registry = Registry::new();
@@ -216,9 +224,11 @@ async fn test_stat_user_tables_collector_counts_are_non_negative() -> Result<()>
     }
 
     // Cleanup
-    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "DROP TABLE IF EXISTS {table_name}"
+    )))
+    .execute(&pool)
+    .await?;
 
     pool.close().await;
     Ok(())
@@ -230,18 +240,20 @@ async fn test_stat_user_tables_collector_tracks_inserts() -> Result<()> {
 
     let table_name = unique_table_name("test_inserts");
 
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
         "CREATE TABLE IF NOT EXISTS {table_name} (id SERIAL PRIMARY KEY, data TEXT)"
-    ))
+    )))
     .execute(&pool)
     .await?;
 
     // Insert some rows
     for i in 1..=5 {
-        sqlx::query(&format!("INSERT INTO {table_name} (data) VALUES ($1)"))
-            .bind(format!("test_{i}"))
-            .execute(&pool)
-            .await?;
+        sqlx::query(sqlx::AssertSqlSafe(&*format!(
+            "INSERT INTO {table_name} (data) VALUES ($1)"
+        )))
+        .bind(format!("test_{i}"))
+        .execute(&pool)
+        .await?;
     }
 
     // Force PostgreSQL to flush stats so `n_tup_ins` is visible reliably in the full suite.
@@ -292,9 +304,11 @@ async fn test_stat_user_tables_collector_tracks_inserts() -> Result<()> {
     );
 
     // Cleanup
-    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "DROP TABLE IF EXISTS {table_name}"
+    )))
+    .execute(&pool)
+    .await?;
 
     pool.close().await;
     Ok(())
@@ -371,14 +385,18 @@ async fn test_stat_user_tables_collector_timestamp_values_are_reasonable() -> Re
 
     let table_name = unique_table_name("test_timestamps");
 
-    sqlx::query(&format!("CREATE TABLE IF NOT EXISTS {table_name} (id INT)"))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "CREATE TABLE IF NOT EXISTS {table_name} (id INT)"
+    )))
+    .execute(&pool)
+    .await?;
 
     // Run VACUUM and ANALYZE to generate timestamps
-    sqlx::query(&format!("VACUUM ANALYZE {table_name}"))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "VACUUM ANALYZE {table_name}"
+    )))
+    .execute(&pool)
+    .await?;
 
     let collector = StatUserTablesCollector::new();
     let registry = Registry::new();
@@ -420,9 +438,11 @@ async fn test_stat_user_tables_collector_timestamp_values_are_reasonable() -> Re
     }
 
     // Cleanup
-    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "DROP TABLE IF EXISTS {table_name}"
+    )))
+    .execute(&pool)
+    .await?;
 
     pool.close().await;
     Ok(())
@@ -434,19 +454,23 @@ async fn test_stat_user_tables_collector_tracks_table_size() -> Result<()> {
 
     // Create a test table with some data using unique name
     let table_name = format!("test_size_{}", std::process::id());
-    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "DROP TABLE IF EXISTS {table_name}"
+    )))
+    .execute(&pool)
+    .await?;
 
-    sqlx::query(&format!("CREATE TABLE {table_name} (id INT, data TEXT)"))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "CREATE TABLE {table_name} (id INT, data TEXT)"
+    )))
+    .execute(&pool)
+    .await?;
 
     // Insert some data to ensure table has size
     for i in 1..=100 {
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(&*format!(
             "INSERT INTO {table_name} (id, data) VALUES ($1, $2)"
-        ))
+        )))
         .bind(i)
         .bind("x".repeat(100))
         .execute(&pool)
@@ -485,9 +509,11 @@ async fn test_stat_user_tables_collector_tracks_table_size() -> Result<()> {
     }
 
     // Cleanup
-    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "DROP TABLE IF EXISTS {table_name}"
+    )))
+    .execute(&pool)
+    .await?;
 
     pool.close().await;
     Ok(())
@@ -505,21 +531,23 @@ async fn test_stat_user_tables_collector_bloat_metrics() -> Result<()> {
 
     // Create a table and collect data with unique name to avoid conflicts
     let table_name = format!("test_bloat_{}", std::process::id());
-    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "DROP TABLE IF EXISTS {table_name}"
+    )))
+    .execute(&pool)
+    .await?;
 
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
         "CREATE TABLE {table_name} (id INT PRIMARY KEY, data TEXT)"
-    ))
+    )))
     .execute(&pool)
     .await?;
 
     // Insert data
     for i in 1..=100 {
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(&*format!(
             "INSERT INTO {table_name} (id, data) VALUES ($1, $2)"
-        ))
+        )))
         .bind(i)
         .bind("x".repeat(100))
         .execute(&pool)
@@ -527,9 +555,11 @@ async fn test_stat_user_tables_collector_bloat_metrics() -> Result<()> {
     }
 
     // Update rows to create dead tuples
-    sqlx::query(&format!("UPDATE {table_name} SET data = 'updated'"))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "UPDATE {table_name} SET data = 'updated'"
+    )))
+    .execute(&pool)
+    .await?;
 
     // Collect metrics
     collector.collect(&pool).await?;
@@ -560,9 +590,11 @@ async fn test_stat_user_tables_collector_bloat_metrics() -> Result<()> {
     }
 
     // Cleanup
-    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "DROP TABLE IF EXISTS {table_name}"
+    )))
+    .execute(&pool)
+    .await?;
 
     pool.close().await;
     Ok(())
@@ -575,14 +607,16 @@ async fn test_stat_user_tables_collector_captures_all_tuple_operations() -> Resu
     let table_name = format!("test_tuple_ops_{}", std::process::id());
 
     // Drop table if exists
-    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "DROP TABLE IF EXISTS {table_name}"
+    )))
+    .execute(&pool)
+    .await?;
 
     // Create table
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
         "CREATE TABLE {table_name} (id SERIAL PRIMARY KEY, data TEXT, value INT)"
-    ))
+    )))
     .execute(&pool)
     .await?;
 
@@ -590,9 +624,9 @@ async fn test_stat_user_tables_collector_captures_all_tuple_operations() -> Resu
     // INSERT
     let insert_count = 50;
     for i in 1..=insert_count {
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(&*format!(
             "INSERT INTO {table_name} (data, value) VALUES ($1, $2)"
-        ))
+        )))
         .bind(format!("data_{i}"))
         .bind(i)
         .execute(&pool)
@@ -601,22 +635,24 @@ async fn test_stat_user_tables_collector_captures_all_tuple_operations() -> Resu
 
     // UPDATE
     let update_count = 10;
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
         "UPDATE {table_name} SET data = 'updated' WHERE value <= $1"
-    ))
+    )))
     .bind(update_count)
     .execute(&pool)
     .await?;
 
     // DELETE
     let delete_count = 5;
-    sqlx::query(&format!("DELETE FROM {table_name} WHERE value <= $1"))
-        .bind(delete_count)
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "DELETE FROM {table_name} WHERE value <= $1"
+    )))
+    .bind(delete_count)
+    .execute(&pool)
+    .await?;
 
     // SEQ SCAN - ensure table is scanned
-    sqlx::query(&format!("SELECT * FROM {table_name}"))
+    sqlx::query(sqlx::AssertSqlSafe(&*format!("SELECT * FROM {table_name}")))
         .fetch_all(&pool)
         .await?;
 
@@ -689,9 +725,11 @@ async fn test_stat_user_tables_collector_captures_all_tuple_operations() -> Resu
     }
 
     // Cleanup
-    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "DROP TABLE IF EXISTS {table_name}"
+    )))
+    .execute(&pool)
+    .await?;
 
     pool.close().await;
     Ok(())
@@ -704,30 +742,36 @@ async fn test_stat_user_tables_collector_autovacuum_threshold_metrics() -> Resul
     let table_name = format!("test_autovac_threshold_{}", std::process::id());
 
     // Create table
-    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "DROP TABLE IF EXISTS {table_name}"
+    )))
+    .execute(&pool)
+    .await?;
 
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
         "CREATE TABLE {table_name} (id SERIAL PRIMARY KEY, data TEXT)"
-    ))
+    )))
     .execute(&pool)
     .await?;
 
     // Insert rows
     for i in 1..=100 {
-        sqlx::query(&format!("INSERT INTO {table_name} (data) VALUES ($1)"))
-            .bind(format!("row_{i}"))
-            .execute(&pool)
-            .await?;
+        sqlx::query(sqlx::AssertSqlSafe(&*format!(
+            "INSERT INTO {table_name} (data) VALUES ($1)"
+        )))
+        .bind(format!("row_{i}"))
+        .execute(&pool)
+        .await?;
     }
 
     // Update to create dead tuples
-    sqlx::query(&format!("UPDATE {table_name} SET data = 'modified'"))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "UPDATE {table_name} SET data = 'modified'"
+    )))
+    .execute(&pool)
+    .await?;
 
-    sqlx::query(&format!("ANALYZE {table_name}"))
+    sqlx::query(sqlx::AssertSqlSafe(&*format!("ANALYZE {table_name}")))
         .execute(&pool)
         .await?;
 
@@ -782,9 +826,11 @@ async fn test_stat_user_tables_collector_autovacuum_threshold_metrics() -> Resul
     }
 
     // Cleanup
-    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "DROP TABLE IF EXISTS {table_name}"
+    )))
+    .execute(&pool)
+    .await?;
 
     pool.close().await;
     Ok(())
@@ -795,13 +841,17 @@ async fn test_stat_user_tables_collector_marks_never_autovacuumed_tables() -> Re
     let pool = common::create_test_pool().await?;
 
     let table_name = format!("test_never_autovac_{}", std::process::id());
-    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "DROP TABLE IF EXISTS {table_name}"
+    )))
+    .execute(&pool)
+    .await?;
 
-    sqlx::query(&format!("CREATE TABLE {table_name} (id INT)"))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "CREATE TABLE {table_name} (id INT)"
+    )))
+    .execute(&pool)
+    .await?;
 
     let collector = StatUserTablesCollector::new();
     let registry = Registry::new();
@@ -836,9 +886,11 @@ async fn test_stat_user_tables_collector_marks_never_autovacuumed_tables() -> Re
         "table that was never autovacuumed should not expose last_autovacuum_seconds_ago"
     );
 
-    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "DROP TABLE IF EXISTS {table_name}"
+    )))
+    .execute(&pool)
+    .await?;
 
     pool.close().await;
     Ok(())
@@ -850,15 +902,19 @@ async fn test_stat_user_tables_collector_preserves_last_good_snapshot_on_query_f
     let pool = common::create_test_pool().await?;
 
     let table_name = format!("test_user_tables_snapshot_{}", std::process::id());
-    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
-        .execute(&pool)
-        .await?;
-    sqlx::query(&format!("CREATE TABLE {table_name} (id INT)"))
-        .execute(&pool)
-        .await?;
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "DROP TABLE IF EXISTS {table_name}"
+    )))
+    .execute(&pool)
+    .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "CREATE TABLE {table_name} (id INT)"
+    )))
+    .execute(&pool)
+    .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
         "INSERT INTO {table_name} (id) VALUES (1), (2), (3)"
-    ))
+    )))
     .execute(&pool)
     .await?;
 
@@ -899,9 +955,11 @@ async fn test_stat_user_tables_collector_preserves_last_good_snapshot_on_query_f
         "failed collection should preserve the last good table-stats snapshot"
     );
 
-    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "DROP TABLE IF EXISTS {table_name}"
+    )))
+    .execute(&pool)
+    .await?;
 
     pool.close().await;
     Ok(())

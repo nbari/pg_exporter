@@ -3,21 +3,32 @@ uid := `id -u`
 gid := `id -g`
 container_cmd := `if [ -n "${PG_EXPORTER_CONTAINER_CMD:-}" ]; then echo "${PG_EXPORTER_CONTAINER_CMD}"; elif command -v podman >/dev/null 2>&1; then echo "podman"; else echo "docker"; fi`
 
+# SELinux relabel suffix for bind mounts: ":Z" on Linux (needed on SELinux hosts
+# such as Fedora Atomic, harmless where SELinux is absent), empty on macOS
+# (Darwin) for Docker Desktop / podman machine portability. Keyed on the OS
+# rather than getenforce so it stays correct when 'just' runs inside a container
+# (e.g. a toolbox) whose own SELinux view differs from the host that runs podman.
+selinux_volume_flag := `if [ "$(uname -s)" = "Linux" ]; then echo ":Z"; fi`
+
 default: test
   @just --list
 
 # Test suite
 test: clippy fmt
   @echo "🧪 Checking PostgreSQL..."
-  @if ! {{container_cmd}} ps --filter "name=pg_exporter_postgres" --format "{{{{.Names}}}}" | grep -q "pg_exporter_postgres"; then \
-    echo "🚀 PostgreSQL container not running, starting it..."; \
+  @if PGPASSWORD="${PGPASSWORD:-postgres}" psql -h localhost -p 5432 -U postgres -d postgres -c "SELECT 1" >/dev/null 2>&1; then \
+    echo "✅ PostgreSQL already reachable on localhost:5432 (using existing instance)"; \
+  elif command -v {{container_cmd}} >/dev/null 2>&1; then \
+    echo "🚀 PostgreSQL not reachable, starting it with {{container_cmd}}..."; \
     just postgres; \
     echo "⏳ Waiting for PostgreSQL to be ready..."; \
     sleep 3; \
-    timeout 30 bash -c 'until psql -h localhost -p 5432 -U postgres -d postgres -c "SELECT 1" &>/dev/null; do sleep 1; done' || (echo "❌ PostgreSQL failed to start" && exit 1); \
+    timeout 30 bash -c 'until PGPASSWORD="${PGPASSWORD:-postgres}" psql -h localhost -p 5432 -U postgres -d postgres -c "SELECT 1" &>/dev/null; do sleep 1; done' || (echo "❌ PostgreSQL failed to start" && exit 1); \
     echo "✅ PostgreSQL is ready"; \
   else \
-    echo "✅ PostgreSQL container is already running"; \
+    echo "❌ PostgreSQL not reachable on localhost:5432 and no container runtime (podman/docker) found."; \
+    echo "   Start PostgreSQL yourself (e.g. run 'just postgres' on the host) or set PG_EXPORTER_CONTAINER_CMD."; \
+    exit 1; \
   fi
   @echo "🧪 Running setup check..."
   @if [ -f scripts/setup-local-test-db.sh ]; then \
@@ -393,8 +404,8 @@ postgres version="latest":
     -e POSTGRES_HOST_AUTH_METHOD=trust \
     -e PGDATA=/db/data/{{ version }} \
     -p 5432:5432 \
-    -v $(pwd)/db:/db \
-    -v $(pwd)/db/config/postgres:/etc/postgresql/config \
+    -v $(pwd)/db:/db{{ selinux_volume_flag }} \
+    -v $(pwd)/db/config/postgres:/etc/postgresql/config{{ selinux_volume_flag }} \
     {{ if container_cmd == "podman" { "--userns keep-id:uid=" + uid + ",gid=" + gid + " --user " + uid + ":" + gid } else { "" } }} \
     postgres:{{ version }} \
     postgres -c config_file=/etc/postgresql/config/postgresql.conf
