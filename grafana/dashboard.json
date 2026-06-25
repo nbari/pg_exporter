@@ -1749,11 +1749,538 @@
     },
     {
       "collapsed": false,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 93
+      },
+      "id": 2200,
+      "panels": [],
+      "title": "Checkpoints",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Average write+sync work time per checkpoint (pg_stat_checkpointer write_time+sync_time divided by checkpoints completed). It must stay below checkpoint_timeout (yellow) \u2014 if it reaches the timeout the checkpointer cannot finish before the next checkpoint is due and is falling behind (storage bottleneck). Note: because checkpoint_completion_target defaults to 0.9, Postgres paces a timed checkpoint's writes over ~90% of the interval, so on a busy system it is normal for this to sit near ~0.9 x checkpoint_timeout; the red flag is crossing the timeout, not merely being high. This also excludes the log 'total=' value's interpretation. Requires PostgreSQL 17+.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "checkpoint_timeout (setting)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "yellow",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 94
+      },
+      "id": 2201,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "( rate(pg_stat_checkpointer_write_time_seconds_total{job=\"$job\", instance=\"$instance\"}[$__rate_interval]) + rate(pg_stat_checkpointer_sync_time_seconds_total{job=\"$job\", instance=\"$instance\"}[$__rate_interval]) ) / clamp_min( rate(pg_stat_checkpointer_timed_total{job=\"$job\", instance=\"$instance\"}[$__rate_interval]) + rate(pg_stat_checkpointer_requested_total{job=\"$job\", instance=\"$instance\"}[$__rate_interval]), 1) / 1000",
+          "legendFormat": "avg write+sync per checkpoint",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "pg_settings_checkpoint_timeout_seconds{job=\"$job\", instance=\"$instance\"}",
+          "legendFormat": "checkpoint_timeout (setting)",
+          "refId": "B"
+        }
+      ],
+      "title": "Avg Checkpoint Write+Sync Time per Checkpoint",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Seconds since the last completed checkpoint (pg_last_checkpoint_age_seconds). On a healthy primary this oscillates between 0 and checkpoint_timeout (yellow). A value climbing far past checkpoint_timeout indicates a stalled or severely lagging checkpointer. Works on all supported PostgreSQL versions.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "checkpoint_timeout (setting)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "yellow",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 94
+      },
+      "id": 2202,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "pg_last_checkpoint_age_seconds{job=\"$job\", instance=\"$instance\"}",
+          "legendFormat": "time since last checkpoint",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "pg_settings_checkpoint_timeout_seconds{job=\"$job\", instance=\"$instance\"}",
+          "legendFormat": "checkpoint_timeout (setting)",
+          "refId": "B"
+        }
+      ],
+      "title": "Time Since Last Checkpoint",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "WAL bytes generated since the last checkpoint's redo point (pg_wal_bytes_since_last_checkpoint). This is also the amount of WAL replayed on crash recovery (RTO proxy). IMPORTANT: a WAL-driven (requested) checkpoint does NOT fire at max_wal_size (yellow) \u2014 Postgres triggers it at roughly max_wal_size / (2 + checkpoint_completion_target) (e.g. ~1/3 of max_wal_size) to leave room to spread checkpoint writes, so the peak plateaus well below the yellow line by design. Use it both ways: (1) INCREASE max_wal_size if the peak repeatedly plateaus around that ~1/3 point and the 'Checkpoints by Trigger' panel shows 'requested' dominating \u2014 checkpoints are WAL-driven, so a larger max_wal_size spaces them out (fewer checkpoints, fewer full-page images). Raising checkpoint_timeout alone will not help in that case. (2) DECREASE max_wal_size if the peak stays far below even that trigger and checkpoints are already 'timed' \u2014 it is oversized; shrink it to reclaim pg_wal disk and cap recovery volume, leaving margin above the observed peak. Caveat: a larger max_wal_size also means longer crash recovery (RTO). Works on all supported PostgreSQL versions.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bytes"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "max_wal_size (setting)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "yellow",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 102
+      },
+      "id": 2203,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "pg_wal_bytes_since_last_checkpoint{job=\"$job\", instance=\"$instance\"}",
+          "legendFormat": "WAL since last checkpoint",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "pg_settings_max_wal_size_bytes{job=\"$job\", instance=\"$instance\"}",
+          "legendFormat": "max_wal_size (setting)",
+          "refId": "B"
+        }
+      ],
+      "title": "WAL Since Last Checkpoint (Recovery Volume)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Rate of checkpoints by trigger. 'timed' = fired by checkpoint_timeout; 'requested' = fired by other causes, primarily WAL reaching max_wal_size (also manual CHECKPOINT). If 'requested' dominates, checkpoints are WAL-driven and you should tune max_wal_size, not just checkpoint_timeout. Requires PostgreSQL 17+.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "cps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 102
+      },
+      "id": 2204,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "rate(pg_stat_checkpointer_timed_total{job=\"$job\", instance=\"$instance\"}[$__rate_interval])",
+          "legendFormat": "timed",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "rate(pg_stat_checkpointer_requested_total{job=\"$job\", instance=\"$instance\"}[$__rate_interval])",
+          "legendFormat": "requested",
+          "refId": "B"
+        }
+      ],
+      "title": "Checkpoints by Trigger (Timed vs Requested)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 110
       },
       "id": 111,
       "panels": [],
@@ -1789,7 +2316,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 94
+        "y": 111
       },
       "id": 2117,
       "options": {
@@ -1839,7 +2366,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 94
+        "y": 111
       },
       "id": 2118,
       "options": {
@@ -1902,7 +2429,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 102
+        "y": 119
       },
       "id": 2119,
       "options": {
@@ -1964,7 +2491,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 102
+        "y": 119
       },
       "id": 2121,
       "options": {
@@ -1996,7 +2523,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 148
+        "y": 165
       },
       "id": 102,
       "panels": [
@@ -2571,7 +3098,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 149
+        "y": 166
       },
       "id": 2122,
       "panels": [
@@ -3146,7 +3673,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 150
+        "y": 167
       },
       "id": 103,
       "panels": [
@@ -4357,7 +4884,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 151
+        "y": 168
       },
       "id": 104,
       "panels": [
@@ -4464,7 +4991,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 110
+        "y": 127
       },
       "id": 105,
       "panels": [],
@@ -4531,7 +5058,7 @@
         "h": 6,
         "w": 12,
         "x": 0,
-        "y": 110
+        "y": 127
       },
       "id": 2129,
       "options": {
@@ -4622,7 +5149,7 @@
         "h": 6,
         "w": 12,
         "x": 12,
-        "y": 110
+        "y": 127
       },
       "id": 2130,
       "options": {
@@ -4713,7 +5240,7 @@
         "h": 6,
         "w": 12,
         "x": 0,
-        "y": 116
+        "y": 133
       },
       "id": 2135,
       "options": {
@@ -4804,7 +5331,7 @@
         "h": 6,
         "w": 12,
         "x": 12,
-        "y": 116
+        "y": 133
       },
       "id": 2131,
       "options": {
@@ -4895,7 +5422,7 @@
         "h": 6,
         "w": 12,
         "x": 0,
-        "y": 122
+        "y": 139
       },
       "id": 2132,
       "options": {
@@ -4964,7 +5491,7 @@
         "h": 4,
         "w": 12,
         "x": 0,
-        "y": 136
+        "y": 153
       },
       "id": 2136,
       "options": {
@@ -5032,7 +5559,7 @@
         "h": 4,
         "w": 12,
         "x": 12,
-        "y": 136
+        "y": 153
       },
       "id": 2137,
       "options": {
@@ -5122,7 +5649,7 @@
         "h": 6,
         "w": 12,
         "x": 12,
-        "y": 122
+        "y": 139
       },
       "id": 2133,
       "options": {
@@ -5213,7 +5740,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 128
+        "y": 145
       },
       "id": 2134,
       "options": {
@@ -5304,7 +5831,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 128
+        "y": 145
       },
       "id": 17,
       "options": {
@@ -5395,7 +5922,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 140
+        "y": 157
       },
       "id": 18,
       "options": {
@@ -5433,7 +5960,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 152
+        "y": 169
       },
       "id": 106,
       "panels": [
@@ -5606,7 +6133,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 153
+        "y": 170
       },
       "id": 107,
       "panels": [
@@ -5731,7 +6258,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 154
+        "y": 171
       },
       "id": 108,
       "panels": [
@@ -5929,7 +6456,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 155
+        "y": 172
       },
       "id": 110,
       "panels": [
@@ -6589,7 +7116,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 156
+        "y": 173
       },
       "id": 1000,
       "panels": [
@@ -7221,7 +7748,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 175
+        "y": 192
       },
       "id": 200,
       "panels": [
@@ -8156,7 +8683,7 @@
   "timezone": "browser",
   "title": "PostgreSQL Monitoring Dashboard",
   "uid": "pg_exporter_monitoring",
-  "version": 1,
+  "version": 5,
   "weekStart": "",
   "description": "PostgreSQL Performance Monitoring Dashboard This dashboard provides comprehensive monitoring for PostgreSQL databases using pg_exporter metrics. KEY SECTIONS: - Instance Information: PostgreSQL version, settings, and uptime - Critical Alerts: Connection pool utilization and performance warnings - Connection Analysis: Active connections, idle transactions, and connection age - Query Performance: Top queries by execution time, calls, and I/O (requires pg_stat_statements extension) - Cache & I/O: Buffer cache hit ratios, shared buffers, and I/O operations - Locks & Blocking: Lock monitoring and blocking query detection - Vacuum & Maintenance: Autovacuum activity, table bloat, and maintenance statistics - WAL: WAL throughput, record activity, buffer pressure, and FPI ratio - Replication: lag, role, and max replication lag bytes (requires replication collector) - Table Statistics: DML operations and table-level activity - Database Size: Database growth and size trends REQUIREMENTS: - PostgreSQL 14+ - pg_stat_statements extension enabled for query performance metrics - Appropriate monitoring user permissions For more information, visit: https://github.com/nbari/pg_exporter"
 }

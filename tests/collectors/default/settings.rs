@@ -163,3 +163,42 @@ async fn test_settings_collector_memory_settings_are_reasonable() -> Result<()> 
     pool.close().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn test_settings_collector_exposes_wal_size_settings() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+    let collector = SettingsCollector::new();
+    let registry = Registry::new();
+
+    collector.register_metrics(&registry)?;
+    collector.collect(&pool).await?;
+
+    let metric_families = registry.gather();
+
+    // max_wal_size and min_wal_size are reported by pg_settings in MB and must be
+    // converted to bytes; both should be present and positive.
+    for setting_name in [
+        "pg_settings_max_wal_size_bytes",
+        "pg_settings_min_wal_size_bytes",
+    ] {
+        let fam = metric_families
+            .iter()
+            .find(|m| m.name() == setting_name)
+            .unwrap_or_else(|| panic!("{setting_name} should exist"));
+
+        let value = common::metric_value_to_i64(fam.get_metric()[0].get_gauge().value());
+        assert!(
+            value > 0,
+            "{setting_name} should be positive (bytes), got {value}"
+        );
+        // A sane lower bound: the PostgreSQL default min_wal_size is 80MB and
+        // max_wal_size is 1GB, so after MB->bytes conversion both exceed 1 MiB.
+        assert!(
+            value >= 1024 * 1024,
+            "{setting_name} should be converted to bytes (>= 1 MiB), got {value}"
+        );
+    }
+
+    pool.close().await;
+    Ok(())
+}

@@ -148,10 +148,10 @@ async fn drop_test_database(admin_dsn: &str, database_name: &str) -> Result<()> 
     .await
     .with_context(|| format!("Failed to terminate connections to database {database_name}"))?;
 
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
         "DROP DATABASE IF EXISTS {} WITH (FORCE)",
         quoted_identifier(database_name)
-    ))
+    )))
     .execute(&admin_pool)
     .await
     .with_context(|| format!("Failed to drop database {database_name}"))?;
@@ -183,10 +183,10 @@ impl IsolatedTestDatabase {
             .context("Failed to connect to administrative test database")?;
         let database_name = next_test_database_name(prefix);
 
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(&*format!(
             "CREATE DATABASE {} TEMPLATE template0",
             quoted_identifier(&database_name)
-        ))
+        )))
         .execute(&admin_pool)
         .await
         .with_context(|| format!("Failed to create database {database_name}"))?;

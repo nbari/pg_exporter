@@ -5,11 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.11.1] - Unreleased
+## [0.12.0] - Unreleased
 
 ### Added
+- **Checkpoint Tuning Metrics**: Added `pg_last_checkpoint_age_seconds` and `pg_wal_bytes_since_last_checkpoint` (sourced from `pg_control_checkpoint()`, available on all supported PostgreSQL versions) plus `pg_settings_max_wal_size_bytes` and `pg_settings_min_wal_size_bytes`. Together with the existing `pg_stat_checkpointer_*` counters these expose the `checkpoint_timeout` / `max_wal_size` / storage tradeoff: achieved checkpoint interval, checkpointer liveness, crash-recovery (RTO) volume, and whether checkpoints are time-driven or WAL-driven.
+- **Checkpoints Dashboard Section**: Added a Grafana "Checkpoints" row with four panels (avg write+sync time per checkpoint, time since last checkpoint, WAL since last checkpoint, and checkpoints by trigger). Yellow reference lines overlay the live `checkpoint_timeout` and `max_wal_size` settings so they track configuration changes automatically.
+- **Checkpoint Tuning Guide**: Added `src/collectors/default/README.md` documenting the checkpoint metrics and a metrics-driven decision tree for tuning `checkpoint_timeout` and `max_wal_size`.
 - **24h Rust Soak Toolkit**: Added `scripts/benchmark/run-rust-soak.sh`, `scripts/benchmark/check-rust-soak.sh`, and a dedicated Grafana soak dashboard (`scripts/benchmark/rust-soak-dashboard.json`) to run phased long-duration stress tests and collect reliability/performance artifacts.
 - **Idle Connection Triage Panel**: Added a dedicated Grafana panel ranking databases by idle, idle-in-transaction, and aborted-idle-in-transaction connection pressure so connection culprits are visible without drilling into broader state charts.
+
+### Changed
+- **Dependency Upgrades**: Upgraded major dependencies including `sqlx` 0.8 → 0.9, `tower-http` 0.6 → 0.7, the OpenTelemetry stack (`opentelemetry`, `opentelemetry-otlp`, `opentelemetry_sdk`, `opentelemetry-http`) 0.31 → 0.32, `tracing-opentelemetry` 0.32 → 0.33, and `sysinfo` 0.38 → 0.39, plus compatible bumps across the tree.
+- **sqlx 0.9 Compatibility**: Adapted dynamic SQL call sites to sqlx 0.9's `SqlSafeStr` requirement using `AssertSqlSafe`, and enabled the `serde` `derive` feature explicitly (no longer pulled in transitively by sqlx).
+
+### Fixed
+- **Test Pool Close Deadlock**: Fixed a connection-collector test that held a pooled connection across `Pool::close()`, which deadlocks under sqlx 0.9's stricter close semantics that wait for all checked-out connections to be returned.
 
 ## [0.11.0] - 2026-03-07
 

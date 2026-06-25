@@ -388,14 +388,14 @@ async fn test_checkpointer_collector_all_counters_valid_after_activity() -> Resu
     // Generate some database activity
     let mut tx = pool.begin().await?;
     for i in 0..10 {
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(&*format!(
             "CREATE TEMP TABLE checkpointer_activity_{i} (data TEXT)"
-        ))
+        )))
         .execute(&mut *tx)
         .await?;
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(&*format!(
             "INSERT INTO checkpointer_activity_{i} SELECT 'test' FROM generate_series(1, 50)"
-        ))
+        )))
         .execute(&mut *tx)
         .await?;
     }
@@ -436,6 +436,130 @@ async fn test_checkpointer_collector_all_counters_valid_after_activity() -> Resu
         .find(|m| m.name() == "pg_stat_checkpointer_sync_time_seconds_total")
         .expect("sync_time should exist");
     assert!(sync_time.get_metric()[0].get_counter().value() >= 0.0);
+
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_checkpointer_collector_has_control_checkpoint_metrics() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+    let registry = Registry::new();
+    let collector = CheckpointerCollector::new();
+
+    collector.register_metrics(&registry)?;
+    collector.collect(&pool).await?;
+
+    let families = registry.gather();
+    for metric_name in [
+        "pg_last_checkpoint_age_seconds",
+        "pg_wal_bytes_since_last_checkpoint",
+    ] {
+        assert!(
+            families.iter().any(|m| m.name() == metric_name),
+            "Metric {} should exist. Found: {:?}",
+            metric_name,
+            families
+                .iter()
+                .map(prometheus::proto::MetricFamily::name)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_checkpointer_control_checkpoint_metrics_are_gauges() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+    let registry = Registry::new();
+    let collector = CheckpointerCollector::new();
+
+    collector.register_metrics(&registry)?;
+    collector.collect(&pool).await?;
+
+    let families = registry.gather();
+    for metric_name in [
+        "pg_last_checkpoint_age_seconds",
+        "pg_wal_bytes_since_last_checkpoint",
+    ] {
+        let fam = families
+            .iter()
+            .find(|m| m.name() == metric_name)
+            .unwrap_or_else(|| panic!("Metric {metric_name} should exist"));
+
+        assert_eq!(
+            fam.get_field_type(),
+            prometheus::proto::MetricType::GAUGE,
+            "Metric {metric_name} should be a GAUGE"
+        );
+        assert!(
+            !fam.help().is_empty(),
+            "Metric {metric_name} should have help text"
+        );
+    }
+
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_checkpointer_control_checkpoint_values_non_negative() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+    let registry = Registry::new();
+    let collector = CheckpointerCollector::new();
+
+    collector.register_metrics(&registry)?;
+    // On a primary test instance both values should be populated and non-negative.
+    collector.collect(&pool).await?;
+
+    let families = registry.gather();
+    for metric_name in [
+        "pg_last_checkpoint_age_seconds",
+        "pg_wal_bytes_since_last_checkpoint",
+    ] {
+        let fam = families
+            .iter()
+            .find(|m| m.name() == metric_name)
+            .unwrap_or_else(|| panic!("Metric {metric_name} should exist"));
+        for m in fam.get_metric() {
+            let v = m.get_gauge().value();
+            assert!(
+                v >= 0.0,
+                "Metric {metric_name} should be non-negative, got {v}"
+            );
+            assert_eq!(
+                m.get_label().len(),
+                0,
+                "Metric {metric_name} should have no labels"
+            );
+        }
+    }
+
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_checkpointer_control_checkpoint_idempotent() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+    let registry = Registry::new();
+    let collector = CheckpointerCollector::new();
+
+    collector.register_metrics(&registry)?;
+
+    // Repeated collections must not error and must keep the gauges valid.
+    for _ in 0..3 {
+        collector.collect(&pool).await?;
+    }
+
+    let families = registry.gather();
+    let age = families
+        .iter()
+        .find(|m| m.name() == "pg_last_checkpoint_age_seconds")
+        .expect("age metric should exist");
+    assert!(age.get_metric()[0].get_gauge().value() >= 0.0);
 
     pool.close().await;
     Ok(())

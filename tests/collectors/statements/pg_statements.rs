@@ -314,7 +314,7 @@ async fn test_pg_statements_handles_multibyte_utf8_query_boundary() -> Result<()
         "a".repeat(65)
     );
     let sql = format!("SELECT 1 AS \"{identifier}\"");
-    let _ = sqlx::query(&sql).execute(pool).await;
+    let _ = sqlx::query(sqlx::AssertSqlSafe(&*sql)).execute(pool).await;
     let _ = sqlx::query("SELECT pg_stat_force_next_flush()")
         .execute(pool)
         .await;

@@ -345,12 +345,14 @@ async fn test_wal_collector_bytes_increases() -> Result<()> {
     // Generate WAL activity
     let mut tx = pool.begin().await?;
     for i in 0..100 {
-        sqlx::query(&format!("CREATE TEMP TABLE wal_bytes_test_{i} (data TEXT)"))
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(&*format!(
+            "CREATE TEMP TABLE wal_bytes_test_{i} (data TEXT)"
+        )))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(sqlx::AssertSqlSafe(&*format!(
             "INSERT INTO wal_bytes_test_{i} SELECT 'test' FROM generate_series(1, 10)"
-        ))
+        )))
         .execute(&mut *tx)
         .await?;
     }
@@ -461,12 +463,14 @@ async fn test_wal_collector_all_counters_valid_after_activity() -> Result<()> {
     // Generate some database activity
     let mut tx = pool.begin().await?;
     for i in 0..10 {
-        sqlx::query(&format!("CREATE TEMP TABLE wal_activity_{i} (data TEXT)"))
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(&*format!(
+            "CREATE TEMP TABLE wal_activity_{i} (data TEXT)"
+        )))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(sqlx::AssertSqlSafe(&*format!(
             "INSERT INTO wal_activity_{i} SELECT 'test' FROM generate_series(1, 50)"
-        ))
+        )))
         .execute(&mut *tx)
         .await?;
     }

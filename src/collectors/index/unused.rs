@@ -113,7 +113,9 @@ impl Collector for UnusedIndexCollector {
             );
 
             let (unused_count, unused_size_bytes): (i64, i64) =
-                sqlx::query_as(&unused_query).fetch_one(pool).await?;
+                sqlx::query_as(sqlx::AssertSqlSafe(unused_query.as_str()))
+                    .fetch_one(pool)
+                    .await?;
 
             // Query for invalid indexes
             let invalid_query = format!(
@@ -127,7 +129,10 @@ impl Collector for UnusedIndexCollector {
                 "
             );
 
-            let (invalid_count,): (i64,) = sqlx::query_as(&invalid_query).fetch_one(pool).await?;
+            let (invalid_count,): (i64,) =
+                sqlx::query_as(sqlx::AssertSqlSafe(invalid_query.as_str()))
+                    .fetch_one(pool)
+                    .await?;
 
             // Update metrics
             self.unused_count.set(i64_to_f64(unused_count));

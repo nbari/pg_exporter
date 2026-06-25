@@ -378,7 +378,7 @@ impl Collector for DatabaseStatCollector {
                 db.sql.table = "pg_stat_database"
             );
 
-            let rows = sqlx::query(&sql)
+            let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
                 .bind(&excluded_list)
                 .fetch_all(pool)
                 .instrument(span_q)

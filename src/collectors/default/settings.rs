@@ -70,6 +70,8 @@ impl SettingsCollector {
                 'maintenance_work_mem',
                 'max_connections',
                 'max_locks_per_transaction',
+                'max_wal_size',
+                'min_wal_size',
                 'shared_buffers',
                 'synchronous_commit',
                 'wal_buffers',
@@ -107,6 +109,8 @@ impl SettingsCollector {
                     | "maintenance_work_mem"
                     | "work_mem"
                     | "wal_buffers"
+                    | "max_wal_size"
+                    | "min_wal_size"
             ) && let Some(ref u) = unit
             {
                 value *= match u.as_str() {
@@ -188,6 +192,16 @@ impl Collector for SettingsCollector {
                 "max_locks_per_transaction",
                 "pg_settings_max_locks_per_transaction",
                 "PostgreSQL setting: max_locks_per_transaction",
+            ),
+            (
+                "max_wal_size",
+                "pg_settings_max_wal_size_bytes",
+                "PostgreSQL setting: max_wal_size in bytes",
+            ),
+            (
+                "min_wal_size",
+                "pg_settings_min_wal_size_bytes",
+                "PostgreSQL setting: min_wal_size in bytes",
             ),
             (
                 "shared_buffers",
