@@ -8,6 +8,10 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:$PATH"
 cd /workspaces/pg_exporter 2>/dev/null || exit 0
 
+# Re-apply optional git identity/signing on every start so updates to forwarded
+# DevPod workspace env are reflected without rebuilding the container.
+sh .devcontainer/configure-git.sh || true
+
 PG_HOST="${PG_HOST:-postgres}"
 PG_PORT="${PG_PORT:-5432}"
 

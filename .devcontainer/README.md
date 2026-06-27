@@ -77,6 +77,26 @@ just test                    # runs against the postgres service (no host DB nee
 and uses the host 1Password SSH agent when present. Plain `devpod up .` works too
 for the local config.
 
+If you manage identity in `.envrc`, load it before starting DevPod:
+
+```bash
+export GIT_USER_NAME="nbari"
+export GIT_USER_EMAIL="nbari@tequila.io"
+export GIT_SIGNING_KEY="ssh-ed25519 ..."
+scripts/dev-up
+```
+
+When those variables are present, the workspace configures:
+
+```bash
+git config --global user.name "$GIT_USER_NAME"
+git config --global user.email "$GIT_USER_EMAIL"
+git config --global gpg.format ssh
+git config --global gpg.ssh.program "$(command -v ssh-keygen)"
+git config --global user.signingkey "$GIT_SIGNING_KEY"
+git config --global commit.gpgsign true
+```
+
 Or in VS Code: **Dev Containers: Reopen in Container**.
 
 #### SSH config (`--ssh-config`)

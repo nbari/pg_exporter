@@ -14,6 +14,9 @@ export PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:$PATH"
 # which can resolve paths from an unexpected CWD under MISE_CONFIG_FILE.
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Apply optional git identity/signing forwarded from the host by scripts/dev-up.
+sh "$REPO_ROOT/.devcontainer/configure-git.sh"
+
 # 1. The cargo/rustup/mise volume mounts can be created as root by the runtime, so
 #    take ownership up front before vscode writes into them.
 sudo mkdir -p \
@@ -125,6 +128,10 @@ apply_dotfiles() {
 }
 # Run in a subshell so the `set +e` above stays contained to this best-effort step.
 (apply_dotfiles)
+
+# Dotfiles may write git config after the first setup pass. Re-apply the forwarded
+# identity/signing config last so commit signing stays stable.
+sh "$REPO_ROOT/.devcontainer/configure-git.sh"
 
 echo "✓ postCreate complete: toolchain ready (just, rustfmt, clippy, psql, pgbench, slick)."
 echo "  PostgreSQL is at \$PG_HOST:\$PG_PORT (postgres:5432). Run: just test"
