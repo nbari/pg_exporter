@@ -5,7 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.12.0] - Unreleased
+## [0.13.0] - Unreleased
+
+### Added
+- **Blocking & Lock-Contention Metrics**: The `locks` collector now exposes `pg_blocked_sessions`, `pg_blocking_sessions`, `pg_longest_blocked_seconds`, and `pg_lock_waits{mode}` (ungranted locks by mode). These surface *who* is blocked, *who* is blocking, *how long* the worst wait has lasted, and *which* lock type is contended — the missing signals for diagnosing "a few queries are blocking the whole database".
+- **On-CPU Backends Metric**: The `activity` collector now exposes `pg_stat_activity_on_cpu_backends` (active client backends with `wait_event IS NULL`, i.e. actually running on CPU). Compared against the instance vCPU count this is the cleanest CPU-saturation signal, especially for instances without a connection pooler.
+- **Database-Pressure Diagnostics Guide**: Added `docs/diagnosing-database-pressure.md` with metrics-driven recipes for high CPU, blocking/lock contention, missing indexes (seq-scan vs index-scan PromQL), and connection saturation without pgbouncer.
+- **Dashboard Panels**: Added Grafana panels for blocked vs blocking sessions, longest lock wait, ungranted lock waits by mode (Locks & Blocking row); average rows per seq scan, index-usage ratio, and seq-scan rate (Table Statistics row); and a new "CPU Pressure" row for on-CPU backends.
+- **DevPod / Dev Containers Workspace**: Added a compose-based DevPod setup with an `app` container, PostgreSQL 18 with `pg_stat_statements`, mise-managed tooling, `scripts/dev-up`, `scripts/dev-ssh`, and a portable devcontainer config for Docker/remote providers.
+- **Devcontainer Observability Stack**: Added `just metrics-dev` / `just metrics-dev-stop` for on-demand Prometheus + Grafana inside the devcontainer compose network, scraping the exporter at `app:9432` with dashboard hot-reload.
+- **SQL Triage Recipes**: Added `just blocking`, `just on-cpu`, `just long-running`, `just seq-scans`, `just connections`, `just bloat`, and `just top-queries` for drilling from dashboard symptoms into live PostgreSQL sessions, locks, tables, and queries.
+
+### Changed
+- **CI Network Resilience**: Hardened GitHub Actions Rust downloads with cargo/rustup retry and transport settings to reduce transient hosted-runner failures.
+
+## [0.12.0] - 2026-06-25
 
 ### Added
 - **Checkpoint Tuning Metrics**: Added `pg_last_checkpoint_age_seconds` and `pg_wal_bytes_since_last_checkpoint` (sourced from `pg_control_checkpoint()`, available on all supported PostgreSQL versions) plus `pg_settings_max_wal_size_bytes` and `pg_settings_min_wal_size_bytes`. Together with the existing `pg_stat_checkpointer_*` counters these expose the `checkpoint_timeout` / `max_wal_size` / storage tradeoff: achieved checkpoint interval, checkpointer liveness, crash-recovery (RTO) volume, and whether checkpoints are time-driven or WAL-driven.

@@ -1,0 +1,17 @@
+# Local override for rootless Podman (merged on top of compose.yaml by the local
+# devcontainer.json). Maps the container user to the host user so the bind-mounted
+# workspace stays editable as `vscode` without subuid ownership skew, and forwards
+# the host 1Password SSH agent so signed git commits work inside the container.
+# Not needed on the remote (docker) flow, where keep-id is unnecessary and unsupported.
+
+services:
+  app:
+    userns_mode: keep-id
+    environment:
+      # Use the host 1Password SSH agent for git over SSH and SSH commit signing.
+      SSH_AUTH_SOCK: /home/vscode/.1password/agent.sock
+      OP_AGENT_SOCK: /home/vscode/.1password/agent.sock
+    volumes:
+      # Mount the host's 1Password agent directory (contains agent.sock). Remove or
+      # comment this out if you do not use 1Password.
+      - ${HOME}/.1password:/home/vscode/.1password

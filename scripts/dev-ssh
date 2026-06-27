@@ -1,0 +1,25 @@
+#!/usr/bin/env sh
+set -eu
+
+# Enter or run a command in the pg_exporter DevPod workspace.
+#
+# DevPod v0.6.x accepts --ssh-config on `devpod up`, not on `devpod ssh`.
+# This wrapper keeps the working directory and command syntax consistent.
+
+workspace_name="${PG_EXPORTER_DEVPOD_ID:-pg-exporter}"
+workspace_dir="${PG_EXPORTER_DEVPOD_WORKDIR:-/workspaces/pg_exporter}"
+
+if ! command -v devpod >/dev/null 2>&1; then
+    echo "Error: devpod not found on host (https://devpod.sh)." >&2
+    exit 1
+fi
+
+if [ "$#" -eq 0 ]; then
+    exec devpod --silent ssh "$workspace_name" --workdir "$workspace_dir"
+fi
+
+command_string="$*"
+exec devpod --silent ssh "$workspace_name" \
+    --workdir "$workspace_dir" \
+    --start-services=false \
+    --command "$command_string"

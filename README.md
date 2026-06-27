@@ -151,11 +151,11 @@ Priority order: `PG_EXPORTER_DSN_FILE` > `PG_EXPORTER_DSN` > `--dsn` flag > defa
 The following collectors are available:
 
 * `--collector.default` [default](src/collectors/default/README.md) - Cheap, always-on signals (version, settings, bgwriter, checkpointer, archiver, WAL). Includes checkpoint tuning-insight metrics; see the [checkpoint tuning guide](src/collectors/default/README.md#why-tune-checkpoint_timeout-5m-vs-30m).
-* `--collector.activity` [activity](src/collectors/activity/mod.rs)
+* `--collector.activity` [activity](src/collectors/activity/mod.rs) - Connection states, pool saturation, idle-age buckets, and `pg_stat_activity_on_cpu_backends` (active backends not waiting = on CPU). See the [database-pressure diagnostics guide](docs/diagnosing-database-pressure.md).
 * `--collector.database` [database](src/collectors/database/mod.rs)
 * `--collector.vacuum` [vacuum](src/collectors/vacuum/mod.rs)
-* `--collector.locks` [locks](src/collectors/locks/mod.rs)
-* `--collector.stat` [stat](src/collectors/stat/mod.rs)
+* `--collector.locks` [locks](src/collectors/locks/mod.rs) - Lock counts plus blocking diagnostics (`pg_blocked_sessions`, `pg_blocking_sessions`, `pg_longest_blocked_seconds`, `pg_lock_waits`). See the [database-pressure diagnostics guide](docs/diagnosing-database-pressure.md#2-blocking--lock-contention).
+* `--collector.stat` [stat](src/collectors/stat/mod.rs) - Per-table `pg_stat_user_tables` stats; use the seq-scan vs index-scan signals to [find missing indexes](docs/diagnosing-database-pressure.md#3-missing-indexes).
 * `--collector.replication` [replication](src/collectors/replication/mod.rs)
 * `--collector.index` [index](src/collectors/index/mod.rs)
 * `--collector.statements` [statements](src/collectors/statements/README.md) - Query performance metrics from `pg_stat_statements` (see [detailed guide](src/collectors/statements/README.md))
@@ -183,6 +183,15 @@ For local observability testing with Prometheus and Grafana, a practical flow is
     just workload duration=120 clients=10
 
 `just workload` reuses `pgbench` to populate `pg_stat_statements` and generate live activity while you inspect `/metrics`, Prometheus, or Grafana.
+
+Inside the **devcontainer**, prefer the on-demand compose stack instead, which
+scrapes the exporter by service name (`app:9432`) and hot-reloads the dashboard:
+
+    just watch           # in the app container (exporter on app:9432)
+    just metrics-dev     # on the host: Grafana :3000 + Prometheus :9090
+    just metrics-dev-stop
+
+See [.devcontainer/README.md](.devcontainer/README.md#dashboards-prometheus--grafana--on-demand) for details (editing `grafana/dashboard.json` hot-reloads in Grafana within ~10s).
 
 For vacuum-specific testing, use:
 
@@ -302,6 +311,27 @@ Each collector can then be extended with more specific metrics. For example,
 the `vacuum` collector has two files: `progress.rs` and `stats.rs`, this allows
 for better organization and separation of concerns within the collector and
 better testability. (or that is the plan).
+
+## Dev Container (DevPod / Dev Containers)
+
+For a zero-setup, reproducible environment, the repo ships a compose-based
+[Dev Container](https://containers.dev) under [`.devcontainer/`](.devcontainer/). It
+bundles the Rust toolchain and a PostgreSQL service (with `pg_stat_statements`
+preloaded), so `just test` works out of the box on **Linux, macOS, and Linux Atomic**
+(e.g. fedora-atomic), locally or on a remote VM — no host database or container
+plumbing required.
+
+With [DevPod](https://devpod.sh):
+
+```bash
+scripts/dev-up                                          # build + start app + postgres
+scripts/dev-ssh                                         # shell in as vscode
+just test                                               # runs against the postgres service
+```
+
+Or open the folder in VS Code and choose **Dev Containers: Reopen in Container**.
+See [`.devcontainer/README.md`](.devcontainer/README.md) for details (including the
+`--ssh-config` / `Include ~/.ssh/devpod` setup used by `scripts/dev-up`).
 
 ## Testing
 

@@ -1,0 +1,16 @@
+apiVersion: 1
+
+# Dashboard provider for the devcontainer "observability" profile. The file is the
+# single source of truth: allowUiUpdates=false means the bind-mounted dashboard.json
+# always wins, and Grafana re-reads it every 10s (edit -> hot reload, no restart).
+providers:
+  - name: pg_exporter
+    orgId: 1
+    folder: ''
+    type: file
+    disableDeletion: false
+    allowUiUpdates: false
+    updateIntervalSeconds: 10
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false

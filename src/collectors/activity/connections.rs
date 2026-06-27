@@ -34,6 +34,9 @@ pub struct ConnectionsCollector {
     waiting_connections: IntGaugeVec, // pg_stat_activity_waiting_connections{datname}
     blocked_connections: IntGaugeVec, // pg_stat_activity_blocked_connections{datname}
 
+    // CPU pressure: active backends NOT waiting on anything = running on CPU.
+    on_cpu_backends: IntGaugeVec, // pg_stat_activity_on_cpu_backends{datname}
+
     // Connection pool saturation metrics (new - K8s focused)
     // Help prevent connection exhaustion in containerized environments
     max_connections: IntGauge, // Total allowed connections (from pg_settings)
@@ -96,6 +99,11 @@ impl ConnectionsCollector {
             "Number of client connections blocked by locks per database",
             &["datname"],
         );
+        let on_cpu_backends = int_gauge_vec(
+            "pg_stat_activity_on_cpu_backends",
+            "Number of active client backends NOT waiting on any event (running on CPU) per database; compare to vCPU count to gauge CPU saturation",
+            &["datname"],
+        );
 
         // Connection pool saturation metrics (new)
         let max_connections = int_gauge(
@@ -131,31 +139,13 @@ impl ConnectionsCollector {
             &["datname", "application_name"],
         );
 
-        let idle_age_short = int_gauge_vec(
-            "pg_stat_activity_idle_age_1m",
-            "Number of idle connections aged <1 minute per database",
-            &["datname"],
-        );
-        let idle_age_medium = int_gauge_vec(
-            "pg_stat_activity_idle_age_5m",
-            "Number of idle connections aged 1-5 minutes per database",
-            &["datname"],
-        );
-        let idle_age_extended = int_gauge_vec(
-            "pg_stat_activity_idle_age_15m",
-            "Number of idle connections aged 5-15 minutes per database",
-            &["datname"],
-        );
-        let idle_age_prolonged = int_gauge_vec(
-            "pg_stat_activity_idle_age_1h",
-            "Number of idle connections aged 15m-1h per database (investigate)",
-            &["datname"],
-        );
-        let idle_age_old = int_gauge_vec(
-            "pg_stat_activity_idle_age_old",
-            "Number of idle connections aged >1 hour per database (connection leak!)",
-            &["datname"],
-        );
+        let (
+            idle_age_short,
+            idle_age_medium,
+            idle_age_extended,
+            idle_age_prolonged,
+            idle_age_old,
+        ) = idle_age_gauges();
 
         Self {
             count_by_state,
@@ -163,6 +153,7 @@ impl ConnectionsCollector {
             idle_connections,
             waiting_connections,
             blocked_connections,
+            on_cpu_backends,
             max_connections,
             used_connections,
             utilization_ratio,
@@ -176,6 +167,23 @@ impl ConnectionsCollector {
             idle_age_1h: idle_age_prolonged,
             idle_age_old,
         }
+    }
+
+    fn reset_label_metrics(&self) {
+        self.count_by_state.reset();
+        self.active_connections.reset();
+        self.idle_connections.reset();
+        self.waiting_connections.reset();
+        self.blocked_connections.reset();
+        self.on_cpu_backends.reset();
+        self.idle_in_transaction.reset();
+        self.idle_in_transaction_aborted.reset();
+        self.connections_by_application.reset();
+        self.idle_age_1m.reset();
+        self.idle_age_5m.reset();
+        self.idle_age_15m.reset();
+        self.idle_age_1h.reset();
+        self.idle_age_old.reset();
     }
 }
 
@@ -197,6 +205,7 @@ impl Collector for ConnectionsCollector {
         registry.register(Box::new(self.idle_connections.clone()))?;
         registry.register(Box::new(self.waiting_connections.clone()))?;
         registry.register(Box::new(self.blocked_connections.clone()))?;
+        registry.register(Box::new(self.on_cpu_backends.clone()))?;
 
         // Register new pool saturation metrics
         registry.register(Box::new(self.max_connections.clone()))?;
@@ -220,23 +229,11 @@ impl Collector for ConnectionsCollector {
         level = "info",
         err,
         fields(collector="connections", otel.kind="internal")
-    )]
+        )]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             // 0) Reset all metrics to clear stale data (e.g. dropped databases, inactive applications)
-            self.count_by_state.reset();
-            self.active_connections.reset();
-            self.idle_connections.reset();
-            self.waiting_connections.reset();
-            self.blocked_connections.reset();
-            self.idle_in_transaction.reset();
-            self.idle_in_transaction_aborted.reset();
-            self.connections_by_application.reset();
-            self.idle_age_1m.reset();
-            self.idle_age_5m.reset();
-            self.idle_age_15m.reset();
-            self.idle_age_1h.reset();
-            self.idle_age_old.reset();
+            self.reset_label_metrics();
 
             // Build exclusion list from global OnceCell (set at startup via Clap/env).
             let excluded: Vec<String> = get_excluded_databases().to_vec();
@@ -341,7 +338,8 @@ impl Collector for ConnectionsCollector {
                 SELECT
                     a.datname,
                     COUNT(*) FILTER (WHERE a.wait_event IS NOT NULL)::bigint AS waiting,
-                    COUNT(*) FILTER (WHERE cardinality(pg_blocking_pids(a.pid)) > 0)::bigint AS blocked
+                    COUNT(*) FILTER (WHERE cardinality(pg_blocking_pids(a.pid)) > 0)::bigint AS blocked,
+                    COUNT(*) FILTER (WHERE a.state = 'active' AND a.wait_event IS NULL)::bigint AS on_cpu
                 FROM pg_stat_activity a
                 WHERE a.backend_type = 'client backend'
                   AND a.pid != pg_backend_pid()
@@ -357,6 +355,7 @@ impl Collector for ConnectionsCollector {
 
             let mut waiting_map: HashMap<String, i64> = HashMap::new();
             let mut blocked_map: HashMap<String, i64> = HashMap::new();
+            let mut on_cpu_map: HashMap<String, i64> = HashMap::new();
 
             for row in &wait_block_rows {
                 let db: String = row
@@ -364,10 +363,12 @@ impl Collector for ConnectionsCollector {
                     .unwrap_or_else(|| "[unknown]".to_string());
                 let waiting: i64 = row.try_get::<i64, _>("waiting").unwrap_or(0);
                 let blocked: i64 = row.try_get::<i64, _>("blocked").unwrap_or(0);
+                let on_cpu: i64 = row.try_get::<i64, _>("on_cpu").unwrap_or(0);
 
                 dbs_seen.insert(db.clone());
                 waiting_map.insert(db.clone(), waiting);
                 blocked_map.insert(db.clone(), blocked);
+                on_cpu_map.insert(db.clone(), on_cpu);
 
                 self.waiting_connections
                     .with_label_values(&[&db])
@@ -375,8 +376,9 @@ impl Collector for ConnectionsCollector {
                 self.blocked_connections
                     .with_label_values(&[&db])
                     .set(blocked);
+                self.on_cpu_backends.with_label_values(&[&db]).set(on_cpu);
 
-                debug!(database=%db, waiting, blocked, "set waiting/blocked gauges");
+                debug!(database=%db, waiting, blocked, on_cpu, "set waiting/blocked/on_cpu gauges");
             }
 
             // Ensure zeroes for databases seen in state query but not in wait/blocked (EXISTING)
@@ -386,6 +388,9 @@ impl Collector for ConnectionsCollector {
                 }
                 if !blocked_map.contains_key(db) {
                     self.blocked_connections.with_label_values(&[db]).set(0);
+                }
+                if !on_cpu_map.contains_key(db) {
+                    self.on_cpu_backends.with_label_values(&[db]).set(0);
                 }
             }
 
@@ -551,6 +556,43 @@ fn int_gauge_vec(name: &str, help: &str, labels: &[&str]) -> IntGaugeVec {
     IntGaugeVec::new(Opts::new(name, help), labels).expect("Failed to create gauge vec")
 }
 
+/// Builds the five idle-connection age-bucket gauges (<1m, 1-5m, 5-15m, 15m-1h, >1h).
+fn idle_age_gauges() -> (
+    IntGaugeVec,
+    IntGaugeVec,
+    IntGaugeVec,
+    IntGaugeVec,
+    IntGaugeVec,
+) {
+    (
+        int_gauge_vec(
+            "pg_stat_activity_idle_age_1m",
+            "Number of idle connections aged <1 minute per database",
+            &["datname"],
+        ),
+        int_gauge_vec(
+            "pg_stat_activity_idle_age_5m",
+            "Number of idle connections aged 1-5 minutes per database",
+            &["datname"],
+        ),
+        int_gauge_vec(
+            "pg_stat_activity_idle_age_15m",
+            "Number of idle connections aged 5-15 minutes per database",
+            &["datname"],
+        ),
+        int_gauge_vec(
+            "pg_stat_activity_idle_age_1h",
+            "Number of idle connections aged 15m-1h per database (investigate)",
+            &["datname"],
+        ),
+        int_gauge_vec(
+            "pg_stat_activity_idle_age_old",
+            "Number of idle connections aged >1 hour per database (connection leak!)",
+            &["datname"],
+        ),
+    )
+}
+
 #[allow(clippy::expect_used)]
 fn int_gauge(name: &str, help: &str) -> IntGauge {
     IntGauge::with_opts(Opts::new(name, help)).expect("Failed to create gauge")
@@ -559,4 +601,77 @@ fn int_gauge(name: &str, help: &str) -> IntGauge {
 #[allow(clippy::expect_used)]
 fn gauge(name: &str, help: &str) -> Gauge {
     Gauge::with_opts(Opts::new(name, help)).expect("Failed to create gauge")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ConnectionsCollector;
+    use prometheus::core::Collector;
+
+    fn collected_metric_count(metric_families: &[prometheus::proto::MetricFamily]) -> usize {
+        metric_families
+            .first()
+            .map_or(0, |metric_family| metric_family.get_metric().len())
+    }
+
+    macro_rules! set_stale_db_metric {
+        ($collector:ident, $field:ident) => {
+            $collector
+                .$field
+                .with_label_values(&["stale_db"])
+                .set(1);
+        };
+    }
+
+    macro_rules! assert_no_series {
+        ($collector:ident, $field:ident) => {
+            assert_eq!(collected_metric_count(&$collector.$field.collect()), 0);
+        };
+    }
+
+    #[test]
+    fn test_reset_label_metrics_clears_stale_series() {
+        let collector = ConnectionsCollector::new();
+
+        collector
+            .count_by_state
+            .with_label_values(&["stale_db", "active"])
+            .set(1);
+        set_stale_db_metric!(collector, active_connections);
+        set_stale_db_metric!(collector, idle_connections);
+        set_stale_db_metric!(collector, waiting_connections);
+        set_stale_db_metric!(collector, blocked_connections);
+        set_stale_db_metric!(collector, on_cpu_backends);
+        set_stale_db_metric!(collector, idle_in_transaction);
+        set_stale_db_metric!(collector, idle_in_transaction_aborted);
+        collector
+            .connections_by_application
+            .with_label_values(&["stale_db", "stale_app"])
+            .set(1);
+        set_stale_db_metric!(collector, idle_age_1m);
+        set_stale_db_metric!(collector, idle_age_5m);
+        set_stale_db_metric!(collector, idle_age_15m);
+        set_stale_db_metric!(collector, idle_age_1h);
+        set_stale_db_metric!(collector, idle_age_old);
+
+        collector.reset_label_metrics();
+
+        assert_eq!(collected_metric_count(&collector.count_by_state.collect()), 0);
+        assert_no_series!(collector, active_connections);
+        assert_no_series!(collector, idle_connections);
+        assert_no_series!(collector, waiting_connections);
+        assert_no_series!(collector, blocked_connections);
+        assert_no_series!(collector, on_cpu_backends);
+        assert_no_series!(collector, idle_in_transaction);
+        assert_no_series!(collector, idle_in_transaction_aborted);
+        assert_eq!(
+            collected_metric_count(&collector.connections_by_application.collect()),
+            0
+        );
+        assert_no_series!(collector, idle_age_1m);
+        assert_no_series!(collector, idle_age_5m);
+        assert_no_series!(collector, idle_age_15m);
+        assert_no_series!(collector, idle_age_1h);
+        assert_no_series!(collector, idle_age_old);
+    }
 }

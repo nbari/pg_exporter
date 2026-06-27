@@ -1,0 +1,45 @@
+{
+  "name": "pg_exporter (DevPod, compose portable)",
+  "dockerComposeFile": [
+    "compose.yaml"
+  ],
+  "service": "app",
+  "runServices": [
+    "app",
+    "postgres"
+  ],
+  "workspaceFolder": "/workspaces/pg_exporter",
+  "remoteUser": "vscode",
+  "overrideCommand": false,
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {
+      "installZsh": true,
+      "username": "vscode",
+      "upgradePackages": true
+    },
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/duduribeiro/devcontainer-features/neovim:1": {
+      "version": "stable"
+    }
+  },
+  "forwardPorts": [
+    9432
+  ],
+  "portsAttributes": {
+    "9432": {
+      "label": "pg_exporter metrics",
+      "onAutoForward": "silent"
+    }
+  },
+  "postCreateCommand": "bash .devcontainer/postcreate.sh",
+  "postStartCommand": "bash .devcontainer/post-start.sh",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "vadimcn.vscode-lldb"
+      ]
+    }
+  }
+}

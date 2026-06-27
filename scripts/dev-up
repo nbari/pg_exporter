@@ -1,0 +1,77 @@
+#!/usr/bin/env sh
+set -eu
+
+# One-command dev setup for pg_exporter (compose-based devcontainer).
+#
+# The dev container (`app`) AND its PostgreSQL service are defined in
+# .devcontainer/compose.yaml and brought up together by DevPod. The host only needs
+# podman (or docker) + devpod + Docker Compose v2. Works on Linux, macOS (podman
+# machine / Docker), and Linux Atomic (fedora-atomic).
+#
+# DevPod writes its managed SSH host entries to a dedicated file (~/.ssh/devpod) via
+# --ssh-config, instead of editing your main ~/.ssh/config. Add this line once to
+# ~/.ssh/config so ssh / VS Code can resolve the DevPod hosts:
+#
+#     Include ~/.ssh/devpod
+
+project_dir="$(
+    unset CDPATH
+    cd -- "$(dirname -- "$0")/.." && pwd
+)"
+# DevPod workspace ids allow only lowercase letters, numbers, and dashes (no
+# underscores), so use a dashed id even though the repo/compose project is pg_exporter.
+workspace_name="pg-exporter"
+ssh_config="${DEVPOD_SSH_CONFIG:-$HOME/.ssh/devpod}"
+
+if ! command -v devpod >/dev/null 2>&1; then
+    echo "Error: devpod not found on host (https://devpod.sh)." >&2
+    exit 1
+fi
+
+# podman machine on macOS needs a real XDG_RUNTIME_DIR.
+case "$(uname -s)" in
+Darwin)
+    case "${XDG_RUNTIME_DIR:-}" in
+    "" | /tmp/*) XDG_RUNTIME_DIR="${HOME}/.cache/xdg-runtime" ;;
+    esac
+    ;;
+*)
+    : "${XDG_RUNTIME_DIR:=/tmp/runtime-$(id -u)}"
+    ;;
+esac
+export XDG_RUNTIME_DIR
+mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null || true
+
+# Remind the user to wire up the dedicated DevPod ssh config (idempotent hint only;
+# we don't edit ~/.ssh/config for you).
+if [ "$ssh_config" = "$HOME/.ssh/devpod" ] &&
+    ! grep -qsE '^[[:space:]]*Include[[:space:]]+.*\.ssh/devpod' "$HOME/.ssh/config" 2>/dev/null; then
+    echo "Hint: add 'Include ~/.ssh/devpod' to ~/.ssh/config so ssh/VS Code can" >&2
+    echo "      resolve the DevPod hosts written by --ssh-config." >&2
+fi
+
+set -- --ide none --id "$workspace_name" --ssh-config "$ssh_config" "$@"
+
+# Optional 1Password SSH agent passthrough (for git signing inside the container).
+agent_sock="${HOME}/.1password/agent.sock"
+if [ -S "$agent_sock" ]; then
+    export SSH_AUTH_SOCK="$agent_sock"
+fi
+
+# Forward git identity and dotfiles settings so commits and shell setup work inside
+# the container. Do not forward GitHub tokens by default; the normal workflow does
+# not need them, and keeping secrets out of command arguments is safer.
+for var in GIT_USER_NAME GIT_USER_EMAIL GIT_SIGNING_KEY DEVPOD_DOTFILES; do
+    eval "value=\${$var:-}"
+    if [ "$value" != "" ]; then
+        set -- "$@" --init-env "$var=$value" --workspace-env "$var=$value"
+    fi
+done
+
+echo "==> Launching the pg_exporter workspace (app + postgres) via DevPod..."
+devpod up "$project_dir" "$@"
+
+echo "==> Done. Enter the workspace:"
+echo "      scripts/dev-ssh"
+echo "      # or: devpod ssh ${workspace_name} --workdir /workspaces/pg_exporter"
+echo "    Inside, run:  just test"

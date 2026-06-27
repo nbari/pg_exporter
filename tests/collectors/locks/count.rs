@@ -503,3 +503,131 @@ async fn test_locks_count_metric_format_validity() -> Result<()> {
     pool.close().await;
     Ok(())
 }
+
+// Registering and collecting the blocking diagnostics must succeed without error.
+// Note: empty IntGaugeVec/GaugeVec families (no blocking => no child series) are
+// intentionally omitted by Prometheus `gather()`, so presence is asserted under real
+// contention by `test_blocking_metrics_detect_real_block` instead.
+#[tokio::test]
+async fn test_blocking_metrics_registered() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+    let registry = Registry::new();
+    let collector = LocksCollector::new();
+
+    collector.register_metrics(&registry)?;
+    collector.collect(&pool).await?;
+
+    // Re-registering the same collector must fail, proving the new blocking metric
+    // families are registered in the registry.
+    assert!(
+        collector.register_metrics(&registry).is_err(),
+        "blocking metrics should already be registered (double registration must fail)"
+    );
+
+    pool.close().await;
+    Ok(())
+}
+
+// Blocking metrics must always collect cleanly with sane (non-negative) values.
+// Note: this does NOT assert zero blocking — tests run in parallel against a shared
+// database, so other tests may create genuine contention concurrently. The
+// zero-contention -> reflected-in-metrics path is covered by the isolated
+// `test_blocking_metrics_detect_real_block` test below.
+#[tokio::test]
+async fn test_blocking_metrics_non_negative() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+    let registry = Registry::new();
+    let collector = LocksCollector::new();
+
+    collector.register_metrics(&registry)?;
+    collector.collect(&pool).await?;
+
+    for fam in registry.gather() {
+        let name = fam.name();
+        if matches!(
+            name,
+            "pg_blocked_sessions"
+                | "pg_blocking_sessions"
+                | "pg_longest_blocked_seconds"
+                | "pg_lock_waits"
+        ) {
+            for m in fam.get_metric() {
+                let v = m.get_gauge().value();
+                assert!(v >= 0.0, "{name} must be non-negative, got {v}");
+            }
+        }
+    }
+
+    pool.close().await;
+    Ok(())
+}
+
+// Create a genuine lock-wait: tx1 holds ACCESS EXCLUSIVE, a second session blocks
+// trying to read the same table. The diagnostics must reflect the blocked/blocking
+// sessions, a positive wait age, and an ungranted lock wait.
+#[tokio::test]
+async fn test_blocking_metrics_detect_real_block() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+    sqlx::query("CREATE TABLE IF NOT EXISTS test_blocking_rel (id INT PRIMARY KEY)")
+        .execute(&pool)
+        .await?;
+
+    // Tx1 holds an ACCESS EXCLUSIVE lock and keeps it.
+    let mut tx1 = pool.begin().await?;
+    sqlx::query("LOCK TABLE test_blocking_rel IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *tx1)
+        .await?;
+
+    // Second session blocks: SELECT needs ACCESS SHARE, conflicts with ACCESS EXCLUSIVE.
+    let blocker_pool = pool.clone();
+    let blocked_task = tokio::spawn(async move {
+        let _ = sqlx::query("SELECT * FROM test_blocking_rel")
+            .fetch_optional(&blocker_pool)
+            .await;
+    });
+
+    // Allow the lock-wait to establish.
+    tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
+
+    let registry = Registry::new();
+    let collector = LocksCollector::new();
+    collector.register_metrics(&registry)?;
+    collector.collect(&pool).await?;
+
+    let families = registry.gather();
+    let sum = |name: &str| -> f64 {
+        families.iter().find(|m| m.name() == name).map_or(0.0, |f| {
+            f.get_metric().iter().map(|m| m.get_gauge().value()).sum()
+        })
+    };
+    let blocked = sum("pg_blocked_sessions");
+    let blocking = sum("pg_blocking_sessions");
+    let longest = sum("pg_longest_blocked_seconds");
+    let lock_waits = sum("pg_lock_waits");
+
+    // Release tx1 and let the blocked statement finish before asserting/cleanup.
+    tx1.commit().await?;
+    let _ = blocked_task.await;
+    sqlx::query("DROP TABLE IF EXISTS test_blocking_rel")
+        .execute(&pool)
+        .await?;
+    pool.close().await;
+
+    assert!(
+        blocked >= 1.0,
+        "expected >=1 blocked session, got {blocked}"
+    );
+    assert!(
+        blocking >= 1.0,
+        "expected >=1 blocking session, got {blocking}"
+    );
+    assert!(
+        longest > 0.0,
+        "expected longest_blocked_seconds > 0, got {longest}"
+    );
+    assert!(
+        lock_waits >= 1.0,
+        "expected >=1 ungranted lock wait, got {lock_waits}"
+    );
+    Ok(())
+}

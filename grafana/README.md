@@ -210,7 +210,7 @@ pg_exporter \
 
 ```ini
 [Service]
-Environment="POSTGRES_DSN=postgresql:///postgres?user=postgres_exporter"
+Environment="PG_EXPORTER_DSN=postgresql:///postgres?user=postgres_exporter"
 ExecStart=/usr/local/bin/pg_exporter \
     --collector.locks \
     --collector.database \
@@ -219,18 +219,6 @@ ExecStart=/usr/local/bin/pg_exporter \
     --collector.index \
     --collector.statements \
     --collector.exporter
-```
-
-#### Configuration file:
-
-```toml
-[collectors]
-locks = true
-database = true
-stat = true
-replication = true
-index = true
-statements = true
 ```
 
 **Note**: The `statements` collector requires the `pg_stat_statements` extension (see setup below).
@@ -264,7 +252,7 @@ sudo systemctl restart postgresql
 ### 4. Enable the Collector
 
 ```bash
-pg_exporter --enable-collector=statements
+pg_exporter --collector.statements
 ```
 
 ## Key Metrics for On-Call & Troubleshooting

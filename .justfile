@@ -16,17 +16,17 @@ default: test
 # Test suite
 test: clippy fmt
   @echo "🧪 Checking PostgreSQL..."
-  @if PGPASSWORD="${PGPASSWORD:-postgres}" psql -h localhost -p 5432 -U postgres -d postgres -c "SELECT 1" >/dev/null 2>&1; then \
-    echo "✅ PostgreSQL already reachable on localhost:5432 (using existing instance)"; \
+  @if PGPASSWORD="${PGPASSWORD:-postgres}" psql -h "${PG_HOST:-localhost}" -p "${PG_PORT:-5432}" -U postgres -d postgres -c "SELECT 1" >/dev/null 2>&1; then \
+    echo "✅ PostgreSQL already reachable on ${PG_HOST:-localhost}:${PG_PORT:-5432} (using existing instance)"; \
   elif command -v {{container_cmd}} >/dev/null 2>&1; then \
     echo "🚀 PostgreSQL not reachable, starting it with {{container_cmd}}..."; \
     just postgres; \
     echo "⏳ Waiting for PostgreSQL to be ready..."; \
     sleep 3; \
-    timeout 30 bash -c 'until PGPASSWORD="${PGPASSWORD:-postgres}" psql -h localhost -p 5432 -U postgres -d postgres -c "SELECT 1" &>/dev/null; do sleep 1; done' || (echo "❌ PostgreSQL failed to start" && exit 1); \
+    timeout 30 bash -c 'until PGPASSWORD="${PGPASSWORD:-postgres}" psql -h "${PG_HOST:-localhost}" -p "${PG_PORT:-5432}" -U postgres -d postgres -c "SELECT 1" &>/dev/null; do sleep 1; done' || (echo "❌ PostgreSQL failed to start" && exit 1); \
     echo "✅ PostgreSQL is ready"; \
   else \
-    echo "❌ PostgreSQL not reachable on localhost:5432 and no container runtime (podman/docker) found."; \
+    echo "❌ PostgreSQL not reachable on ${PG_HOST:-localhost}:${PG_PORT:-5432} and no container runtime (podman/docker) found."; \
     echo "   Start PostgreSQL yourself (e.g. run 'just postgres' on the host) or set PG_EXPORTER_CONTAINER_CMD."; \
     exit 1; \
   fi
@@ -35,7 +35,7 @@ test: clippy fmt
     scripts/setup-local-test-db.sh || (echo "❌ Test database setup failed. Fix the issues above before running tests." && exit 1); \
   fi
   @echo "🔧 Using local test database (overriding .envrc)..."
-  PG_EXPORTER_DSN="postgresql://postgres:postgres@localhost:5432/postgres" cargo test -- --nocapture
+  PG_EXPORTER_DSN="postgresql://postgres:${PGPASSWORD:-postgres}@${PG_HOST:-localhost}:${PG_PORT:-5432}/postgres" cargo test -- --nocapture
 
 # Run only the replication topology integration test (primary+replica via testcontainers)
 test-replica:
@@ -307,6 +307,66 @@ watch:
 curl:
   curl -s 0:9432/metrics
 
+# Show who is blocking whom right now (lock-wait root cause for the Grafana panels)
+blocking:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pg_host="${PG_HOST:-localhost}"; pg_port="${PG_PORT:-5432}"
+    PGPASSWORD="${PGPASSWORD:-postgres}" psql -h "${pg_host}" -p "${pg_port}" -U postgres \
+        -d "${PGDATABASE:-postgres}" -P pager=off -f scripts/blocking-tree.sql
+
+# Show what is running on CPU right now (CPU-saturation root cause for the Grafana panels)
+on-cpu:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pg_host="${PG_HOST:-localhost}"; pg_port="${PG_PORT:-5432}"
+    PGPASSWORD="${PGPASSWORD:-postgres}" psql -h "${pg_host}" -p "${pg_port}" -U postgres \
+        -d "${PGDATABASE:-postgres}" -P pager=off -f scripts/on-cpu-queries.sql
+
+# Show long-running and idle-in-transaction sessions (blocking / leak root cause)
+long-running:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pg_host="${PG_HOST:-localhost}"; pg_port="${PG_PORT:-5432}"
+    PGPASSWORD="${PGPASSWORD:-postgres}" psql -h "${pg_host}" -p "${pg_port}" -U postgres \
+        -d "${PGDATABASE:-postgres}" -P pager=off -f scripts/long-running.sql
+
+# Show tables most likely missing an index (high seq-scan, low index usage)
+seq-scans:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pg_host="${PG_HOST:-localhost}"; pg_port="${PG_PORT:-5432}"
+    PGPASSWORD="${PGPASSWORD:-postgres}" psql -h "${pg_host}" -p "${pg_port}" -U postgres \
+        -d "${PGDATABASE:-postgres}" -P pager=off -f scripts/seq-scans.sql
+
+# Show connection breakdown by database / user / application / state
+connections:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pg_host="${PG_HOST:-localhost}"; pg_port="${PG_PORT:-5432}"
+    PGPASSWORD="${PGPASSWORD:-postgres}" psql -h "${pg_host}" -p "${pg_port}" -U postgres \
+        -d "${PGDATABASE:-postgres}" -P pager=off -f scripts/connections.sql
+
+# Show top tables by dead tuples (VACUUM / pg_repack candidates)
+bloat:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pg_host="${PG_HOST:-localhost}"; pg_port="${PG_PORT:-5432}"
+    PGPASSWORD="${PGPASSWORD:-postgres}" psql -h "${pg_host}" -p "${pg_port}" -U postgres \
+        -d "${PGDATABASE:-postgres}" -P pager=off -f scripts/bloat.sql
+
+# Show top queries by total execution time (requires pg_stat_statements)
+top-queries:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pg_host="${PG_HOST:-localhost}"; pg_port="${PG_PORT:-5432}"
+    if ! PGPASSWORD="${PGPASSWORD:-postgres}" psql -h "${pg_host}" -p "${pg_port}" -U postgres \
+        -d "${PGDATABASE:-postgres}" -tAc "SELECT 1 FROM pg_extension WHERE extname='pg_stat_statements'" | grep -q 1; then
+        echo "pg_stat_statements not installed. Enable it (shared_preload_libraries + CREATE EXTENSION pg_stat_statements)."; exit 1
+    fi
+    PGPASSWORD="${PGPASSWORD:-postgres}" psql -h "${pg_host}" -p "${pg_port}" -U postgres \
+        -d "${PGDATABASE:-postgres}" -P pager=off -f scripts/top-queries.sql
+
 # Run a live pgbench workload for local metrics testing
 workload duration="60" clients="5" scale="10" db="pgbench_test":
     #!/usr/bin/env bash
@@ -328,8 +388,13 @@ workload duration="60" clients="5" scale="10" db="pgbench_test":
         exit 1
     fi
 
-    if ! psql -h localhost -p 5432 -U postgres -d postgres -c "SELECT 1" >/dev/null 2>&1; then
-        echo "❌ PostgreSQL is not reachable on localhost:5432"
+    # Honor PG_HOST/PG_PORT/PGPASSWORD so this works both on the host (localhost)
+    # and inside the devcontainer (postgres service), matching the other recipes.
+    pg_host="${PG_HOST:-localhost}"
+    pg_port="${PG_PORT:-5432}"
+
+    if ! PGPASSWORD="${PGPASSWORD:-postgres}" psql -h "${pg_host}" -p "${pg_port}" -U postgres -d postgres -c "SELECT 1" >/dev/null 2>&1; then
+        echo "❌ PostgreSQL is not reachable on ${pg_host}:${pg_port}"
         echo "Start it first with: just postgres"
         exit 1
     fi
@@ -338,7 +403,7 @@ workload duration="60" clients="5" scale="10" db="pgbench_test":
     ./scripts/setup-local-test-db.sh --pgbench --pgbench-scale "${scale}"
 
     echo "🚀 Running pgbench workload against ${db} for ${duration}s with ${clients} clients..."
-    pgbench -h localhost -p 5432 -U postgres -c "${clients}" -T "${duration}" "${db}"
+    PGPASSWORD="${PGPASSWORD:-postgres}" pgbench -h "${pg_host}" -p "${pg_port}" -U postgres -c "${clients}" -T "${duration}" "${db}"
 
 # Create table churn and run a manual vacuum for vacuum-related collector testing
 vacuum-workflow scale="20" rounds="5" sample_mod="5" db="pgbench_test" table="pgbench_accounts":
@@ -434,11 +499,16 @@ test-all-pg:
     echo "🚀 Starting all PostgreSQL versions..."
     for v in "${VERSIONS[@]}"; do
         PORT="54${v}"
+        {{container_cmd}} rm -f pg${v} >/dev/null 2>&1 || true
         {{container_cmd}} run -d --name pg${v} \
             -e POSTGRES_PASSWORD=postgres \
             -e POSTGRES_USER=postgres \
             -p ${PORT}:5432 \
-            postgres:${v}-alpine >/dev/null 2>&1 || true
+            postgres:${v}-alpine \
+            postgres \
+            -c shared_preload_libraries=pg_stat_statements \
+            -c pg_stat_statements.track=all \
+            -c pg_stat_statements.max=10000 >/dev/null 2>&1 || true
     done
 
     echo "⏳ Waiting for PostgreSQL instances to be ready..."
@@ -447,6 +517,8 @@ test-all-pg:
     for v in "${VERSIONS[@]}"; do
         PORT="54${v}"
         timeout 30 bash -c "until {{container_cmd}} exec pg${v} pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done" || true
+        PGPASSWORD=postgres psql -h localhost -p "${PORT}" -U postgres -d postgres \
+            -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;" >/dev/null
     done
 
     echo ""
@@ -486,17 +558,26 @@ test-all-pg:
 # Test against specific PostgreSQL version
 test-pg version:
     #!/usr/bin/env bash
+    set -euo pipefail
+
     PORT="54{{version}}"
     echo "🐘 Starting PostgreSQL {{version}} on port ${PORT}..."
+    {{container_cmd}} rm -f pg{{version}} >/dev/null 2>&1 || true
     {{container_cmd}} run -d --name pg{{version}} \
         -e POSTGRES_PASSWORD=postgres \
         -e POSTGRES_USER=postgres \
         -p ${PORT}:5432 \
-        postgres:{{version}}-alpine
+        postgres:{{version}}-alpine \
+        postgres \
+        -c shared_preload_libraries=pg_stat_statements \
+        -c pg_stat_statements.track=all \
+        -c pg_stat_statements.max=10000
 
     echo "⏳ Waiting for PostgreSQL to be ready..."
     sleep 3
     timeout 30 bash -c "until {{container_cmd}} exec pg{{version}} pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done"
+    PGPASSWORD=postgres psql -h localhost -p "${PORT}" -U postgres -d postgres \
+        -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;" >/dev/null
 
     echo "🧪 Running tests..."
     PG_EXPORTER_DSN="postgresql://postgres:postgres@localhost:${PORT}/postgres" cargo test
@@ -562,6 +643,17 @@ metrics target="host.containers.internal:9432" image="pg-exporter-metrics-stack"
     -p 3000:3000 -p 9090:9090 \
     -v {{prom_volume}}:/var/lib/prometheus \
     {{image}}
+
+# On-demand Prometheus + Grafana INSIDE the devcontainer compose network: Prometheus
+# scrapes app:9432 by service name (no host networking) and Grafana hot-reloads
+# grafana/dashboard.json. Use with the exporter running in `app` (`just watch`).
+# Grafana http://localhost:3000, Prometheus http://localhost:9090
+metrics-dev:
+  @./scripts/metrics-dev up
+
+# Stop the on-demand devcontainer observability stack (Prometheus + Grafana)
+metrics-dev-stop:
+  @./scripts/metrics-dev down
 
 restart-metrics target="host.containers.internal:9432" image="pg-exporter-metrics-stack" name="metrics-stack" prom_volume="prom_data":
   #!/usr/bin/env bash

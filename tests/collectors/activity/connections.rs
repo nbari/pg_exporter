@@ -33,6 +33,7 @@ async fn test_connections_collector_has_all_metrics() -> Result<()> {
         "pg_stat_activity_idle_connections",
         "pg_stat_activity_waiting_connections",
         "pg_stat_activity_blocked_connections",
+        "pg_stat_activity_on_cpu_backends",
     ];
 
     for metric_name in expected_metrics {
@@ -302,5 +303,54 @@ async fn test_connections_collector_handles_query_error() -> Result<()> {
         "max_connections must stay at 0 on error path, got {gauge_value}"
     );
 
+    Ok(())
+}
+
+// An active query that burns CPU (no wait event) must be counted as on-CPU.
+// Uses generate_series (CPU-bound, wait_event IS NULL) rather than pg_sleep,
+// which would register a Timeout wait event and therefore NOT be on-CPU.
+#[tokio::test]
+async fn test_connections_collector_detects_on_cpu_backend() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+
+    let mut conn = pool.acquire().await?;
+    let query_handle = tokio::spawn(async move {
+        // CPU-heavy aggregate; runs for many seconds with wait_event = NULL, giving
+        // the poll loop below ample time to sample it as on-CPU.
+        let _ = sqlx::query("SELECT count(*) FROM generate_series(1, 2000000000)")
+            .execute(&mut *conn)
+            .await;
+        conn
+    });
+
+    let collector = ConnectionsCollector::new();
+    let registry = Registry::new();
+    collector.register_metrics(&registry)?;
+
+    // Poll until the backend is observed on-CPU (robust against scheduling/startup
+    // latency under load) or time out after ~6s.
+    let mut on_cpu_total = 0.0;
+    for _ in 0..30 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        collector.collect(&pool).await?;
+        on_cpu_total = registry
+            .gather()
+            .iter()
+            .find(|m| m.name() == "pg_stat_activity_on_cpu_backends")
+            .map_or(0.0, |f| {
+                f.get_metric().iter().map(|m| m.get_gauge().value()).sum()
+            });
+        if on_cpu_total >= 1.0 {
+            break;
+        }
+    }
+
+    query_handle.abort();
+    pool.close().await;
+
+    assert!(
+        on_cpu_total >= 1.0,
+        "expected at least one on-CPU backend while a CPU-bound query runs, got {on_cpu_total}"
+    );
     Ok(())
 }

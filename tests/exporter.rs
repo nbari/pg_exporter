@@ -18,11 +18,9 @@ fn collector_config(names: &[&str]) -> CollectorConfig {
 
 #[tokio::test]
 async fn test_exporter_database_connection() -> Result<()> {
-    let pool =
-        sqlx::PgPool::connect("postgresql://postgres:postgres@localhost:5432/postgres").await?;
+    let pool = sqlx::PgPool::connect(&common::get_test_dsn()).await?;
 
     let row: (i32,) = sqlx::query_as("SELECT 1").fetch_one(&pool).await?;
-
     assert_eq!(row.0, 1);
 
     pool.close().await;
@@ -304,8 +302,7 @@ async fn test_exporter_sets_application_name_on_database_sessions() -> Result<()
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let pool =
-        sqlx::PgPool::connect("postgresql://postgres:postgres@localhost:5432/postgres").await?;
+    let pool = sqlx::PgPool::connect(&common::get_test_dsn()).await?;
     let count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*)::bigint
          FROM pg_stat_activity

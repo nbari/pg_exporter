@@ -8,6 +8,13 @@ on:
     branches:
       - '*'
 
+# Harden against spurious crates.io/curl network failures on hosted runners.
+env:
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  RUSTUP_MAX_RETRIES: "10"
+
 jobs:
   format:
     name: Format

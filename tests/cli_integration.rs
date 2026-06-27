@@ -53,11 +53,13 @@ fn get_binary_path() -> &'static PathBuf {
             String::from_utf8_lossy(&output.stderr)
         );
 
-        // Construct path to the compiled binary
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("debug")
-            .join("pg_exporter")
+        // Construct path to the compiled binary. Honor CARGO_TARGET_DIR (e.g. the
+        // devcontainer overrides it) and fall back to <manifest>/target otherwise.
+        let target_dir = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+            || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"),
+            PathBuf::from,
+        );
+        target_dir.join("debug").join("pg_exporter")
     })
 }
 

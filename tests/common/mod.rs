@@ -43,14 +43,28 @@ pub fn get_test_dsn() -> String {
     let dsn = env::var("PG_EXPORTER_DSN")
         .unwrap_or_else(|_| "postgresql://postgres:postgres@localhost:5432/postgres".to_string());
 
-    // Safety check: ensure we're not accidentally testing against a remote database
-    if !dsn.contains("localhost") && !dsn.contains("127.0.0.1") && !dsn.contains("::1") {
+    // Safety check: ensure we're not accidentally testing against a remote database.
+    // The devcontainer runs PostgreSQL as a trusted, disposable compose sibling
+    // reachable as `postgres` (not localhost), so it opts in explicitly via
+    // PG_EXPORTER_TEST_ALLOW_NONLOCAL (set in .devcontainer/compose.yaml). For
+    // everyone else the guard stays strict.
+    let allow_nonlocal = env::var("PG_EXPORTER_TEST_ALLOW_NONLOCAL")
+        .is_ok_and(|v| matches!(v.as_str(), "1" | "true" | "TRUE"));
+
+    if !allow_nonlocal
+        && !dsn.contains("localhost")
+        && !dsn.contains("127.0.0.1")
+        && !dsn.contains("::1")
+    {
         eprintln!("WARNING: PG_EXPORTER_DSN points to a remote database!");
         eprintln!("DSN: {}", dsn.replace(char::is_alphanumeric, "*"));
         eprintln!("Tests should run against localhost only.");
         eprintln!("Use: just test (handles this automatically)");
         eprintln!(
             "Or:   PG_EXPORTER_DSN='postgresql://postgres:postgres@localhost:5432/postgres' cargo test"
+        );
+        eprintln!(
+            "(In a devcontainer with a trusted local postgres service, set PG_EXPORTER_TEST_ALLOW_NONLOCAL=1.)"
         );
         panic!("Refusing to run tests against remote database. Use localhost.");
     }

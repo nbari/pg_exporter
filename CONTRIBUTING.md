@@ -13,6 +13,12 @@ just postgres
 just test
 ```
 
+> **Prefer a zero-setup environment?** The repo ships a compose-based
+> [Dev Container](.devcontainer/README.md) (Rust + PostgreSQL with
+> `pg_stat_statements`). With [DevPod](https://devpod.sh): `scripts/dev-up`, then
+> `just test` inside — works on Linux, macOS, and fedora-atomic with no host
+> database. See [`.devcontainer/README.md`](.devcontainer/README.md).
+
 ---
 
 ## Local Setup
