@@ -1,8 +1,16 @@
-use crate::collectors::{Collector, i64_to_f64, util::{PG_CATALOG, INFORMATION_SCHEMA}};
-use anyhow::Result;
+use crate::collectors::i64_to_f64;
+use crate::collectors::util::{
+    get_default_database, get_excluded_databases, get_or_create_pool_for_db,
+};
+use crate::collectors::Collector;
+use anyhow::{Result, anyhow};
 use futures::future::BoxFuture;
-use prometheus::{Gauge, Opts, Registry};
-use sqlx::PgPool;
+use prometheus::{GaugeVec, Opts, Registry};
+use sqlx::{PgPool, Row, postgres::PgRow};
+use std::time::Duration;
+use tokio::task::JoinSet;
+use tracing::{debug, error, info_span, instrument};
+use tracing_futures::Instrument as _;
 
 /// Collector for index usage statistics from `pg_stat_user_indexes`
 ///
@@ -10,37 +18,68 @@ use sqlx::PgPool;
 /// Tracks index usage patterns including scan counts, tuples read/fetched, and size metrics.
 /// Helps identify which indexes are being used effectively and which may be candidates for removal.
 ///
-/// **Key metrics:**
-/// - `pg_index_scans_total`: Number of index scans initiated on this index
+/// **Key metrics (labeled by `datname`):**
+/// - `pg_index_scans_total`: Number of index scans initiated on indexes in the database
 /// - `pg_index_tuples_read_total`: Number of index entries returned by scans
 /// - `pg_index_tuples_fetched_total`: Number of live table rows fetched by index scans
-/// - `pg_index_size_bytes`: Size of the index in bytes
+/// - `pg_index_size_bytes`: Total size of user indexes in the database, in bytes
 /// - `pg_index_valid`: Count of valid user indexes
+///
+/// **Multi-database:**
+/// `pg_stat_user_indexes` is a per-database catalog, so this collector iterates every
+/// connectable, non-excluded database (like `pg_stat_user_tables`) and labels each series
+/// by `datname`. Connecting to a single database (e.g. `postgres`) is therefore enough to
+/// observe index metrics across the whole cluster.
 ///
 /// **Why it matters:**
 /// - Low or zero scans indicate unused indexes that waste disk space and slow writes
 /// - Invalid indexes (from failed CREATE INDEX CONCURRENTLY) must be dropped and recreated
 /// - Large indexes with low usage suggest schema optimization opportunities
 /// - High `tuples_read` vs `tuples_fetched` ratio may indicate inefficient index usage
-///
-/// **Diagnostic use cases:**
-/// - Identify indexes safe to drop (`idx_scan` = 0, not supporting constraints)
-/// - Detect failed concurrent index builds (indisvalid = false)
-/// - Calculate index bloat by comparing actual size to estimated optimal size
-/// - Monitor index usage patterns after `query` optimization changes
 #[derive(Clone)]
 pub struct IndexStatsCollector {
-    scans: Gauge,
-    tuples_read: Gauge,
-    tuples_fetched: Gauge,
-    size_bytes: Gauge,
-    valid: Gauge,
+    scans: GaugeVec,
+    tuples_read: GaugeVec,
+    tuples_fetched: GaugeVec,
+    size_bytes: GaugeVec,
+    valid: GaugeVec,
 }
 
 impl Default for IndexStatsCollector {
     fn default() -> Self {
         Self::new()
     }
+}
+
+const INDEX_STATS_LABELS: [&str; 1] = ["datname"];
+const PER_DATABASE_COLLECTION_TIMEOUT: Duration = Duration::from_secs(5);
+const TASK_JOIN_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Per-database aggregate of index usage statistics.
+///
+/// `pg_stat_user_indexes` only lists indexes in the current database, so this query is
+/// executed once per database and tagged with `current_database()`.
+const INDEX_STATS_QUERY: &str = r"
+    SELECT
+        current_database() AS datname,
+        COALESCE(SUM(s.idx_scan), 0)::bigint AS total_scans,
+        COALESCE(SUM(s.idx_tup_read), 0)::bigint AS total_tup_read,
+        COALESCE(SUM(s.idx_tup_fetch), 0)::bigint AS total_tup_fetch,
+        COALESCE(SUM(pg_relation_size(s.indexrelid)), 0)::bigint AS total_size_bytes,
+        COALESCE(SUM(i.indisvalid::int), 0)::bigint AS valid_count
+    FROM pg_stat_user_indexes s
+    JOIN pg_index i ON s.indexrelid = i.indexrelid
+    WHERE s.schemaname NOT IN ('pg_catalog', 'information_schema')
+    ";
+
+#[derive(Clone, Debug)]
+struct IndexStatsSample {
+    datname: String,
+    scans: i64,
+    tuples_read: i64,
+    tuples_fetched: i64,
+    size_bytes: i64,
+    valid: i64,
 }
 
 impl IndexStatsCollector {
@@ -53,32 +92,68 @@ impl IndexStatsCollector {
     #[allow(clippy::expect_used)]
     pub fn new() -> Self {
         Self {
-            scans: Gauge::with_opts(Opts::new(
-                "pg_index_scans_total",
-                "Number of index scans initiated on this index",
-            ))
+            scans: GaugeVec::new(
+                Opts::new(
+                    "pg_index_scans_total",
+                    "Number of index scans initiated on indexes in this database",
+                ),
+                &INDEX_STATS_LABELS,
+            )
             .expect("Failed to create pg_index_scans_total"),
-            tuples_read: Gauge::with_opts(Opts::new(
-                "pg_index_tuples_read_total",
-                "Number of index entries returned by scans on this index",
-            ))
+            tuples_read: GaugeVec::new(
+                Opts::new(
+                    "pg_index_tuples_read_total",
+                    "Number of index entries returned by scans on indexes in this database",
+                ),
+                &INDEX_STATS_LABELS,
+            )
             .expect("Failed to create pg_index_tuples_read_total"),
-            tuples_fetched: Gauge::with_opts(Opts::new(
-                "pg_index_tuples_fetched_total",
-                "Number of live table rows fetched by simple index scans using this index",
-            ))
+            tuples_fetched: GaugeVec::new(
+                Opts::new(
+                    "pg_index_tuples_fetched_total",
+                    "Number of live table rows fetched by simple index scans in this database",
+                ),
+                &INDEX_STATS_LABELS,
+            )
             .expect("Failed to create pg_index_tuples_fetched_total"),
-            size_bytes: Gauge::with_opts(Opts::new(
-                "pg_index_size_bytes",
-                "Size of the index in bytes",
-            ))
+            size_bytes: GaugeVec::new(
+                Opts::new(
+                    "pg_index_size_bytes",
+                    "Total size of user indexes in this database, in bytes",
+                ),
+                &INDEX_STATS_LABELS,
+            )
             .expect("Failed to create pg_index_size_bytes"),
-            valid: Gauge::with_opts(Opts::new(
-                "pg_index_valid",
-                "Count of valid user indexes",
-            ))
+            valid: GaugeVec::new(
+                Opts::new(
+                    "pg_index_valid",
+                    "Count of valid user indexes in this database",
+                ),
+                &INDEX_STATS_LABELS,
+            )
             .expect("Failed to create pg_index_valid"),
         }
+    }
+
+    fn reset_metrics(&self) {
+        self.scans.reset();
+        self.tuples_read.reset();
+        self.tuples_fetched.reset();
+        self.size_bytes.reset();
+        self.valid.reset();
+    }
+
+    fn sample_from_row(row: &PgRow) -> Result<IndexStatsSample> {
+        Ok(IndexStatsSample {
+            datname: row
+                .try_get::<Option<String>, _>("datname")?
+                .unwrap_or_else(|| "[unknown]".to_string()),
+            scans: row.try_get("total_scans").unwrap_or(0),
+            tuples_read: row.try_get("total_tup_read").unwrap_or(0),
+            tuples_fetched: row.try_get("total_tup_fetch").unwrap_or(0),
+            size_bytes: row.try_get("total_size_bytes").unwrap_or(0),
+            valid: row.try_get("valid_count").unwrap_or(0),
+        })
     }
 }
 
@@ -96,40 +171,165 @@ impl Collector for IndexStatsCollector {
         Ok(())
     }
 
+    #[instrument(
+        skip(self, pool),
+        level = "info",
+        err,
+        fields(collector = "index_stats", otel.kind = "internal")
+    )]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            // Query pg_stat_user_indexes joined with pg_class for size and pg_index for validity
-            // Excludes system databases and tracks key index health metrics
-            let query = format!(
-                r"
-                SELECT 
-                    COALESCE(SUM(s.idx_scan), 0)::BIGINT as total_scans,
-                    COALESCE(SUM(s.idx_tup_read), 0)::BIGINT as total_tup_read,
-                    COALESCE(SUM(s.idx_tup_fetch), 0)::BIGINT as total_tup_fetch,
-                    COALESCE(SUM(pg_relation_size(s.indexrelid)), 0)::BIGINT as total_size_bytes,
-                    COALESCE(SUM(i.indisvalid::int), 0)::BIGINT as valid_count
-                FROM pg_stat_user_indexes s
-                JOIN pg_index i ON s.indexrelid = i.indexrelid
-                WHERE s.schemaname NOT IN ('{PG_CATALOG}', '{INFORMATION_SCHEMA}')
-                "
+            // 1) Discover connectable, non-excluded databases via the shared pool.
+            let excluded = get_excluded_databases().to_vec();
+            let db_list_span = info_span!(
+                "db.query",
+                otel.kind = "client",
+                db.system = "postgresql",
+                db.operation = "SELECT",
+                db.statement = "SELECT datname FROM pg_database WHERE datallowconn ...",
+                db.sql.table = "pg_database"
             );
+            let dbs: Vec<String> = sqlx::query_scalar(
+                r"
+                SELECT datname
+                FROM pg_database
+                WHERE datallowconn
+                  AND NOT datistemplate
+                  AND NOT (datname = ANY($1))
+                ORDER BY datname
+                ",
+            )
+            .bind(&excluded)
+            .fetch_all(pool)
+            .instrument(db_list_span)
+            .await?;
 
-            let (total_scans, total_tup_read, total_tup_fetch, total_size_bytes, valid_count): (
-                i64,
-                i64,
-                i64,
-                i64,
-                i64,
-            ) = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
-                .fetch_one(pool)
-                .await?;
+            let shared_pool = pool.clone();
+            let default_db = get_default_database().map(std::string::ToString::to_string);
 
-            // Update metrics
-            self.scans.set(i64_to_f64(total_scans));
-            self.tuples_read.set(i64_to_f64(total_tup_read));
-            self.tuples_fetched.set(i64_to_f64(total_tup_fetch));
-            self.size_bytes.set(i64_to_f64(total_size_bytes));
-            self.valid.set(i64_to_f64(valid_count));
+            // 2) One task per DB: reuse shared pool for the default DB, tiny pool for others.
+            let mut tasks: JoinSet<Result<Option<IndexStatsSample>>> = JoinSet::new();
+
+            for datname in dbs {
+                let shared_pool = shared_pool.clone();
+                let default_db = default_db.clone();
+
+                tasks.spawn(async move {
+                    let datname_for_timeout = datname.clone();
+                    let use_shared = default_db.as_deref() == Some(datname.as_str());
+
+                    let query_span = info_span!(
+                        "db.query",
+                        otel.kind = "client",
+                        db.system = "postgresql",
+                        db.operation = "SELECT",
+                        db.statement = "SELECT ... FROM pg_stat_user_indexes",
+                        db.sql.table = "pg_stat_user_indexes",
+                        datname = %datname,
+                        reuse_pool = use_shared
+                    );
+
+                    tokio::time::timeout(PER_DATABASE_COLLECTION_TIMEOUT, async move {
+                        let row_res: anyhow::Result<Option<PgRow>> = if use_shared {
+                            sqlx::query(INDEX_STATS_QUERY)
+                                .fetch_optional(&shared_pool)
+                                .instrument(query_span)
+                                .await
+                                .map_err(Into::into)
+                        } else {
+                            match get_or_create_pool_for_db(&datname).await {
+                                Ok(per_db_pool) => sqlx::query(INDEX_STATS_QUERY)
+                                    .fetch_optional(&per_db_pool)
+                                    .instrument(query_span)
+                                    .await
+                                    .map_err(Into::into),
+                                Err(e) => Err(e),
+                            }
+                        };
+
+                        match row_res? {
+                            Some(row) => Ok(Some(Self::sample_from_row(&row)?)),
+                            None => Ok(None),
+                        }
+                    })
+                    .await
+                    .map_err(|_| {
+                        anyhow!(
+                            "index_stats timed out collecting metrics for database {datname_for_timeout} after {PER_DATABASE_COLLECTION_TIMEOUT:?}"
+                        )
+                    })?
+                });
+            }
+
+            let mut all_samples = Vec::new();
+            let mut failures = Vec::new();
+            while !tasks.is_empty() {
+                match tokio::time::timeout(TASK_JOIN_WAIT_TIMEOUT, tasks.join_next()).await {
+                    Ok(Some(Ok(Ok(Some(sample))))) => all_samples.push(sample),
+                    Ok(Some(Ok(Ok(None)))) => {}
+                    Ok(Some(Ok(Err(e)))) => {
+                        error!(error=?e, "index_stats: task returned error");
+                        failures.push(e.to_string());
+                    }
+                    Ok(Some(Err(e))) => {
+                        error!(error=?e, "index_stats: task join error");
+                        failures.push(e.to_string());
+                    }
+                    Ok(None) => break,
+                    Err(_) => {
+                        let pending_tasks = tasks.len();
+                        tasks.abort_all();
+                        failures.push(format!(
+                            "timed out waiting for {pending_tasks} database collection task(s) after {TASK_JOIN_WAIT_TIMEOUT:?}"
+                        ));
+                        break;
+                    }
+                }
+            }
+
+            if all_samples.is_empty() && !failures.is_empty() {
+                return Err(anyhow!(
+                    "index_stats collection failed for {} database task(s): {}",
+                    failures.len(),
+                    failures.join("; ")
+                ));
+            }
+
+            if !failures.is_empty() {
+                error!(
+                    failed_databases = failures.len(),
+                    errors = %failures.join("; "),
+                    "index_stats: continuing with partial snapshot after per-database failures"
+                );
+            }
+
+            self.reset_metrics();
+
+            for sample in &all_samples {
+                let labels = [sample.datname.as_str()];
+                self.scans
+                    .with_label_values(&labels)
+                    .set(i64_to_f64(sample.scans));
+                self.tuples_read
+                    .with_label_values(&labels)
+                    .set(i64_to_f64(sample.tuples_read));
+                self.tuples_fetched
+                    .with_label_values(&labels)
+                    .set(i64_to_f64(sample.tuples_fetched));
+                self.size_bytes
+                    .with_label_values(&labels)
+                    .set(i64_to_f64(sample.size_bytes));
+                self.valid
+                    .with_label_values(&labels)
+                    .set(i64_to_f64(sample.valid));
+
+                debug!(
+                    datname = %sample.datname,
+                    scans = sample.scans,
+                    size_bytes = sample.size_bytes,
+                    "updated pg_index stats metrics"
+                );
+            }
 
             Ok(())
         })
@@ -144,50 +344,23 @@ impl Collector for IndexStatsCollector {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn test_index_stats_collector_collects_from_database() {
-        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| String::new());
-
-        if database_url.is_empty() {
-            eprintln!("Skipping test: DATABASE_URL not set");
-            return;
-        }
-
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&database_url)
-            .await
-            .expect("Failed to connect to database");
-
-        let collector = IndexStatsCollector::new();
-        let registry = Registry::new();
-        collector
-            .register_metrics(&registry)
-            .expect("Failed to register metrics");
-
-        let result = collector.collect(&pool).await;
-        assert!(
-            result.is_ok(),
-            "Collection should succeed: {:?}",
-            result.err()
-        );
-
-        // Verify metrics are present (values will vary by database state)
-        let metrics = registry.gather();
-        assert!(!metrics.is_empty(), "Should have collected metrics");
-
-        let metric_names: Vec<String> = metrics.iter().map(|m| m.name().to_string()).collect();
-        assert!(metric_names.contains(&"pg_index_scans_total".to_string()));
-        assert!(metric_names.contains(&"pg_index_tuples_read_total".to_string()));
-        assert!(metric_names.contains(&"pg_index_tuples_fetched_total".to_string()));
-        assert!(metric_names.contains(&"pg_index_size_bytes".to_string()));
-        assert!(metric_names.contains(&"pg_index_valid".to_string()));
-    }
-
     #[test]
     fn test_index_stats_collector_name() {
         let collector = IndexStatsCollector::new();
         assert_eq!(collector.name(), "index_stats");
+    }
+
+    #[test]
+    fn test_index_stats_collector_registers() {
+        let registry = Registry::new();
+        let collector = IndexStatsCollector::new();
+        assert!(collector.register_metrics(&registry).is_ok());
+    }
+
+    #[test]
+    fn test_index_stats_query_is_per_database() {
+        assert!(INDEX_STATS_QUERY.contains("current_database() AS datname"));
+        assert!(INDEX_STATS_QUERY.contains("pg_stat_user_indexes"));
+        assert!(INDEX_STATS_QUERY.contains("::bigint"));
     }
 }

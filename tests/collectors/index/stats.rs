@@ -48,6 +48,18 @@ async fn test_index_stats_collector_has_all_metrics_after_collection() -> Result
         );
     }
 
+    // After the multi-database fix every index metric is labelled by datname.
+    for fam in registry.gather() {
+        if fam.name() == "pg_index_size_bytes" {
+            for m in fam.get_metric() {
+                assert!(
+                    m.get_label().iter().any(|l| l.name() == "datname"),
+                    "pg_index_size_bytes series must carry a datname label"
+                );
+            }
+        }
+    }
+
     pool.close().await;
     Ok(())
 }

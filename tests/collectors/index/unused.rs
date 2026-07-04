@@ -46,6 +46,18 @@ async fn test_unused_index_collector_has_all_metrics_after_collection() -> Resul
         );
     }
 
+    // After the multi-database fix every index metric is labelled by datname.
+    for fam in registry.gather() {
+        if fam.name() == "pg_index_unused_count" {
+            for m in fam.get_metric() {
+                assert!(
+                    m.get_label().iter().any(|l| l.name() == "datname"),
+                    "pg_index_unused_count series must carry a datname label"
+                );
+            }
+        }
+    }
+
     pool.close().await;
     Ok(())
 }

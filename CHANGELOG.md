@@ -5,7 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.13.0] - Unreleased
+## [0.13.1] - 2026-07-04
+
+### Changed
+- **Index Metrics Are Now Per-Database**: The `index` collector's metrics (`pg_index_scans_total`, `pg_index_tuples_read_total`, `pg_index_tuples_fetched_total`, `pg_index_size_bytes`, `pg_index_valid`, `pg_index_unused_count`, `pg_index_unused_size_bytes`, `pg_index_invalid_count`) now carry a `datname` label. The "Total Index Scans"/"Total Index Size" Grafana panels became per-database ("Index Scans by Database"/"Index Size by Database"); use `sum(...)` for a cluster-wide total.
+
+### Fixed
+- **Index Collector Multi-Database Support** ([#22](https://github.com/nbari/pg_exporter/issues/22), thanks @urbaned121): `--collector.index` queried the per-database catalog `pg_stat_user_indexes` only on the database named in the DSN, so index metrics reported 0 / no data for every other database (e.g. when connecting to `postgres` and excluding it). The collector now discovers all connectable, non-excluded databases and collects index statistics from each, reusing the shared per-database connection pooling in `collectors::util` (the same approach as the `stat` collector). A failing or unreachable database is skipped without failing the whole scrape.
+
+## [0.13.0] - 2026-06-27
 
 ### Added
 - **Blocking & Lock-Contention Metrics**: The `locks` collector now exposes `pg_blocked_sessions`, `pg_blocking_sessions`, `pg_longest_blocked_seconds`, and `pg_lock_waits{mode}` (ungranted locks by mode). These surface *who* is blocked, *who* is blocking, *how long* the worst wait has lasted, and *which* lock type is contended — the missing signals for diagnosing "a few queries are blocking the whole database".
