@@ -32,4 +32,12 @@ if [ "$signing_key" != "" ]; then
     mkdir -p "$(dirname "$allowed_signers")"
     printf '%s %s\n' "${GIT_USER_EMAIL:-$(git config --global --get user.email 2>/dev/null || printf '%s' '*')}" "$signing_key" >"$allowed_signers"
     git config --global --replace-all gpg.ssh.allowedSignersFile "$allowed_signers"
+
+    # DevPod re-injects `gpg.ssh.program=devpod-ssh-signature` into the GLOBAL
+    # config on every connect, after this script has run. Pin the native signer
+    # at the repository level as well: local config always wins and DevPod
+    # never rewrites it.
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        git config --replace-all gpg.ssh.program "$(command -v ssh-keygen || printf %s ssh-keygen)"
+    fi
 fi
