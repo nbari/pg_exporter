@@ -1,5 +1,5 @@
 use crate::collectors::util::{
-    get_default_database, get_excluded_databases, get_max_db_concurrency, get_or_create_pool_for_db,
+    get_default_database, get_excluded_databases, get_max_db_concurrency, open_db_connection,
 };
 use crate::collectors::{Collector, all_databases_failed, i64_to_f64};
 use anyhow::{Result, anyhow};
@@ -440,9 +440,9 @@ impl Collector for StatUserTablesCollector {
                                 .await
                                 .map_err(Into::into)
                         } else {
-                            match get_or_create_pool_for_db(&datname).await {
-                                Ok(per_db_pool) => sqlx::query(STAT_USER_TABLES_QUERY)
-                                    .fetch_all(&per_db_pool)
+                            match open_db_connection(&datname).await {
+                                Ok(mut conn) => sqlx::query(STAT_USER_TABLES_QUERY)
+                                    .fetch_all(&mut conn)
                                     .instrument(query_span)
                                     .await
                                     .map_err(Into::into),

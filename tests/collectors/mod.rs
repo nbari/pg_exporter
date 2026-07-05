@@ -6,6 +6,7 @@
 mod common;
 
 pub mod activity;
+pub mod connection;
 pub mod database;
 pub mod default;
 pub mod index;

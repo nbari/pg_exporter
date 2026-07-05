@@ -97,8 +97,28 @@ See [tests/TESTING.md](tests/TESTING.md) for detailed patterns and examples.
 2. **Always cast SQL numeric columns** - Use `::bigint` or `::double precision`  
 3. **Always check denominator before division** - Prevents division by zero
 4. **Always check extension availability** - Handle missing extensions gracefully
+5. **Keep per-database connections ephemeral** - Never cache a pool/connection per database
 
 See the code for inline comments explaining why these patterns matter.
+
+### Multi-Database Connection Model
+
+Per-database catalogs (`pg_stat_user_tables`, `pg_stat_user_indexes`, `pg_statio_*`) can only
+be read from a connection **to that database**, so the `stat`/`index` collectors fan out
+across databases. To keep the exporter's connection footprint safe on large or
+connection-constrained clusters (e.g. AWS RDS), that fan-out follows a strict model:
+
+- **Shared pool** (`src/exporter/mod.rs`, `max_connections(3)`): used by *every* collector for
+  the default database and all **cluster-wide** views (`pg_stat_activity`, `pg_locks`,
+  `pg_stat_replication`, `pg_stat_database`, `pg_stat_progress_*`). Those never need fan-out.
+- **Ephemeral per-database connections** (`util::open_db_connection`): opened per scrape query
+  and **closed on drop** — never cached. Combined with the `--collectors.max-db-concurrency`
+  semaphore (default 5), the peak per-database connection count is bounded by *concurrency*,
+  not by the *number of databases* (so 100 or 10,000 databases both peak at ~concurrency).
+
+**Do not reintroduce a per-database pool cache.** Caching pins ~one persistent connection per
+database and can exhaust `max_connections`. This invariant is locked by
+`tests/collectors/connection.rs` (fresh backend PID per call + closed on drop); keep it green.
 
 ---
 

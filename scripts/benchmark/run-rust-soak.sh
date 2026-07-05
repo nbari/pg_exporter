@@ -180,7 +180,7 @@ CFG
          sleep 2; \
          systemctl is-active pg_exporter; \
          curl -fsS http://127.0.0.1:9432/metrics | \
-         awk '/pg_stat_activity_count|pg_stat_user_tables_n_dead_tup|postgres_pg_stat_statements_calls_total|pg_exporter_collector_last_scrape_success/ {print; if (++n == 8) exit} END {if (n == 0) exit 1}'"
+         awk '/pg_stat_activity_count|pg_stat_user_tables_n_dead_tup|postgres_pg_stat_statements_calls_total|pg_exporter_collector_last_scrape_success/ {if (n < 8) print; n++} END {exit(n == 0)}'"
 }
 
 prepare_db() {

@@ -145,8 +145,6 @@ fn pg_stat_statements_requires_preload(error: &anyhow::Error) -> bool {
 }
 
 async fn drop_test_database(admin_dsn: &str, database_name: &str) -> Result<()> {
-    pg_exporter::collectors::util::drop_cached_pool_for_db(database_name).await;
-
     let admin_pool = PgPool::connect(admin_dsn)
         .await
         .context("Failed to connect to administrative test database")?;

@@ -1,6 +1,6 @@
 use crate::collectors::{
     i64_to_f64,
-    util::{get_default_database, get_excluded_databases, get_or_create_pool_for_db},
+    util::{get_default_database, get_excluded_databases, open_db_connection},
     Collector,
 };
 use anyhow::Result;
@@ -204,17 +204,17 @@ impl VacuumProgressCollector {
             return None;
         }
 
-        let pool = match get_or_create_pool_for_db(datname).await {
-            Ok(pool) => pool,
+        let mut conn = match open_db_connection(datname).await {
+            Ok(conn) => conn,
             Err(e) => {
-                debug!(database = %datname, error = %e, "vacuum_progress: cannot open pool to resolve table name");
+                debug!(database = %datname, error = %e, "vacuum_progress: cannot open connection to resolve table name");
                 return None;
             }
         };
 
         let resolve = sqlx::query_scalar::<_, String>(RESOLVE_RELID_QUERY)
             .bind(relid)
-            .fetch_optional(&pool);
+            .fetch_optional(&mut conn);
 
         match tokio::time::timeout(NAME_RESOLUTION_TIMEOUT, resolve).await {
             Ok(Ok(name)) => name,

@@ -1,15 +1,15 @@
 //! Shared utilities for collectors:
 //! - Global, read-only exclusion list of databases (set once at startup).
 //! - Parsed base connect options derived from the DSN to build per-database connections.
-//! - Cached tiny `PgPools` per non-default database (reuse across scrapes).
+//! - Ephemeral per-database connections (opened per scrape query, closed on drop) so the
+//!   exporter's connection footprint tracks scrape concurrency, not the database count.
 
 use anyhow::{Result, anyhow};
 use once_cell::sync::OnceCell;
 use secrecy::{ExposeSecret, SecretString};
-use sqlx::PgPool;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use std::{collections::HashMap, str::FromStr, sync::Arc};
-use tokio::sync::RwLock;
+use sqlx::Connection;
+use sqlx::postgres::{PgConnectOptions, PgConnection};
+use std::{str::FromStr, sync::Arc};
 
 /// Global holder for excluded databases, set once at startup via CLI/env.
 static EXCLUDED: OnceCell<Arc<[String]>> = OnceCell::new();
@@ -19,9 +19,6 @@ static BASE_OPTS: OnceCell<PgConnectOptions> = OnceCell::new();
 
 /// Default database name parsed from DSN.
 static DEFAULT_DB: OnceCell<String> = OnceCell::new();
-
-/// Cache of per-database tiny pools (only for non-default DBs).
-static POOLS: OnceCell<RwLock<HashMap<String, PgPool>>> = OnceCell::new();
 
 /// `PostgreSQL` version number (e.g., `140_000` for v14.0, `170_000` for v17.0).
 static PG_VERSION: OnceCell<i32> = OnceCell::new();
@@ -137,10 +134,6 @@ pub fn set_base_connect_options_from_dsn(dsn: &SecretString) -> Result<()> {
         let _ = DEFAULT_DB.set(dbname);
     }
 
-    if POOLS.get().is_none() {
-        let _ = POOLS.set(RwLock::new(HashMap::new()));
-    }
-
     Ok(())
 }
 
@@ -162,64 +155,31 @@ pub fn connect_options_for_db(datname: &str) -> Result<PgConnectOptions> {
     Ok(base.database(datname))
 }
 
-/// Get (or create) a tiny pool for the specified database. Only used for non-default DBs.
-/// The default DB should reuse the shared pool created at startup.
+/// Open a fresh connection to the specified non-default database.
+///
+/// Connections are intentionally **not** pooled or cached: the caller runs a single scrape
+/// query and drops the connection, which closes it. Combined with the per-collector
+/// concurrency limit, this bounds the exporter's per-database connection footprint to the
+/// concurrency limit — regardless of how many databases exist — instead of pinning one
+/// persistent connection per database (which would exhaust `max_connections` on large or
+/// connection-constrained clusters, e.g. AWS RDS). The default database must use the shared
+/// pool created at startup.
 ///
 /// # Errors
 ///
-/// Returns an error if pool creation or connection fails
-pub async fn get_or_create_pool_for_db(datname: &str) -> Result<PgPool> {
-    // Do not create a new pool for the default database.
+/// Returns an error if called for the default database, or if the connection fails.
+pub async fn open_db_connection(datname: &str) -> Result<PgConnection> {
     if let Some(def) = get_default_database()
         && def == datname
     {
         return Err(anyhow!(
-            "get_or_create_pool_for_db called for default database; use shared pool"
+            "open_db_connection called for default database; use shared pool"
         ));
     }
 
-    let pools = POOLS.get().ok_or_else(|| {
-        anyhow!("Pool cache not initialized; call set_base_connect_options_from_dsn()")
-    })?;
-
-    // Fast path: check cache
-    {
-        let guard = pools.read().await;
-        if let Some(pool) = guard.get(datname) {
-            return Ok(pool.clone());
-        }
-    }
-
-    // Create tiny pool for this DB
     let opts = connect_options_for_db(datname)?;
-    let pool = PgPoolOptions::new()
-        .max_connections(2)
-        .min_connections(0)
-        .acquire_timeout(std::time::Duration::from_secs(5))
-        .test_before_acquire(false)
-        .connect_with(opts)
-        .await?;
-
-    {
-        let mut guard = pools.write().await;
-        guard.insert(datname.to_string(), pool.clone());
-    }
-
-    Ok(pool)
-}
-
-/// Remove and close a cached per-database pool, if one exists.
-pub async fn drop_cached_pool_for_db(datname: &str) {
-    if let Some(pools) = POOLS.get() {
-        let removed = {
-            let mut guard = pools.write().await;
-            guard.remove(datname)
-        };
-
-        if let Some(pool) = removed {
-            pool.close().await;
-        }
-    }
+    let conn = PgConnection::connect_with(&opts).await?;
+    Ok(conn)
 }
 
 #[cfg(test)]

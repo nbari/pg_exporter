@@ -46,6 +46,14 @@ Clippy, or tests fail locally.
 - Guard all divisions against zero.
 - Handle missing extensions and version-specific features gracefully.
 - Keep behavior resilient when PostgreSQL is unavailable. `pg_up` should reflect DB state without crashing the exporter.
+- **Per-database connections must stay ephemeral.** The multi-database collectors (`stat`,
+  `index`, `index_unused`) query non-default databases via `util::open_db_connection`, which
+  opens a connection per scrape query and closes it on drop. Do **not** reintroduce a
+  per-database connection/pool cache: caching pins ~one persistent connection per database,
+  so the exporter's connection footprint would grow with the database count and exhaust
+  `max_connections` on large or connection-constrained clusters (e.g. AWS RDS). The footprint
+  must stay bounded by `--collectors.max-db-concurrency`, not the number of databases. This
+  invariant is locked by `tests/collectors/connection.rs`.
 
 ## Lint Contract
 
@@ -91,6 +99,15 @@ If you modify files under `src/collectors/`:
 - Clap is the authoritative runtime configuration entrypoint for collector options.
 - If a collector needs user-facing runtime options, define long-only CLI flags and their defaults in `src/cli/commands/options.rs`.
 - `src/collectors/config.rs` should carry typed values resolved from Clap; do not introduce a second source of truth for collector-option defaults there.
+- If a collector queries **other databases** (per-database catalogs like `pg_stat_user_tables`,
+  `pg_stat_user_indexes`, `pg_statio_*`), fan out with the bounded-concurrency pattern used by
+  `stat`/`index`: discover databases, gate tasks with a semaphore sized from
+  `util::get_max_db_concurrency()`, and open each per-database connection with
+  `util::open_db_connection` (ephemeral — closed on drop). Never cache a pool/connection per
+  database; see the ephemeral-connection rule under "Coding Rules" and the guard in
+  `tests/collectors/connection.rs`. Cluster-wide views (`pg_stat_activity`, `pg_locks`,
+  `pg_stat_replication`, `pg_stat_database`, `pg_stat_progress_*`) need only the shared pool —
+  do not fan out for those.
 
 ## Pre-Commit Expectations
 
