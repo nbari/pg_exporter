@@ -1,7 +1,8 @@
 use super::super::common;
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use pg_exporter::collectors::{Collector, vacuum::progress::VacuumProgressCollector};
 use prometheus::Registry;
+use std::time::{Duration, Instant};
 
 #[tokio::test]
 async fn test_vacuum_progress_collector_registers_without_error() -> Result<()> {
@@ -123,7 +124,7 @@ async fn test_vacuum_progress_collector_name() {
 }
 
 #[tokio::test]
-async fn test_vacuum_progress_collector_progress_percentage_is_valid() -> Result<()> {
+async fn test_vacuum_progress_collector_progress_ratio_is_valid() -> Result<()> {
     let pool = common::create_test_pool().await?;
 
     let collector = VacuumProgressCollector::new();
@@ -134,16 +135,16 @@ async fn test_vacuum_progress_collector_progress_percentage_is_valid() -> Result
 
     let metric_families = registry.gather();
 
-    // Check that progress percentage is in valid range (0-100)
+    // pg_vacuum_heap_progress is a 0.0-1.0 ratio (percentunit), not a 0-100 percentage.
     if let Some(progress_metric) = metric_families
         .iter()
         .find(|m| m.name() == "pg_vacuum_heap_progress")
     {
         for metric in progress_metric.get_metric() {
-            let value = common::metric_value_to_i64(metric.get_gauge().value());
+            let value = metric.get_gauge().value();
             assert!(
-                (0..=100).contains(&value),
-                "Progress percentage should be 0-100, got {value}"
+                (0.0..=1.0).contains(&value),
+                "Progress ratio should be within 0.0-1.0, got {value}"
             );
         }
     }
@@ -297,6 +298,117 @@ async fn test_vacuum_progress_collector_captures_actual_vacuum() -> Result<()> {
         .await?;
 
     pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vacuum_progress_resolves_table_name_in_other_database() -> Result<()> {
+    let test_db = common::IsolatedTestDatabase::new("vacuum_progress").await?;
+    let dbname = test_db.database_name().to_string();
+    let table_name = "test_vacuum_progress_cross_db";
+    let table_label = format!("public.{table_name}");
+
+    sqlx::query(
+        "CREATE TABLE test_vacuum_progress_cross_db (
+            id bigint PRIMARY KEY,
+            data text
+        )",
+    )
+    .execute(test_db.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO test_vacuum_progress_cross_db (id, data)
+         SELECT g, repeat('x', 200)
+         FROM generate_series(1, 250000) g",
+    )
+    .execute(test_db.pool())
+    .await?;
+    sqlx::query("DELETE FROM test_vacuum_progress_cross_db WHERE id % 3 = 0")
+        .execute(test_db.pool())
+        .await?;
+
+    let vacuum_pool = test_db.pool().clone();
+    let vacuum_task = tokio::spawn(async move {
+        sqlx::query("SET vacuum_cost_delay = '20ms'")
+            .execute(&vacuum_pool)
+            .await?;
+        sqlx::query("SET vacuum_cost_limit = 1")
+            .execute(&vacuum_pool)
+            .await?;
+        sqlx::query("VACUUM (VERBOSE) public.test_vacuum_progress_cross_db")
+            .execute(&vacuum_pool)
+            .await?;
+        Result::<()>::Ok(())
+    });
+
+    let pool = common::create_test_pool().await?;
+    let collector = VacuumProgressCollector::new();
+    let registry = Registry::new();
+    collector.register_metrics(&registry)?;
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut observed_labels = Vec::new();
+    let mut resolved = false;
+
+    while Instant::now() < deadline {
+        collector.collect(&pool).await?;
+        let metric_families = registry.gather();
+
+        if let Some(metric_family) = metric_families
+            .iter()
+            .find(|family| family.name() == "pg_vacuum_in_progress")
+        {
+            for metric in metric_family.get_metric() {
+                let database = metric
+                    .get_label()
+                    .iter()
+                    .find(|label| label.name() == "database")
+                    .map(prometheus::proto::LabelPair::value);
+                let table = metric
+                    .get_label()
+                    .iter()
+                    .find(|label| label.name() == "table")
+                    .map(prometheus::proto::LabelPair::value);
+
+                if let (Some(database), Some(table)) = (database, table) {
+                    observed_labels.push(format!("{database}:{table}"));
+
+                    if database == dbname && table == table_label {
+                        resolved = true;
+                        break;
+                    }
+
+                    assert!(
+                        database != dbname || !table.chars().all(|ch| ch.is_ascii_digit()),
+                        "vacuum_progress should resolve the table label in {dbname}, got numeric relid label {table}"
+                    );
+                }
+            }
+        }
+
+        if resolved {
+            break;
+        }
+
+        if vacuum_task.is_finished() {
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    vacuum_task
+        .await
+        .map_err(|error| anyhow!("vacuum task failed to join: {error}"))??;
+
+    pool.close().await;
+    test_db.cleanup().await?;
+
+    assert!(
+        resolved,
+        "expected active vacuum metric for {dbname}:{table_label}; observed labels: {observed_labels:?}"
+    );
+
     Ok(())
 }
 

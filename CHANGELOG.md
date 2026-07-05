@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-07-05
+
+### Added
+- **Table and Index Block I/O Metrics**: Added per-table block-I/O counters sourced from `pg_statio_user_tables` — `pg_stat_user_tables_heap_blks_read_total`, `pg_stat_user_tables_heap_blks_hit_total`, `pg_stat_user_tables_idx_blks_read_total`, `pg_stat_user_tables_idx_blks_hit_total`, `pg_stat_user_tables_toast_blks_read_total`, `pg_stat_user_tables_toast_blks_hit_total`, `pg_stat_user_tables_tidx_blks_read_total`, `pg_stat_user_tables_tidx_blks_hit_total` — and per-database index block-I/O from `pg_statio_user_indexes` — `pg_index_idx_blks_read_total`, `pg_index_idx_blks_hit_total`. These enable deep visibility into buffer cache hit ratios and raw disk I/O at the individual table and index level.
+- **I/O Dashboard Panels**: Added new Grafana panels to visualize Table Cache Hit Ratio, Table Block I/O, Index Cache Hit Ratio, and Index Block I/O rates.
+- **Documentation**: Added a "Buffer cache hit ratio (I/O pressure)" section to `docs/diagnosing-database-pressure.md` with `clamp_min`-guarded PromQL for the new block-I/O metrics, and updated the `README` with guidance for the new metrics and the `--collectors.max-db-concurrency` option.
+
+### Changed
+- **Dashboard Usability**: Enhanced existing dashboard panels (e.g. Cache Hit Ratios, Active Vacuum Progress) with detailed informational tooltips that include the raw `psql` diagnostic queries used behind the scenes.
+- **Dashboard Legends**: Standardized aggregation methods across the dashboard (using `mean`) to ensure clearer scaling and visual grouping in legends.
+
+### Fixed
+- **Bounded Per-Database Connection Concurrency**: The multi-database collectors (`stat_user_tables`, `index_stats`, `index_unused`) previously spawned one task — and opened one connection — per database with no limit, so a cluster with N databases opened ~N connections simultaneously on every scrape (linear in the database count). On instances with a low, shared `max_connections` (e.g. AWS RDS) this could exhaust connections and disrupt the application. Each collector now caps concurrent per-database queries with a semaphore, decoupling peak connection count from the number of databases. The limit is configurable via `--collectors.max-db-concurrency` / `PG_EXPORTER_MAX_DB_CONCURRENCY` (default 5); raise it for faster scrapes on large clusters with connection headroom, or lower it on small/shared instances. This applies regardless of transport (TCP or Unix socket), since `max_connections` and backend cost are server-side.
+- **Multi-Database Vacuum Progress**: Reworked the `vacuum_progress` collector so vacuums running in non-default databases resolve human-readable `schema.table` labels instead of a bare numeric OID. It runs a single cluster-wide query against `pg_stat_progress_vacuum` (which already sees vacuums in every database, including template/non-connectable ones) and lazily opens a connection to another database only to resolve a table name when a cross-database vacuum is actually in progress — keeping the common idle case at one query with no extra connections. Metrics now expose separate `database` and `table` labels.
+- **Collector Scrape Resilience**: Hardened the multi-database concurrency loop in `user_tables`, `index_stats`, and `index_unused` so a per-database failure (dropped or unreachable database) no longer fails the entire scrape, and an aggregated join-wait timeout is correctly counted as all pending databases failing (preventing a total stall from being silently reported as an empty snapshot).
+- **Dashboard Database Filters**: Fixed 6 dashboard panels (including "Idle in Transaction", "Active vs Idle Connections", and "Database Freeze Age") that were missing the `datname=~"$database"` filter despite exporting database-specific metrics. They now perfectly respect the database drop-down selection.
+- **Dashboard PG17 Compatibility**: Updated the `psql` diagnostic query provided in the "Active Vacuum Progress" info tooltip to remove `max_dead_tuples` and `num_dead_tuples`, ensuring the query runs cleanly across all supported PostgreSQL versions (PG14 through PG18).
+
 ## [0.13.1] - 2026-07-04
 
 ### Changed

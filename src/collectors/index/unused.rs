@@ -1,14 +1,13 @@
-use crate::collectors::i64_to_f64;
 use crate::collectors::util::{
-    get_default_database, get_excluded_databases, get_or_create_pool_for_db,
+    get_default_database, get_excluded_databases, get_max_db_concurrency, get_or_create_pool_for_db,
 };
-use crate::collectors::Collector;
+use crate::collectors::{Collector, all_databases_failed, i64_to_f64};
 use anyhow::{Result, anyhow};
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, Opts, Registry};
 use sqlx::{PgPool, Row, postgres::PgRow};
-use std::time::Duration;
-use tokio::task::JoinSet;
+use std::{sync::Arc, time::Duration};
+use tokio::{sync::Semaphore, task::JoinSet};
 use tracing::{debug, error, info_span, instrument};
 use tracing_futures::Instrument as _;
 
@@ -204,12 +203,22 @@ impl Collector for UnusedIndexCollector {
 
             // 2) One task per DB: reuse shared pool for the default DB, tiny pool for others.
             let mut tasks: JoinSet<Result<Option<UnusedIndexSample>>> = JoinSet::new();
+            let semaphore = Arc::new(Semaphore::new(get_max_db_concurrency()));
 
+            let num_dbs = dbs.len();
             for datname in dbs {
                 let shared_pool = shared_pool.clone();
                 let default_db = default_db.clone();
+                let semaphore = Arc::clone(&semaphore);
 
                 tasks.spawn(async move {
+                    // Bound how many databases we query at once so peak connections do not
+                    // scale with the number of databases in the cluster.
+                    let Ok(_permit) = semaphore.acquire_owned().await else {
+                        return Err(anyhow!(
+                            "index_unused: concurrency semaphore closed before acquiring permit"
+                        ));
+                    };
                     let datname_for_timeout = datname.clone();
                     let use_shared = default_db.as_deref() == Some(datname.as_str());
 
@@ -258,6 +267,7 @@ impl Collector for UnusedIndexCollector {
 
             let mut all_samples = Vec::new();
             let mut failures = Vec::new();
+            let mut failed_db_count = 0;
             while !tasks.is_empty() {
                 match tokio::time::timeout(TASK_JOIN_WAIT_TIMEOUT, tasks.join_next()).await {
                     Ok(Some(Ok(Ok(Some(sample))))) => all_samples.push(sample),
@@ -265,10 +275,12 @@ impl Collector for UnusedIndexCollector {
                     Ok(Some(Ok(Err(e)))) => {
                         error!(error=?e, "index_unused: task returned error");
                         failures.push(e.to_string());
+                        failed_db_count += 1;
                     }
                     Ok(Some(Err(e))) => {
                         error!(error=?e, "index_unused: task join error");
                         failures.push(e.to_string());
+                        failed_db_count += 1;
                     }
                     Ok(None) => break,
                     Err(_) => {
@@ -277,22 +289,22 @@ impl Collector for UnusedIndexCollector {
                         failures.push(format!(
                             "timed out waiting for {pending_tasks} database collection task(s) after {TASK_JOIN_WAIT_TIMEOUT:?}"
                         ));
+                        failed_db_count += pending_tasks;
                         break;
                     }
                 }
             }
 
-            if all_samples.is_empty() && !failures.is_empty() {
+            if all_databases_failed(num_dbs, failed_db_count) {
                 return Err(anyhow!(
-                    "index_unused collection failed for {} database task(s): {}",
-                    failures.len(),
+                    "index_unused collection failed for ALL {failed_db_count} database task(s): {}",
                     failures.join("; ")
                 ));
             }
 
             if !failures.is_empty() {
                 error!(
-                    failed_databases = failures.len(),
+                    failed_databases = failed_db_count,
                     errors = %failures.join("; "),
                     "index_unused: continuing with partial snapshot after per-database failures"
                 );

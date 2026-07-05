@@ -12,6 +12,8 @@ AUTOVACUUM_NAPTIME="5s"
 
 ORIGINAL_AUTOVACUUM_NAPTIME=""
 
+source "$(dirname "${BASH_SOURCE[0]}")/pg-connection.sh"
+
 usage() {
     cat <<'EOF'
 Usage: run-autovacuum-workflow.sh [options]
@@ -90,24 +92,27 @@ if ! command -v psql >/dev/null 2>&1; then
 fi
 
 psql_cmd() {
-    psql --no-psqlrc -h localhost -p 5432 -U postgres "$@"
+    local db="$1"
+    shift
+
+    pg_connection_psql_cmd "${db}" "$@"
 }
 
-if ! psql_cmd -d postgres -c "SELECT 1" >/dev/null 2>&1; then
-    echo "❌ PostgreSQL is not reachable on localhost:5432"
-    echo "Start it first with: just postgres"
+if ! psql_cmd postgres -c "SELECT 1" >/dev/null 2>&1; then
+    echo "❌ PostgreSQL is not reachable at $(pg_connection_description postgres)"
+    echo "Start it first with: just postgres, or set PG_EXPORTER_DSN/PG_HOST/PG_PORT"
     exit 1
 fi
 
 cleanup() {
     if [[ -n "${ORIGINAL_AUTOVACUUM_NAPTIME}" ]]; then
-        psql_cmd -d postgres --set ON_ERROR_STOP=1 \
+        psql_cmd postgres --set ON_ERROR_STOP=1 \
             -c "ALTER SYSTEM SET autovacuum_naptime = '${ORIGINAL_AUTOVACUUM_NAPTIME}';" >/dev/null || true
-        psql_cmd -d postgres --set ON_ERROR_STOP=1 \
+        psql_cmd postgres --set ON_ERROR_STOP=1 \
             -c "SELECT pg_reload_conf();" >/dev/null || true
     fi
 
-    psql_cmd -d "${DB}" --set ON_ERROR_STOP=1 \
+    psql_cmd "${DB}" --set ON_ERROR_STOP=1 \
         -c "ALTER TABLE ${TABLE} RESET (autovacuum_vacuum_scale_factor, autovacuum_vacuum_threshold, autovacuum_analyze_scale_factor, autovacuum_analyze_threshold);" >/dev/null || true
 }
 trap cleanup EXIT
@@ -119,7 +124,7 @@ show_vacuum_stats() {
     local title="$1"
     echo
     echo "📊 ${title}"
-    psql_cmd -d "${DB}" --tuples-only --no-align <<SQL
+    psql_cmd "${DB}" --tuples-only --no-align <<SQL
 SELECT
     relname,
     n_live_tup,
@@ -148,18 +153,18 @@ SQL
 }
 
 ORIGINAL_AUTOVACUUM_NAPTIME=$(
-    psql_cmd -d postgres --tuples-only --no-align \
+    psql_cmd postgres --tuples-only --no-align \
         -c "SHOW autovacuum_naptime"
 )
 
 echo "⚙️  Temporarily setting autovacuum_naptime to ${AUTOVACUUM_NAPTIME} (was ${ORIGINAL_AUTOVACUUM_NAPTIME})..."
-psql_cmd -d postgres --set ON_ERROR_STOP=1 \
+psql_cmd postgres --set ON_ERROR_STOP=1 \
     -c "ALTER SYSTEM SET autovacuum_naptime = '${AUTOVACUUM_NAPTIME}';" >/dev/null
-psql_cmd -d postgres --set ON_ERROR_STOP=1 \
+psql_cmd postgres --set ON_ERROR_STOP=1 \
     -c "SELECT pg_reload_conf();" >/dev/null
 
 echo "⚙️  Lowering autovacuum thresholds for ${DB}.${TABLE}..."
-psql_cmd -d "${DB}" --set ON_ERROR_STOP=1 \
+psql_cmd "${DB}" --set ON_ERROR_STOP=1 \
     -c "ALTER TABLE ${TABLE} SET (
             autovacuum_vacuum_scale_factor = 0.0,
             autovacuum_vacuum_threshold = 50,
@@ -168,7 +173,7 @@ psql_cmd -d "${DB}" --set ON_ERROR_STOP=1 \
         );" >/dev/null
 
 initial_autovacuum_count=$(
-    psql_cmd -d "${DB}" --tuples-only --no-align \
+    psql_cmd "${DB}" --tuples-only --no-align \
         -c "SELECT COALESCE(autovacuum_count, 0)::bigint FROM pg_stat_user_tables WHERE schemaname = 'public' AND relname = '${TABLE}';"
 )
 
@@ -178,7 +183,7 @@ echo
 echo "🧪 Generating dead tuples in ${DB}.${TABLE} with ${ROUNDS} update rounds..."
 for round in $(seq 1 "${ROUNDS}"); do
     echo "  • round ${round}/${ROUNDS}"
-    psql_cmd -d "${DB}" --set ON_ERROR_STOP=1 \
+    psql_cmd "${DB}" --set ON_ERROR_STOP=1 \
         -c "UPDATE ${TABLE} SET abalance = abalance + 1 WHERE aid % ${SAMPLE_MOD} = 0;" >/dev/null
 done
 
@@ -193,7 +198,7 @@ autovacuum_triggered=0
 
 while (( $(date +%s) < deadline )); do
     IFS=$'\t' read -r autovacuum_count dead_tuples threshold_ratio last_auto_age active_vacuums <<<"$(
-        psql_cmd -d "${DB}" --tuples-only --no-align --field-separator $'\t' <<SQL
+        psql_cmd "${DB}" --tuples-only --no-align --field-separator $'\t' <<SQL
 SELECT
     COALESCE(s.autovacuum_count, 0)::bigint,
     COALESCE(s.n_dead_tup, 0)::bigint,

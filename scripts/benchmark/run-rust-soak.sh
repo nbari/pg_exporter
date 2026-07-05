@@ -10,6 +10,7 @@ BENCH_DB_SSH="${BENCH_DB_SSH:-10.246.1.92}"
 BENCH_METRICS_SSH="${BENCH_METRICS_SSH:-10.246.1.93}"
 
 DB_NAME="${DB_NAME:-pgbench_test}"
+DB_COUNT="${DB_COUNT:-1}"
 DB_SCALE="${DB_SCALE:-20}"
 HOURS=24
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -34,7 +35,8 @@ Usage:
 Options:
   --hours N                 Total soak hours (default: 24)
   --run-id ID               Custom run id (default: UTC timestamp)
-  --db NAME                 Database name (default: ${DB_NAME})
+  --db NAME                 Database name prefix (default: ${DB_NAME})
+  --db-count N              Number of databases to create/benchmark (default: ${DB_COUNT})
   --scale N                 pgbench scale if init is needed (default: ${DB_SCALE})
   --no-dashboard-deploy     Do not copy dashboard to metrics VM
   --no-exporter-config      Do not apply soak collector override on rust VM
@@ -71,6 +73,10 @@ parse_args() {
             DB_NAME="$2"
             shift 2
             ;;
+        --db-count)
+            DB_COUNT="$2"
+            shift 2
+            ;;
         --scale)
             DB_SCALE="$2"
             shift 2
@@ -99,6 +105,10 @@ parse_args() {
 validate_inputs() {
     if ! [[ "${HOURS}" =~ ^[0-9]+$ ]] || (( HOURS <= 0 )); then
         err "--hours must be a positive integer"
+        exit 1
+    fi
+    if ! [[ "${DB_COUNT}" =~ ^[0-9]+$ ]] || (( DB_COUNT <= 0 )); then
+        err "--db-count must be a positive integer"
         exit 1
     fi
     if ! [[ "${DB_SCALE}" =~ ^[0-9]+$ ]] || (( DB_SCALE <= 0 )); then
@@ -174,17 +184,20 @@ CFG
 }
 
 prepare_db() {
-    log "Preparing benchmark database on ${BENCH_DB_SSH} (db=${DB_NAME}, scale=${DB_SCALE})"
+    log "Preparing ${DB_COUNT} benchmark database(s) on ${BENCH_DB_SSH} (prefix=${DB_NAME}, scale=${DB_SCALE})"
 
     ssh_run "${BENCH_DB_SSH}" \
         "set -euo pipefail; \
-         if ! sudo -u postgres psql -Atqc \"SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'\" | grep -q 1; then \
-             sudo -u postgres createdb '${DB_NAME}'; \
-         fi; \
-         sudo -u postgres psql -d '${DB_NAME}' -c \"CREATE EXTENSION IF NOT EXISTS pg_stat_statements;\" >/dev/null; \
-         if ! sudo -u postgres psql -d '${DB_NAME}' -Atqc \"SELECT 1 FROM pg_class WHERE relname = 'pgbench_accounts'\" | grep -q 1; then \
-             sudo -u postgres pgbench -i -s '${DB_SCALE}' '${DB_NAME}'; \
-         fi"
+         for i in \$(seq 1 ${DB_COUNT}); do \
+             if [ ${DB_COUNT} -eq 1 ]; then target_db='${DB_NAME}'; else target_db=\"${DB_NAME}_\${i}\"; fi; \
+             if ! sudo -u postgres psql -Atqc \"SELECT 1 FROM pg_database WHERE datname='\${target_db}'\" | grep -q 1; then \
+                 sudo -u postgres createdb \"\${target_db}\"; \
+             fi; \
+             sudo -u postgres psql -d \"\${target_db}\" -c \"CREATE EXTENSION IF NOT EXISTS pg_stat_statements;\" >/dev/null; \
+             if ! sudo -u postgres psql -d \"\${target_db}\" -Atqc \"SELECT 1 FROM pg_class WHERE relname = 'pgbench_accounts'\" | grep -q 1; then \
+                 sudo -u postgres pgbench -i -s '${DB_SCALE}' \"\${target_db}\"; \
+             fi; \
+         done"
 }
 
 write_remote_workload_script() {
@@ -204,6 +217,7 @@ write_remote_workload_script() {
 set -euo pipefail
 
 DB_NAME="${DB_NAME}"
+DB_COUNT="${DB_COUNT}"
 RUN_ID="${RUN_ID}"
 
 DUR_BASELINE=${baseline}
@@ -217,9 +231,22 @@ log() {
     printf '[%s] [soak:%s] %s\\n' "\$(date -u +%FT%TZ)" "\${RUN_ID}" "\$*"
 }
 
+get_random_db() {
+    if [ \${DB_COUNT} -eq 1 ]; then
+        echo "\${DB_NAME}"
+    else
+        local r=\$(( RANDOM % \${DB_COUNT} + 1 ))
+        echo "\${DB_NAME}_\${r}"
+    fi
+}
+
 psql_exec() {
     local sql="\$1"
-    sudo -u postgres psql -v ON_ERROR_STOP=1 -d "\${DB_NAME}" -c "\${sql}" >/dev/null
+    for i in \$(seq 1 \${DB_COUNT}); do
+        local target_db="\${DB_NAME}"
+        if [ \${DB_COUNT} -gt 1 ]; then target_db="\${DB_NAME}_\${i}"; fi
+        sudo -u postgres psql -v ON_ERROR_STOP=1 -d "\${target_db}" -c "\${sql}" >/dev/null
+    done
 }
 
 run_pgbench() {
@@ -227,18 +254,29 @@ run_pgbench() {
     local threads="\$2"
     local duration="\$3"
     local mode="\${4:-}"
-    if [[ -n "\${mode}" ]]; then
-        sudo -u postgres pgbench -h localhost -p 5432 -U postgres "\${mode}" -c "\${clients}" -j "\${threads}" -T "\${duration}" --progress=60 "\${DB_NAME}"
-    else
-        sudo -u postgres pgbench -h localhost -p 5432 -U postgres -c "\${clients}" -j "\${threads}" -T "\${duration}" --progress=60 "\${DB_NAME}"
-    fi
+    local stop_at=\$((\$(date +%s) + duration))
+    
+    while (( \$(date +%s) < stop_at )); do
+        local target_db=\$(get_random_db)
+        local remaining=\$((\$stop_at - \$(date +%s)))
+        local slice=60
+        if (( remaining < 60 )); then slice=\$remaining; fi
+        if (( slice <= 0 )); then break; fi
+        
+        if [[ -n "\${mode}" ]]; then
+            sudo -u postgres pgbench -h localhost -p 5432 -U postgres "\${mode}" -c "\${clients}" -j "\${threads}" -T "\${slice}" --progress=60 "\${target_db}"
+        else
+            sudo -u postgres pgbench -h localhost -p 5432 -U postgres -c "\${clients}" -j "\${threads}" -T "\${slice}" --progress=60 "\${target_db}"
+        fi
+    done
 }
 
 run_heavy_query_loop() {
     local duration="\$1"
     local stop_at=\$((\$(date +%s) + duration))
     while (( \$(date +%s) < stop_at )); do
-        sudo -u postgres psql -v ON_ERROR_STOP=1 -d "\${DB_NAME}" -c \\
+        local target_db=\$(get_random_db)
+        sudo -u postgres psql -v ON_ERROR_STOP=1 -d "\${target_db}" -c \
             "SELECT aid, sum(abalance) FROM pgbench_accounts GROUP BY aid ORDER BY sum(abalance) DESC LIMIT 50;" >/dev/null
     done
 }
@@ -247,30 +285,40 @@ run_lock_storm() {
     local duration="\$1"
     local stop_at=\$((\$(date +%s) + duration))
 
-    locker() {
-        while (( \$(date +%s) < stop_at )); do
-            sudo -u postgres psql -v ON_ERROR_STOP=1 -d "\${DB_NAME}" -c \\
-                "BEGIN; UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = 1; SELECT pg_sleep(20); ROLLBACK;" >/dev/null
-        done
-    }
+    while (( \$(date +%s) < stop_at )); do
+        local target_db=\$(get_random_db)
+        local remaining=\$((\$stop_at - \$(date +%s)))
+        local slice=60
+        if (( remaining < 60 )); then slice=\$remaining; fi
+        if (( slice <= 0 )); then break; fi
+        
+        local slice_stop=\$((\$(date +%s) + slice))
 
-    waiter() {
-        while (( \$(date +%s) < stop_at )); do
-            sudo -u postgres psql -v ON_ERROR_STOP=0 -d "\${DB_NAME}" -c \\
-                "SET lock_timeout='5s'; UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = 1;" >/dev/null 2>&1 || true
-            sleep 0.2
-        done
-    }
+        locker() {
+            while (( \$(date +%s) < slice_stop )); do
+                sudo -u postgres psql -v ON_ERROR_STOP=1 -d "\${target_db}" -c \
+                    "BEGIN; UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = 1; SELECT pg_sleep(20); ROLLBACK;" >/dev/null
+            done
+        }
 
-    locker &
-    local pids=()
-    pids+=(\$!)
-    for _ in \$(seq 1 6); do
-        waiter &
+        waiter() {
+            while (( \$(date +%s) < slice_stop )); do
+                sudo -u postgres psql -v ON_ERROR_STOP=0 -d "\${target_db}" -c \
+                    "SET lock_timeout='5s'; UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = 1;" >/dev/null 2>&1 || true
+                sleep 0.2
+            done
+        }
+
+        locker &
+        local pids=()
         pids+=(\$!)
-    done
-    for pid in "\${pids[@]}"; do
-        wait "\${pid}" || true
+        for _ in \$(seq 1 6); do
+            waiter &
+            pids+=(\$!)
+        done
+        for pid in "\${pids[@]}"; do
+            wait "\${pid}" || true
+        done
     done
 }
 
@@ -324,12 +372,13 @@ mixed_phase() {
 }
 
 summary() {
-    log "SUMMARY top tables by dead tuples"
-    sudo -u postgres psql -d "\${DB_NAME}" -Atc \\
+    log "SUMMARY top tables by dead tuples (random db)"
+    local target_db=\$(get_random_db)
+    sudo -u postgres psql -d "\${target_db}" -Atc \\
         "SELECT relname, n_dead_tup, n_live_tup, round((n_dead_tup::numeric / NULLIF(n_live_tup + n_dead_tup,0)) * 100, 2) AS dead_pct, COALESCE(last_autovacuum::text,'null') FROM pg_stat_user_tables ORDER BY n_dead_tup DESC LIMIT 10;"
 
-    log "SUMMARY top statements by total exec time"
-    sudo -u postgres psql -d "\${DB_NAME}" -Atc \\
+    log "SUMMARY top statements by total exec time (random db)"
+    sudo -u postgres psql -d "\${target_db}" -Atc \\
         "SELECT left(query, 120), calls, round(total_exec_time::numeric, 2) FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 10;"
 }
 

@@ -1,10 +1,71 @@
-use crate::collectors::{Collector, i64_to_f64, util::get_excluded_databases};
+use crate::collectors::{
+    i64_to_f64,
+    util::{get_default_database, get_excluded_databases, get_or_create_pool_for_db},
+    Collector,
+};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, IntGauge, IntGaugeVec, Opts, Registry};
-use sqlx::{PgPool, Row};
+use sqlx::{postgres::PgRow, PgPool, Row};
+use std::time::Duration;
 use tracing::{debug, info_span, instrument};
 use tracing_futures::Instrument as _;
+
+/// Timeout for a single lazy per-database table-name resolution query.
+const NAME_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Cluster-wide snapshot of in-progress vacuums.
+///
+/// `pg_stat_progress_vacuum` reports vacuums in **every** database from any connection,
+/// so this single query on the main pool sees them all (including template/non-connectable
+/// databases). Table names, however, live in each database's own `pg_class`, so a name is
+/// only resolved in-query when the vacuum runs in the connected database
+/// (`d.datname = current_database()`, which also prevents cross-database OID false matches).
+/// Vacuums in other databases return `local_table_name = NULL` and are resolved lazily.
+const VACUUM_PROGRESS_QUERY: &str = r"
+    SELECT
+        COALESCE(d.datname, 'unknown') AS database_name,
+        p.relid::bigint AS relid,
+        CASE WHEN d.datname = current_database()
+             THEN n.nspname || '.' || c.relname
+             ELSE NULL
+        END AS local_table_name,
+        p.heap_blks_total,
+        p.heap_blks_scanned,
+        p.heap_blks_vacuumed,
+        p.index_vacuum_count,
+        COALESCE(a.backend_type = 'autovacuum worker', false) AS is_autovacuum,
+        COALESCE(EXTRACT(EPOCH FROM (now() - a.xact_start))::bigint, 0) AS duration_seconds
+    FROM pg_stat_progress_vacuum p
+    LEFT JOIN pg_database d ON d.oid = p.datid
+    LEFT JOIN pg_class c ON c.oid = p.relid
+    LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
+    LEFT JOIN pg_stat_activity a ON a.pid = p.pid
+    WHERE (d.datname IS NULL OR NOT (d.datname = ANY($1)))
+";
+
+/// Resolves a single relation OID to `schema.table` within the connected database.
+const RESOLVE_RELID_QUERY: &str = r"
+    SELECT n.nspname || '.' || c.relname AS table_name
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.oid = ($1::bigint)::oid
+";
+
+#[derive(Clone, Debug)]
+struct VacuumSample {
+    database_name: String,
+    relid: i64,
+    /// Resolved `schema.table`. `None` until resolved (locally in-query or lazily);
+    /// falls back to the numeric relid when a name cannot be resolved.
+    table_name: Option<String>,
+    heap_blks_total: i64,
+    heap_blks_scanned: i64,
+    heap_blks_vacuumed: i64,
+    index_vacuum_count: i64,
+    is_autovacuum: bool,
+    duration_seconds: i64,
+}
 
 /// Tracks ongoing vacuum/analyze progress
 #[derive(Clone)]
@@ -110,6 +171,63 @@ impl VacuumProgressCollector {
         self.is_autovacuum.reset();
         self.duration_seconds.reset();
     }
+
+    fn sample_from_row(row: &PgRow) -> VacuumSample {
+        VacuumSample {
+            database_name: row
+                .try_get("database_name")
+                .unwrap_or_else(|_| "unknown".to_string()),
+            relid: row.try_get("relid").unwrap_or(0),
+            table_name: row
+                .try_get::<Option<String>, _>("local_table_name")
+                .ok()
+                .flatten(),
+            heap_blks_total: row.try_get("heap_blks_total").unwrap_or(0),
+            heap_blks_scanned: row.try_get("heap_blks_scanned").unwrap_or(0),
+            heap_blks_vacuumed: row.try_get("heap_blks_vacuumed").unwrap_or(0),
+            index_vacuum_count: row.try_get("index_vacuum_count").unwrap_or(0),
+            is_autovacuum: row.try_get("is_autovacuum").unwrap_or(false),
+            duration_seconds: row.try_get("duration_seconds").unwrap_or(0),
+        }
+    }
+
+    /// Lazily resolves `schema.table` for a vacuum running in another database.
+    ///
+    /// Best-effort: a connection is opened only for the specific database, and any
+    /// failure (unconnectable database such as `template0`, timeout, dropped relation)
+    /// returns `None` so the caller falls back to the numeric relid. This is what keeps
+    /// the common case (no cross-database vacuum) at a single cluster-wide query with
+    /// zero extra connections.
+    async fn resolve_table_name(datname: &str, relid: i64) -> Option<String> {
+        // Names for the connected (default) database are already resolved in-query.
+        if get_default_database() == Some(datname) {
+            return None;
+        }
+
+        let pool = match get_or_create_pool_for_db(datname).await {
+            Ok(pool) => pool,
+            Err(e) => {
+                debug!(database = %datname, error = %e, "vacuum_progress: cannot open pool to resolve table name");
+                return None;
+            }
+        };
+
+        let resolve = sqlx::query_scalar::<_, String>(RESOLVE_RELID_QUERY)
+            .bind(relid)
+            .fetch_optional(&pool);
+
+        match tokio::time::timeout(NAME_RESOLUTION_TIMEOUT, resolve).await {
+            Ok(Ok(name)) => name,
+            Ok(Err(e)) => {
+                debug!(database = %datname, relid, error = %e, "vacuum_progress: relid name lookup failed");
+                None
+            }
+            Err(_) => {
+                debug!(database = %datname, relid, "vacuum_progress: relid name lookup timed out");
+                None
+            }
+        }
+    }
 }
 
 impl Collector for VacuumProgressCollector {
@@ -142,70 +260,63 @@ impl Collector for VacuumProgressCollector {
     )]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            // Exclusions (set globally via CLI/env)
             let excluded: Vec<String> = get_excluded_databases().to_vec();
 
-            // Query span
+            // 1) One cluster-wide query on the main pool. `pg_stat_progress_vacuum` is
+            //    cluster-wide, so this sees vacuums in every database (including template
+            //    and non-connectable ones), with names already resolved for the connected
+            //    database.
             let query_span = info_span!(
                 "db.query",
                 otel.kind = "client",
                 db.system = "postgresql",
                 db.operation = "SELECT",
-                db.statement = "SELECT progress from pg_stat_progress_vacuum joined with pg_database (filtered)",
+                db.statement = "SELECT ... FROM pg_stat_progress_vacuum (cluster-wide)",
                 db.sql.table = "pg_stat_progress_vacuum"
             );
+            let rows = sqlx::query(VACUUM_PROGRESS_QUERY)
+                .bind(&excluded)
+                .fetch_all(pool)
+                .instrument(query_span)
+                .await?;
 
-            // Filter by excluded databases via LEFT JOIN on datid.
-            // Note: pg_stat_progress_vacuum shows vacuums in ALL databases, but pg_class
-            // only contains tables from the CURRENT database. When viewing from 'postgres' db,
-            // we can't resolve table names from other databases. We include the database name
-            // and relid to help identify tables across databases.
-            let rows = sqlx::query(
-                r"
-                SELECT
-                    COALESCE(d.datname, 'unknown') AS database_name,
-                    COALESCE(n.nspname || '.' || c.relname, p.relid::text) AS table_name,
-                    p.heap_blks_total,
-                    p.heap_blks_scanned,
-                    p.heap_blks_vacuumed,
-                    p.index_vacuum_count,
-                    COALESCE(a.backend_type = 'autovacuum worker', false) AS is_autovacuum,
-                    COALESCE(EXTRACT(EPOCH FROM (now() - a.xact_start))::bigint, 0) AS duration_seconds
-                FROM pg_stat_progress_vacuum p
-                LEFT JOIN pg_database d ON d.oid = p.datid
-                LEFT JOIN pg_class c ON c.oid = p.relid
-                LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
-                LEFT JOIN pg_stat_activity a ON a.pid = p.pid
-                WHERE (d.datname IS NULL OR NOT (d.datname = ANY($1)))
-                ",
-            )
-            .bind(&excluded)
-            .fetch_all(pool)
-            .instrument(query_span)
-            .await?;
+            let mut all_samples: Vec<VacuumSample> =
+                rows.iter().map(Self::sample_from_row).collect();
+
+            // 2) Lazily resolve names for vacuums running in *other* databases (rare, since
+            //    active vacuums are transient). No extra connections are opened otherwise.
+            for sample in &mut all_samples {
+                if sample.table_name.is_none() && sample.database_name != "unknown" {
+                    sample.table_name =
+                        Self::resolve_table_name(&sample.database_name, sample.relid).await;
+                }
+            }
 
             let update_span =
-                info_span!("vacuum_progress.update_metrics", active_rows = rows.len());
+                info_span!("vacuum_progress.update_metrics", active_rows = all_samples.len());
             let _g = update_span.enter();
 
-            // Replace the full point-in-time snapshot only after the query succeeded.
             self.reset_progress_metrics();
 
-            if rows.is_empty() {
+            if all_samples.is_empty() {
                 self.global_active.set(0);
                 debug!("no active vacuum operations");
             } else {
                 self.global_active.set(1);
 
-                for row in rows {
-                    let database: String = row.try_get("database_name")?;
-                    let table: String = row.try_get("table_name")?;
-                    let heap_total: i64 = row.try_get("heap_blks_total").unwrap_or(0);
-                    let heap_scanned: i64 = row.try_get("heap_blks_scanned").unwrap_or(0);
-                    let heap_vac: i64 = row.try_get("heap_blks_vacuumed").unwrap_or(0);
-                    let idx_count: i64 = row.try_get("index_vacuum_count").unwrap_or(0);
-                    let is_auto: bool = row.try_get("is_autovacuum").unwrap_or(false);
-                    let duration: i64 = row.try_get("duration_seconds").unwrap_or(0);
+                for sample in &all_samples {
+                    let database = &sample.database_name;
+                    let table = sample
+                        .table_name
+                        .clone()
+                        .unwrap_or_else(|| sample.relid.to_string());
+                    let table = table.as_str();
+                    let heap_total = sample.heap_blks_total;
+                    let heap_scanned = sample.heap_blks_scanned;
+                    let heap_vac = sample.heap_blks_vacuumed;
+                    let idx_count = sample.index_vacuum_count;
+                    let is_auto = sample.is_autovacuum;
+                    let duration = sample.duration_seconds;
 
                     let progress_ratio = if heap_total > 0 {
                         // Progress as 0.0-1.0 ratio for percentunit display
@@ -214,21 +325,21 @@ impl Collector for VacuumProgressCollector {
                         0.0
                     };
 
-                    self.in_progress.with_label_values(&[&database, &table]).set(1);
+                    self.in_progress.with_label_values(&[database, table]).set(1);
                     self.heap_progress
-                        .with_label_values(&[&database, &table])
+                        .with_label_values(&[database, table])
                         .set(progress_ratio);
                     self.heap_vacuumed
-                        .with_label_values(&[&database, &table])
+                        .with_label_values(&[database, table])
                         .set(heap_vac);
                     self.index_vacuum_count
-                        .with_label_values(&[&database, &table])
+                        .with_label_values(&[database, table])
                         .set(idx_count);
                     self.is_autovacuum
-                        .with_label_values(&[&database, &table])
+                        .with_label_values(&[database, table])
                         .set(i64::from(is_auto));
                     self.duration_seconds
-                        .with_label_values(&[&database, &table])
+                        .with_label_values(&[database, table])
                         .set(duration);
 
                     debug!(
@@ -294,5 +405,31 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn vacuum_progress_query_is_cluster_wide_with_local_name_resolution() {
+        // Hybrid design: a single cluster-wide query (must NOT be scoped to
+        // current_database in its WHERE, or it would miss vacuums in other databases),
+        // with table names resolved locally only for the connected database via a CASE.
+        assert!(VACUUM_PROGRESS_QUERY.contains("pg_stat_progress_vacuum"));
+        assert!(
+            !VACUUM_PROGRESS_QUERY.contains("WHERE d.datname = current_database()"),
+            "query must stay cluster-wide, not per-database"
+        );
+        assert!(
+            VACUUM_PROGRESS_QUERY.contains("CASE WHEN d.datname = current_database()"),
+            "local name resolution should be gated per row, not filter rows out"
+        );
+        assert!(
+            VACUUM_PROGRESS_QUERY.contains("NOT (d.datname = ANY($1))"),
+            "excluded databases should still be filtered"
+        );
+    }
+
+    #[test]
+    fn resolve_relid_query_looks_up_a_single_relation() {
+        assert!(RESOLVE_RELID_QUERY.contains("pg_class"));
+        assert!(RESOLVE_RELID_QUERY.contains("WHERE c.oid ="));
     }
 }

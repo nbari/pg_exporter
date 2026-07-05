@@ -26,6 +26,10 @@ static POOLS: OnceCell<RwLock<HashMap<String, PgPool>>> = OnceCell::new();
 /// `PostgreSQL` version number (e.g., `140_000` for v14.0, `170_000` for v17.0).
 static PG_VERSION: OnceCell<i32> = OnceCell::new();
 
+/// Max per-database collection tasks that may run concurrently within one collector
+/// scrape, set once at startup via CLI/env. Falls back to `MAX_DB_QUERY_CONCURRENCY`.
+static MAX_DB_CONCURRENCY: OnceCell<usize> = OnceCell::new();
+
 /// Common constants for `PostgreSQL` system schemas
 pub const PG_CATALOG: &str = "pg_catalog";
 pub const INFORMATION_SCHEMA: &str = "information_schema";
@@ -89,6 +93,31 @@ pub fn get_pg_version() -> i32 {
 #[must_use]
 pub fn is_pg_version_at_least(min_version: i32) -> bool {
     get_pg_version() >= min_version
+}
+
+/// Set the max per-database collection concurrency. Call this once at startup from
+/// CLI/env. Values are clamped to at least 1 (a zero limit would deadlock collectors).
+pub fn set_max_db_concurrency(value: usize) {
+    let _ = MAX_DB_CONCURRENCY.set(sanitized_concurrency(value));
+}
+
+/// Clamp a requested concurrency to a usable value: never zero (a zero-permit semaphore
+/// would deadlock every multi-database collector).
+#[inline]
+#[must_use]
+const fn sanitized_concurrency(value: usize) -> usize {
+    if value == 0 { 1 } else { value }
+}
+
+/// Get the max per-database collection concurrency, falling back to the compile-time
+/// default (`MAX_DB_QUERY_CONCURRENCY`) when not explicitly set (e.g. in tests).
+#[inline]
+#[must_use]
+pub fn get_max_db_concurrency() -> usize {
+    MAX_DB_CONCURRENCY
+        .get()
+        .copied()
+        .unwrap_or(super::MAX_DB_QUERY_CONCURRENCY)
 }
 
 /// Initialize (idempotent) the base connect options from the provided DSN (`SecretString`).
@@ -211,6 +240,28 @@ mod tests {
         assert_eq!(got, &["postgres".to_string(), TEMPLATE0.to_string()]);
         assert!(is_database_excluded("postgres"));
         assert!(!is_database_excluded("not_there"));
+    }
+
+    #[test]
+    fn test_sanitized_concurrency_never_zero() {
+        // Zero would create a zero-permit semaphore and deadlock the collectors.
+        assert_eq!(sanitized_concurrency(0), 1);
+        assert_eq!(sanitized_concurrency(1), 1);
+        assert_eq!(sanitized_concurrency(5), 5);
+        assert_eq!(sanitized_concurrency(4096), 4096);
+        assert_eq!(sanitized_concurrency(usize::MAX), usize::MAX);
+    }
+
+    #[test]
+    fn test_get_max_db_concurrency_defaults_to_const_and_is_nonzero() {
+        // Without an explicit set, the getter returns the compile-time default, and it is
+        // always usable (>= 1) regardless of whether startup wiring ran.
+        let value = get_max_db_concurrency();
+        assert!(value >= 1, "concurrency must never be zero, got {value}");
+        // When unset it must equal the shared default constant.
+        if super::MAX_DB_CONCURRENCY.get().is_none() {
+            assert_eq!(value, crate::collectors::MAX_DB_QUERY_CONCURRENCY);
+        }
     }
 
     #[test]

@@ -3,7 +3,7 @@ use crate::{
     collectors::{
         COLLECTOR_NAMES, Collector, all_factories,
         config::CollectorConfig,
-        util::{get_excluded_databases, set_excluded_databases},
+        util::{get_excluded_databases, set_excluded_databases, set_max_db_concurrency},
     },
 };
 use anyhow::{Result, anyhow};
@@ -39,6 +39,9 @@ fn get_dsn(matches: &ArgMatches) -> Result<String> {
 pub fn handler(matches: &clap::ArgMatches) -> Result<Action> {
     // Initialize global excluded database list once from CLI/env
     init_excluded_databases(matches);
+
+    // Initialize the per-database collection concurrency limit once from CLI/env
+    init_max_db_concurrency(matches);
 
     info!("Excluded databases: {:?}", get_excluded_databases());
 
@@ -77,6 +80,13 @@ fn init_excluded_databases(matches: &ArgMatches) {
 
     // Set once globally for all collectors
     set_excluded_databases(excludes);
+}
+
+fn init_max_db_concurrency(matches: &ArgMatches) {
+    // Clap validates this as a NonZeroUsize with a default, so a value is always present.
+    if let Some(value) = matches.get_one::<NonZeroUsize>("collectors.max-db-concurrency") {
+        set_max_db_concurrency(value.get());
+    }
 }
 
 #[must_use]

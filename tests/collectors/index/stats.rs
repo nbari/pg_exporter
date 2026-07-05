@@ -34,6 +34,8 @@ async fn test_index_stats_collector_has_all_metrics_after_collection() -> Result
         "pg_index_tuples_fetched_total",
         "pg_index_size_bytes",
         "pg_index_valid",
+        "pg_index_idx_blks_read_total",
+        "pg_index_idx_blks_hit_total",
     ];
 
     for metric in expected {
@@ -122,6 +124,40 @@ async fn test_index_stats_collector_size_is_non_negative() -> Result<()> {
             for m in fam.get_metric() {
                 let v = m.get_gauge().value();
                 assert!(v >= 0.0, "size_bytes should be non-negative, got {v}");
+            }
+        }
+    }
+
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_index_stats_collector_block_io_is_non_negative() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+    let registry = Registry::new();
+    let collector = IndexStatsCollector::new();
+
+    collector.register_metrics(&registry)?;
+    collector.collect(&pool).await?;
+
+    let families = registry.gather();
+    for metric in [
+        "pg_index_idx_blks_read_total",
+        "pg_index_idx_blks_hit_total",
+    ] {
+        assert!(
+            families.iter().any(|f| f.name() == metric),
+            "block-I/O metric {metric} should be present after collection"
+        );
+        for fam in families.iter().filter(|f| f.name() == metric) {
+            for m in fam.get_metric() {
+                assert!(
+                    m.get_label().iter().any(|l| l.name() == "datname"),
+                    "{metric} series must carry a datname label"
+                );
+                let v = m.get_gauge().value();
+                assert!(v >= 0.0, "{metric} should be non-negative, got {v}");
             }
         }
     }

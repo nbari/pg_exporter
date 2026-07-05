@@ -26,6 +26,8 @@ PGBENCH_SCALE=10
 # reached through a port-forward (e.g. rootless podman/pasta on Fedora Atomic).
 PGBENCH_INIT_STEPS="${PGBENCH_INIT_STEPS:-dtgvp}"
 
+source "$(dirname "${BASH_SOURCE[0]}")/pg-connection.sh"
+
 log_info() {
     echo -e "${GREEN}[INFO]${NC} $*"
 }
@@ -65,6 +67,7 @@ OPTIONS:
     -d, --database DB       PostgreSQL database (default: postgres)
 
 ENVIRONMENT VARIABLES:
+    PG_EXPORTER_DSN         PostgreSQL DSN; overrides PG_HOST/PG_PORT/PG_USER
     PG_HOST                 PostgreSQL host
     PG_PORT                 PostgreSQL port
     PG_USER                 PostgreSQL user
@@ -165,22 +168,37 @@ parse_args() {
 }
 
 # Execute psql command with connection parameters
+run_psql_db() {
+    local db="$1"
+    shift
+
+    pg_connection_psql_cmd "${db}" "$@"
+}
+
 run_psql() {
-    PGOPTIONS='--client-min-messages=warning' psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$PG_DATABASE" --no-psqlrc "$@"
+    run_psql_db "$PG_DATABASE" "$@"
+}
+
+run_pgbench_db() {
+    local db="$1"
+    shift
+
+    pg_connection_pgbench_cmd "${db}" "$@"
 }
 
 # Check if PostgreSQL is running
 check_postgres() {
-    log_info "Checking PostgreSQL connection at $PG_HOST:$PG_PORT..."
-    log_debug "Using user: $PG_USER, database: $PG_DATABASE"
+    log_info "Checking PostgreSQL connection at $(pg_connection_description "$PG_DATABASE")..."
+    log_debug "Using database: $PG_DATABASE"
 
     if ! run_psql -c "SELECT 1" &>/dev/null; then
-        log_error "Cannot connect to PostgreSQL at $PG_HOST:$PG_PORT"
+        log_error "Cannot connect to PostgreSQL at $(pg_connection_description "$PG_DATABASE")"
         log_error ""
         log_error "Troubleshooting:"
         log_error "  • Check if PostgreSQL is running: just postgres"
         log_error "  • Verify connection settings: PG_HOST=$PG_HOST PG_PORT=$PG_PORT"
-        log_error "  • Check pg_hba.conf allows connections from localhost"
+        log_error "  • Or set PG_EXPORTER_DSN to the PostgreSQL endpoint"
+        log_error "  • Check pg_hba.conf allows connections from this client"
         exit 1
     fi
     log_info "✓ PostgreSQL is running"
@@ -304,7 +322,7 @@ generate_pgbench_data() {
 
     # Ensure pg_stat_statements extension exists in pgbench_test
     log_debug "Ensuring pg_stat_statements extension in pgbench_test..."
-    PGOPTIONS='--client-min-messages=warning' psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d pgbench_test --no-psqlrc -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;" >/dev/null
+    run_psql_db pgbench_test -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;" >/dev/null
 
     # Clear any leftover connections to pgbench_test (e.g. a stalled or killed
     # previous pgbench run whose backend is still holding table locks). Without
@@ -319,13 +337,13 @@ generate_pgbench_data() {
     # podman/pasta port-forward on Fedora Atomic).
     log_info "Initializing pgbench schema (init steps: ${PGBENCH_INIT_STEPS})..."
     if [ "$VERBOSE" = true ]; then
-        pgbench -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -i -I "$PGBENCH_INIT_STEPS" -s "$PGBENCH_SCALE" pgbench_test
+        run_pgbench_db pgbench_test -i -I "$PGBENCH_INIT_STEPS" -s "$PGBENCH_SCALE"
     else
-        pgbench -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -i -I "$PGBENCH_INIT_STEPS" -s "$PGBENCH_SCALE" pgbench_test -q
+        run_pgbench_db pgbench_test -i -I "$PGBENCH_INIT_STEPS" -s "$PGBENCH_SCALE" -q
     fi
 
     # Reset stats for clean baseline
-    PGOPTIONS='--client-min-messages=warning' psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d pgbench_test --no-psqlrc -c "SELECT pg_stat_statements_reset();" >/dev/null
+    run_psql_db pgbench_test -c "SELECT pg_stat_statements_reset();" >/dev/null
 
     # Run a short benchmark to generate query stats
     log_info "Running pgbench workload to populate pg_stat_statements..."
@@ -334,9 +352,9 @@ generate_pgbench_data() {
 
     if [ "$VERBOSE" = true ]; then
         log_debug "Running: pgbench -c$clients -T$duration (10 seconds)"
-        pgbench -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -c "$clients" -T "$duration" pgbench_test
+        run_pgbench_db pgbench_test -c "$clients" -T "$duration"
     else
-        pgbench -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -c "$clients" -T "$duration" pgbench_test 2>&1 | grep -E "^(tps|number of)"
+        run_pgbench_db pgbench_test -c "$clients" -T "$duration" 2>&1 | grep -E "^(tps|number of)"
     fi
 
     log_info "✓ pgbench data generated"
@@ -344,7 +362,7 @@ generate_pgbench_data() {
     # Show pgbench stats
     if [ "$VERBOSE" = true ]; then
         log_debug "pgbench database stats:"
-        PGOPTIONS='--client-min-messages=warning' psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d pgbench_test --no-psqlrc -c "
+        run_psql_db pgbench_test -c "
             SELECT
                 schemaname,
                 tablename,
@@ -434,7 +452,7 @@ show_stats() {
     log_info "Current pg_stat_statements statistics (database: $target_db):"
     echo ""
 
-    PGOPTIONS='--client-min-messages=warning' psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$target_db" --no-psqlrc -c "
+    run_psql_db "$target_db" -c "
         SELECT
             COUNT(*) as total_queries,
             COUNT(*) FILTER (WHERE query IS NULL) as null_queries,
@@ -446,7 +464,7 @@ show_stats() {
     log_info "Top 5 queries by execution time:"
     echo ""
 
-    PGOPTIONS='--client-min-messages=warning' psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$target_db" --no-psqlrc -c "
+    run_psql_db "$target_db" -c "
         SELECT
             LEFT(query, 60) as query_sample,
             calls,
@@ -464,7 +482,7 @@ main() {
 
     log_info "=== pg_exporter Test Database Setup ==="
     if [ "$VERBOSE" = true ]; then
-        log_debug "Connection: $PG_USER@$PG_HOST:$PG_PORT/$PG_DATABASE"
+        log_debug "Connection: $(pg_connection_description "$PG_DATABASE")"
     fi
     echo ""
 

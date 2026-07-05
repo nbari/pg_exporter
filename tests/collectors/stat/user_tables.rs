@@ -129,6 +129,92 @@ async fn test_stat_user_tables_collector_with_created_table() -> Result<()> {
 }
 
 #[tokio::test]
+async fn test_stat_user_tables_collector_block_io_metrics() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+
+    let table_name = unique_table_name("test_blockio");
+
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "CREATE TABLE IF NOT EXISTS {table_name} (id INT PRIMARY KEY, data TEXT)"
+    )))
+    .execute(&pool)
+    .await?;
+
+    for i in 0..50 {
+        sqlx::query(sqlx::AssertSqlSafe(&*format!(
+            "INSERT INTO {table_name} (id, data) VALUES ({i}, 'payload') ON CONFLICT DO NOTHING"
+        )))
+        .execute(&pool)
+        .await?;
+    }
+
+    // Force heap and index block access so pg_statio counters are populated.
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "SELECT count(*) FROM {table_name} WHERE id > 0"
+    )))
+    .fetch_one(&pool)
+    .await?;
+
+    let collector = StatUserTablesCollector::new();
+    let registry = Registry::new();
+
+    collector.register_metrics(&registry)?;
+    collector.collect(&pool).await?;
+
+    let metric_families = registry.gather();
+
+    let block_io_metrics = [
+        "pg_stat_user_tables_heap_blks_read_total",
+        "pg_stat_user_tables_heap_blks_hit_total",
+        "pg_stat_user_tables_idx_blks_read_total",
+        "pg_stat_user_tables_idx_blks_hit_total",
+        "pg_stat_user_tables_toast_blks_read_total",
+        "pg_stat_user_tables_toast_blks_hit_total",
+        "pg_stat_user_tables_tidx_blks_read_total",
+        "pg_stat_user_tables_tidx_blks_hit_total",
+    ];
+
+    for metric_name in block_io_metrics {
+        assert!(
+            metric_families.iter().any(|f| f.name() == metric_name),
+            "block-I/O metric {metric_name} should be registered. Found: {:?}",
+            metric_families
+                .iter()
+                .map(prometheus::proto::MetricFamily::name)
+                .collect::<Vec<_>>()
+        );
+
+        if let Some(metric) = find_metric_for_table(&metric_families, metric_name, &table_name) {
+            let label_names: Vec<&str> = metric
+                .get_label()
+                .iter()
+                .map(prometheus::proto::LabelPair::name)
+                .collect();
+            assert!(
+                label_names.contains(&"datname")
+                    && label_names.contains(&"schemaname")
+                    && label_names.contains(&"relname"),
+                "{metric_name} should carry datname/schemaname/relname labels"
+            );
+            let value = metric.get_gauge().value();
+            assert!(
+                value >= 0.0,
+                "{metric_name} should be non-negative, got {value}"
+            );
+        }
+    }
+
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "DROP TABLE IF EXISTS {table_name}"
+    )))
+    .execute(&pool)
+    .await?;
+
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_stat_user_tables_collector_metrics_have_correct_labels() -> Result<()> {
     let pool = common::create_test_pool().await?;
 

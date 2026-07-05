@@ -1,13 +1,13 @@
-use crate::collectors::{Collector, i64_to_f64};
 use crate::collectors::util::{
-    get_default_database, get_excluded_databases, get_or_create_pool_for_db,
+    get_default_database, get_excluded_databases, get_max_db_concurrency, get_or_create_pool_for_db,
 };
+use crate::collectors::{Collector, all_databases_failed, i64_to_f64};
 use anyhow::{Result, anyhow};
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, IntGaugeVec, Opts, Registry};
 use sqlx::{PgPool, Row, postgres::PgRow};
-use std::time::Duration;
-use tokio::task::JoinSet;
+use std::{sync::Arc, time::Duration};
+use tokio::{sync::Semaphore, task::JoinSet};
 use tracing::{debug, error, info_span, instrument};
 use tracing_futures::Instrument as _;
 
@@ -47,6 +47,16 @@ pub struct StatUserTablesCollector {
     // Sizes
     index_size_bytes: IntGaugeVec,
     table_size_bytes: IntGaugeVec,
+
+    // Block I/O Metrics (from pg_statio_user_tables)
+    heap_blks_read: IntGaugeVec,
+    heap_blks_hit: IntGaugeVec,
+    idx_blks_read: IntGaugeVec,
+    idx_blks_hit: IntGaugeVec,
+    toast_blks_read: IntGaugeVec,
+    toast_blks_hit: IntGaugeVec,
+    tidx_blks_read: IntGaugeVec,
+    tidx_blks_hit: IntGaugeVec,
 
     // Bloat metrics (derived from tuple counts and sizes)
     bloat_ratio: GaugeVec,
@@ -114,6 +124,14 @@ impl StatUserTablesCollector {
             never_autoanalyzed: int_metric("pg_stat_user_tables_never_autoanalyzed", "Whether the table has never been autoanalyzed (1 = never autoanalyzed)"),
             autovacuum_threshold_ratio: gauge_metric("pg_stat_user_tables_autovacuum_threshold_ratio", "Ratio of dead tuples to autovacuum threshold (0.0 clean, 1.0 trigger, >1.0 overdue)"),
             autoanalyze_threshold_ratio: gauge_metric("pg_stat_user_tables_autoanalyze_threshold_ratio", "Ratio of modified tuples to autoanalyze threshold (0.0 clean, 1.0 trigger, >1.0 overdue)"),
+            heap_blks_read: int_metric("pg_stat_user_tables_heap_blks_read_total", "Number of disk blocks read from this table"),
+            heap_blks_hit: int_metric("pg_stat_user_tables_heap_blks_hit_total", "Number of buffer hits in this table"),
+            idx_blks_read: int_metric("pg_stat_user_tables_idx_blks_read_total", "Number of disk blocks read from all indexes on this table"),
+            idx_blks_hit: int_metric("pg_stat_user_tables_idx_blks_hit_total", "Number of buffer hits in all indexes on this table"),
+            toast_blks_read: int_metric("pg_stat_user_tables_toast_blks_read_total", "Number of disk blocks read from this table's TOAST table (if any)"),
+            toast_blks_hit: int_metric("pg_stat_user_tables_toast_blks_hit_total", "Number of buffer hits in this table's TOAST table (if any)"),
+            tidx_blks_read: int_metric("pg_stat_user_tables_tidx_blks_read_total", "Number of disk blocks read from this table's TOAST table indexes (if any)"),
+            tidx_blks_hit: int_metric("pg_stat_user_tables_tidx_blks_hit_total", "Number of buffer hits in this table's TOAST table indexes (if any)"),
         }
     }
 
@@ -147,6 +165,14 @@ impl StatUserTablesCollector {
         self.never_autoanalyzed.reset();
         self.autovacuum_threshold_ratio.reset();
         self.autoanalyze_threshold_ratio.reset();
+        self.heap_blks_read.reset();
+        self.heap_blks_hit.reset();
+        self.idx_blks_read.reset();
+        self.idx_blks_hit.reset();
+        self.toast_blks_read.reset();
+        self.toast_blks_hit.reset();
+        self.tidx_blks_read.reset();
+        self.tidx_blks_hit.reset();
     }
 }
 
@@ -229,9 +255,18 @@ const STAT_USER_TABLES_QUERY: &str = r"
                     ) * s.n_live_tup::double precision
                 )
             ELSE 0
-        END AS autoanalyze_threshold_ratio
+        END AS autoanalyze_threshold_ratio,
+        COALESCE(io.heap_blks_read::bigint, 0) AS heap_blks_read,
+        COALESCE(io.heap_blks_hit::bigint, 0) AS heap_blks_hit,
+        COALESCE(io.idx_blks_read::bigint, 0) AS idx_blks_read,
+        COALESCE(io.idx_blks_hit::bigint, 0) AS idx_blks_hit,
+        COALESCE(io.toast_blks_read::bigint, 0) AS toast_blks_read,
+        COALESCE(io.toast_blks_hit::bigint, 0) AS toast_blks_hit,
+        COALESCE(io.tidx_blks_read::bigint, 0) AS tidx_blks_read,
+        COALESCE(io.tidx_blks_hit::bigint, 0) AS tidx_blks_hit
     FROM pg_stat_user_tables s
     JOIN pg_class c ON c.oid = s.relid
+    LEFT JOIN pg_statio_user_tables io ON io.relid = s.relid
     ";
 
 #[derive(Clone, Debug)]
@@ -266,6 +301,14 @@ struct UserTableSample {
     never_autoanalyzed: i64,
     autovacuum_threshold_ratio: f64,
     autoanalyze_threshold_ratio: f64,
+    heap_blks_read: i64,
+    heap_blks_hit: i64,
+    idx_blks_read: i64,
+    idx_blks_hit: i64,
+    toast_blks_read: i64,
+    toast_blks_hit: i64,
+    tidx_blks_read: i64,
+    tidx_blks_hit: i64,
 }
 
 #[allow(clippy::expect_used)]
@@ -315,6 +358,14 @@ impl Collector for StatUserTablesCollector {
         registry.register(Box::new(self.never_autoanalyzed.clone()))?;
         registry.register(Box::new(self.autovacuum_threshold_ratio.clone()))?;
         registry.register(Box::new(self.autoanalyze_threshold_ratio.clone()))?;
+        registry.register(Box::new(self.heap_blks_read.clone()))?;
+        registry.register(Box::new(self.heap_blks_hit.clone()))?;
+        registry.register(Box::new(self.idx_blks_read.clone()))?;
+        registry.register(Box::new(self.idx_blks_hit.clone()))?;
+        registry.register(Box::new(self.toast_blks_read.clone()))?;
+        registry.register(Box::new(self.toast_blks_hit.clone()))?;
+        registry.register(Box::new(self.tidx_blks_read.clone()))?;
+        registry.register(Box::new(self.tidx_blks_hit.clone()))?;
         Ok(())
     }
 
@@ -349,14 +400,24 @@ impl Collector for StatUserTablesCollector {
             let shared_pool = pool.clone();
             let default_db = get_default_database().map(std::string::ToString::to_string);
 
-            // 2) Spawn one task per DB (no semaphore), reuse shared pool for default DB, tiny pool for others
+            // 2) Spawn one task per DB, reuse shared pool for default DB, tiny pool for others.
+            // A semaphore bounds how many databases are queried concurrently so peak
+            // connections do not scale with the number of databases in the cluster.
             let mut tasks = JoinSet::new();
+            let semaphore = Arc::new(Semaphore::new(get_max_db_concurrency()));
 
+            let num_dbs = dbs.len();
             for datname in dbs {
                 let shared_pool = shared_pool.clone();
                 let default_db = default_db.clone();
+                let semaphore = Arc::clone(&semaphore);
 
                 tasks.spawn(async move {
+                    let Ok(_permit) = semaphore.acquire_owned().await else {
+                        return Err(anyhow!(
+                            "stat_user_tables: concurrency semaphore closed before acquiring permit"
+                        ));
+                    };
                     let datname_for_timeout = datname.clone();
                     let use_shared = default_db.as_deref() == Some(datname.as_str());
 
@@ -380,13 +441,11 @@ impl Collector for StatUserTablesCollector {
                                 .map_err(Into::into)
                         } else {
                             match get_or_create_pool_for_db(&datname).await {
-                                Ok(per_db_pool) => {
-                                    sqlx::query(STAT_USER_TABLES_QUERY)
-                                        .fetch_all(&per_db_pool)
-                                        .instrument(query_span)
-                                        .await
-                                        .map_err(Into::into)
-                                }
+                                Ok(per_db_pool) => sqlx::query(STAT_USER_TABLES_QUERY)
+                                    .fetch_all(&per_db_pool)
+                                    .instrument(query_span)
+                                    .await
+                                    .map_err(Into::into),
                                 Err(e) => Err(e),
                             }
                         };
@@ -436,6 +495,14 @@ impl Collector for StatUserTablesCollector {
                                 autoanalyze_threshold_ratio: row
                                     .try_get("autoanalyze_threshold_ratio")
                                     .unwrap_or(0.0),
+                                heap_blks_read: row.try_get("heap_blks_read").unwrap_or(0),
+                                heap_blks_hit: row.try_get("heap_blks_hit").unwrap_or(0),
+                                idx_blks_read: row.try_get("idx_blks_read").unwrap_or(0),
+                                idx_blks_hit: row.try_get("idx_blks_hit").unwrap_or(0),
+                                toast_blks_read: row.try_get("toast_blks_read").unwrap_or(0),
+                                toast_blks_hit: row.try_get("toast_blks_hit").unwrap_or(0),
+                                tidx_blks_read: row.try_get("tidx_blks_read").unwrap_or(0),
+                                tidx_blks_hit: row.try_get("tidx_blks_hit").unwrap_or(0),
                             });
                         }
 
@@ -452,6 +519,7 @@ impl Collector for StatUserTablesCollector {
 
             let mut all_samples = Vec::new();
             let mut failures = Vec::new();
+            let mut failed_db_count = 0;
             while !tasks.is_empty() {
                 match tokio::time::timeout(TASK_JOIN_WAIT_TIMEOUT, tasks.join_next()).await {
                     Ok(Some(Ok(Ok(samples)))) => {
@@ -460,10 +528,12 @@ impl Collector for StatUserTablesCollector {
                     Ok(Some(Ok(Err(e)))) => {
                         error!(error=?e, "stat_user_tables: task returned error");
                         failures.push(e.to_string());
+                        failed_db_count += 1;
                     }
                     Ok(Some(Err(e))) => {
                         error!(error=?e, "stat_user_tables: task join error");
                         failures.push(e.to_string());
+                        failed_db_count += 1;
                     }
                     Ok(None) => {
                         break;
@@ -474,22 +544,22 @@ impl Collector for StatUserTablesCollector {
                         failures.push(format!(
                             "timed out waiting for {pending_tasks} database collection task(s) after {TASK_JOIN_WAIT_TIMEOUT:?}"
                         ));
+                        failed_db_count += pending_tasks;
                         break;
                     }
                 }
             }
 
-            if all_samples.is_empty() && !failures.is_empty() {
+            if all_databases_failed(num_dbs, failed_db_count) {
                 return Err(anyhow!(
-                    "stat_user_tables collection failed for {} database task(s): {}",
-                    failures.len(),
+                    "stat_user_tables collection failed for ALL {failed_db_count} database task(s): {}",
                     failures.join("; ")
                 ));
             }
 
             if !failures.is_empty() {
                 error!(
-                    failed_databases = failures.len(),
+                    failed_databases = failed_db_count,
                     errors = %failures.join("; "),
                     "stat_user_tables: continuing with partial snapshot after per-database failures"
                 );
@@ -558,6 +628,15 @@ impl Collector for StatUserTablesCollector {
                     .with_label_values(&labels)
                     .set(sample.autoanalyze_threshold_ratio);
 
+                self.heap_blks_read.with_label_values(&labels).set(sample.heap_blks_read);
+                self.heap_blks_hit.with_label_values(&labels).set(sample.heap_blks_hit);
+                self.idx_blks_read.with_label_values(&labels).set(sample.idx_blks_read);
+                self.idx_blks_hit.with_label_values(&labels).set(sample.idx_blks_hit);
+                self.toast_blks_read.with_label_values(&labels).set(sample.toast_blks_read);
+                self.toast_blks_hit.with_label_values(&labels).set(sample.toast_blks_hit);
+                self.tidx_blks_read.with_label_values(&labels).set(sample.tidx_blks_read);
+                self.tidx_blks_hit.with_label_values(&labels).set(sample.tidx_blks_hit);
+
                 debug!(
                     datname=%sample.datname,
                     schema=%sample.schemaname,
@@ -601,5 +680,28 @@ mod tests {
             STAT_USER_TABLES_QUERY.contains("never_autoanalyzed"),
             "query should expose never_autoanalyzed flag"
         );
+    }
+
+    #[test]
+    fn test_stat_user_tables_query_includes_block_io() {
+        assert!(
+            STAT_USER_TABLES_QUERY.contains("LEFT JOIN pg_statio_user_tables io ON io.relid = s.relid"),
+            "query should left-join pg_statio_user_tables so tables without I/O rows are kept"
+        );
+        for column in [
+            "heap_blks_read",
+            "heap_blks_hit",
+            "idx_blks_read",
+            "idx_blks_hit",
+            "toast_blks_read",
+            "toast_blks_hit",
+            "tidx_blks_read",
+            "tidx_blks_hit",
+        ] {
+            assert!(
+                STAT_USER_TABLES_QUERY.contains(&format!("COALESCE(io.{column}::bigint, 0) AS {column}")),
+                "query should expose {column} as a COALESCE'd ::bigint aggregate"
+            );
+        }
     }
 }

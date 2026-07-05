@@ -200,6 +200,40 @@ and on (datname, schemaname, relname)
   pg_stat_user_tables_table_size_bytes > 1073741824
 ```
 
+### 3.4 Buffer cache hit ratio (I/O pressure)
+
+The `stat` collector also exports per-table block-I/O counters sourced from
+`pg_statio_user_tables` (labels `datname`, `schemaname`, `relname`) as Prometheus
+**gauges**. `*_blks_hit` counts blocks served from the shared-buffer cache; `*_blks_read`
+counts blocks that had to be fetched from the OS/disk. A low ratio means the table is
+I/O-bound and reinforces the "missing index" / cold-cache story above.
+
+Heap (table) cache-hit ratio — `1.0` = everything served from cache:
+
+```promql
+pg_stat_user_tables_heap_blks_hit_total
+/
+clamp_min(pg_stat_user_tables_heap_blks_hit_total + pg_stat_user_tables_heap_blks_read_total, 1)
+```
+
+Index cache-hit ratio for the same table (low values mean the index itself is not
+resident in cache, so even index scans hit disk):
+
+```promql
+pg_stat_user_tables_idx_blks_hit_total
+/
+clamp_min(pg_stat_user_tables_idx_blks_hit_total + pg_stat_user_tables_idx_blks_read_total, 1)
+```
+
+The `index` collector exposes the equivalent cluster-wide index I/O via
+`pg_index_idx_blks_hit_total` / `pg_index_idx_blks_read_total` (labelled by `datname`),
+useful for a per-database rollup. TOAST and TOAST-index blocks are available too via
+`pg_stat_user_tables_toast_blks_*` and `pg_stat_user_tables_tidx_blks_*`.
+
+A persistently low heap or index hit ratio on a hot table points to memory pressure:
+either `shared_buffers` is too small for the working set, or a missing/oversized index
+is forcing extra reads. Pair this with §3.1–§3.3 before acting.
+
 ### How to act
 
 Identify the candidate table, then find the actual SQL in `pg_stat_statements` and

@@ -155,9 +155,9 @@ The following collectors are available:
 * `--collector.database` [database](src/collectors/database/mod.rs)
 * `--collector.vacuum` [vacuum](src/collectors/vacuum/mod.rs)
 * `--collector.locks` [locks](src/collectors/locks/mod.rs) - Lock counts plus blocking diagnostics (`pg_blocked_sessions`, `pg_blocking_sessions`, `pg_longest_blocked_seconds`, `pg_lock_waits`). See the [database-pressure diagnostics guide](docs/diagnosing-database-pressure.md#2-blocking--lock-contention).
-* `--collector.stat` [stat](src/collectors/stat/mod.rs) - Per-table `pg_stat_user_tables` stats; use the seq-scan vs index-scan signals to [find missing indexes](docs/diagnosing-database-pressure.md#3-missing-indexes).
+* `--collector.stat` [stat](src/collectors/stat/mod.rs) - Per-table `pg_stat_user_tables` stats plus block-I/O counters from `pg_statio_user_tables` (heap/index/TOAST cache hits vs disk reads); use the seq-scan vs index-scan signals to [find missing indexes](docs/diagnosing-database-pressure.md#3-missing-indexes) and the [buffer cache hit ratio](docs/diagnosing-database-pressure.md#34-buffer-cache-hit-ratio-io-pressure) to spot I/O pressure.
 * `--collector.replication` [replication](src/collectors/replication/mod.rs)
-* `--collector.index` [index](src/collectors/index/mod.rs)
+* `--collector.index` [index](src/collectors/index/mod.rs) - Per-database index usage from `pg_stat_user_indexes` plus index block-I/O from `pg_statio_user_indexes` (`pg_index_idx_blks_hit_total` / `pg_index_idx_blks_read_total`).
 * `--collector.statements` [statements](src/collectors/statements/README.md) - Query performance metrics from `pg_stat_statements` (see [detailed guide](src/collectors/statements/README.md))
 * `--collector.tls` [tls](src/collectors/tls/mod.rs) - SSL/TLS certificate monitoring and connection encryption stats (PostgreSQL 14+)
 * `--collector.exporter` [exporter](src/collectors/exporter/mod.rs) - Exporter self-monitoring (process metrics, scrape performance, cardinality tracking)
@@ -174,6 +174,15 @@ to reduce `pg_stat_statements` cardinality and scrape cost:
 
 The `statements` collector defaults to `--statements.top-n 25` if not specified. You can also use
 `PG_EXPORTER_STATEMENTS_TOP_N`.
+
+On clusters with many databases, the multi-database collectors (`stat`, `index`) query one
+database at a time up to a concurrency limit — each database needs its own connection, so this
+keeps peak connections independent of the number of databases (important on connection-limited
+instances such as AWS RDS). It defaults to `--collectors.max-db-concurrency 5`; raise it for faster
+scrapes on large clusters with connection headroom, or lower it on small/shared instances. You can
+also use `PG_EXPORTER_MAX_DB_CONCURRENCY`.
+
+    pg_exporter --collector.stat --collectors.max-db-concurrency 10
 
 For local observability testing with Prometheus and Grafana, a practical flow is:
 

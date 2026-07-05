@@ -7,6 +7,8 @@ ROUNDS="5"
 SAMPLE_MOD="5"
 TABLE="pgbench_accounts"
 
+source "$(dirname "${BASH_SOURCE[0]}")/pg-connection.sh"
+
 usage() {
     cat <<'EOF'
 Usage: run-vacuum-workflow.sh [options]
@@ -69,9 +71,16 @@ if ! command -v psql >/dev/null 2>&1; then
     exit 1
 fi
 
-if ! psql -h localhost -p 5432 -U postgres -d postgres -c "SELECT 1" >/dev/null 2>&1; then
-    echo "❌ PostgreSQL is not reachable on localhost:5432"
-    echo "Start it first with: just postgres"
+psql_cmd() {
+    local db="$1"
+    shift
+
+    pg_connection_psql_cmd "${db}" "$@"
+}
+
+if ! psql_cmd postgres -c "SELECT 1" >/dev/null 2>&1; then
+    echo "❌ PostgreSQL is not reachable at $(pg_connection_description postgres)"
+    echo "Start it first with: just postgres, or set PG_EXPORTER_DSN/PG_HOST/PG_PORT"
     exit 1
 fi
 
@@ -82,7 +91,7 @@ show_vacuum_stats() {
     local title="$1"
     echo
     echo "📊 ${title}"
-    psql -h localhost -p 5432 -U postgres -d "${DB}" --tuples-only --no-align <<SQL
+    psql_cmd "${DB}" --tuples-only --no-align <<SQL
 SELECT
     relname,
     n_live_tup,
@@ -129,7 +138,7 @@ echo
 echo "🧪 Generating dead tuples in ${DB}.${TABLE} with ${ROUNDS} update rounds..."
 for round in $(seq 1 "${ROUNDS}"); do
     echo "  • round ${round}/${ROUNDS}"
-    psql -h localhost -p 5432 -U postgres -d "${DB}" --set ON_ERROR_STOP=1 \
+    psql_cmd "${DB}" --set ON_ERROR_STOP=1 \
         -c "UPDATE ${TABLE} SET abalance = abalance + 1 WHERE aid % ${SAMPLE_MOD} = 0;" >/dev/null
 done
 
@@ -138,7 +147,7 @@ show_vacuum_stats "Top tables after churn"
 echo
 echo "🚀 Running VACUUM (VERBOSE, ANALYZE) on ${DB}.${TABLE}..."
 echo "   Keep Grafana open on the Vacuum & Maintenance row and the table-stat panels."
-psql -h localhost -p 5432 -U postgres -d "${DB}" --set ON_ERROR_STOP=1 \
+psql_cmd "${DB}" --set ON_ERROR_STOP=1 \
     -c "VACUUM (VERBOSE, ANALYZE) ${TABLE};"
 
 show_vacuum_stats "Top tables after manual vacuum"

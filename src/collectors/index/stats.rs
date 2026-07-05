@@ -1,14 +1,13 @@
-use crate::collectors::i64_to_f64;
 use crate::collectors::util::{
-    get_default_database, get_excluded_databases, get_or_create_pool_for_db,
+    get_default_database, get_excluded_databases, get_max_db_concurrency, get_or_create_pool_for_db,
 };
-use crate::collectors::Collector;
+use crate::collectors::{Collector, all_databases_failed, i64_to_f64};
 use anyhow::{Result, anyhow};
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, Opts, Registry};
 use sqlx::{PgPool, Row, postgres::PgRow};
-use std::time::Duration;
-use tokio::task::JoinSet;
+use std::{sync::Arc, time::Duration};
+use tokio::{sync::Semaphore, task::JoinSet};
 use tracing::{debug, error, info_span, instrument};
 use tracing_futures::Instrument as _;
 
@@ -43,6 +42,8 @@ pub struct IndexStatsCollector {
     tuples_fetched: GaugeVec,
     size_bytes: GaugeVec,
     valid: GaugeVec,
+    idx_blks_read: GaugeVec,
+    idx_blks_hit: GaugeVec,
 }
 
 impl Default for IndexStatsCollector {
@@ -66,9 +67,12 @@ const INDEX_STATS_QUERY: &str = r"
         COALESCE(SUM(s.idx_tup_read), 0)::bigint AS total_tup_read,
         COALESCE(SUM(s.idx_tup_fetch), 0)::bigint AS total_tup_fetch,
         COALESCE(SUM(pg_relation_size(s.indexrelid)), 0)::bigint AS total_size_bytes,
-        COALESCE(SUM(i.indisvalid::int), 0)::bigint AS valid_count
+        COALESCE(SUM(i.indisvalid::int), 0)::bigint AS valid_count,
+        COALESCE(SUM(io.idx_blks_read), 0)::bigint AS total_idx_blks_read,
+        COALESCE(SUM(io.idx_blks_hit), 0)::bigint AS total_idx_blks_hit
     FROM pg_stat_user_indexes s
     JOIN pg_index i ON s.indexrelid = i.indexrelid
+    LEFT JOIN pg_statio_user_indexes io ON s.indexrelid = io.indexrelid
     WHERE s.schemaname NOT IN ('pg_catalog', 'information_schema')
     ";
 
@@ -80,6 +84,8 @@ struct IndexStatsSample {
     tuples_fetched: i64,
     size_bytes: i64,
     valid: i64,
+    idx_blks_read: i64,
+    idx_blks_hit: i64,
 }
 
 impl IndexStatsCollector {
@@ -132,6 +138,22 @@ impl IndexStatsCollector {
                 &INDEX_STATS_LABELS,
             )
             .expect("Failed to create pg_index_valid"),
+            idx_blks_read: GaugeVec::new(
+                Opts::new(
+                    "pg_index_idx_blks_read_total",
+                    "Number of disk blocks read from all indexes in this database",
+                ),
+                &INDEX_STATS_LABELS,
+            )
+            .expect("Failed to create pg_index_idx_blks_read_total"),
+            idx_blks_hit: GaugeVec::new(
+                Opts::new(
+                    "pg_index_idx_blks_hit_total",
+                    "Number of buffer hits in all indexes in this database",
+                ),
+                &INDEX_STATS_LABELS,
+            )
+            .expect("Failed to create pg_index_idx_blks_hit_total"),
         }
     }
 
@@ -141,6 +163,8 @@ impl IndexStatsCollector {
         self.tuples_fetched.reset();
         self.size_bytes.reset();
         self.valid.reset();
+        self.idx_blks_read.reset();
+        self.idx_blks_hit.reset();
     }
 
     fn sample_from_row(row: &PgRow) -> Result<IndexStatsSample> {
@@ -153,6 +177,8 @@ impl IndexStatsCollector {
             tuples_fetched: row.try_get("total_tup_fetch").unwrap_or(0),
             size_bytes: row.try_get("total_size_bytes").unwrap_or(0),
             valid: row.try_get("valid_count").unwrap_or(0),
+            idx_blks_read: row.try_get("total_idx_blks_read").unwrap_or(0),
+            idx_blks_hit: row.try_get("total_idx_blks_hit").unwrap_or(0),
         })
     }
 }
@@ -168,6 +194,8 @@ impl Collector for IndexStatsCollector {
         registry.register(Box::new(self.tuples_fetched.clone()))?;
         registry.register(Box::new(self.size_bytes.clone()))?;
         registry.register(Box::new(self.valid.clone()))?;
+        registry.register(Box::new(self.idx_blks_read.clone()))?;
+        registry.register(Box::new(self.idx_blks_hit.clone()))?;
         Ok(())
     }
 
@@ -209,12 +237,22 @@ impl Collector for IndexStatsCollector {
 
             // 2) One task per DB: reuse shared pool for the default DB, tiny pool for others.
             let mut tasks: JoinSet<Result<Option<IndexStatsSample>>> = JoinSet::new();
+            let semaphore = Arc::new(Semaphore::new(get_max_db_concurrency()));
 
+            let num_dbs = dbs.len();
             for datname in dbs {
                 let shared_pool = shared_pool.clone();
                 let default_db = default_db.clone();
+                let semaphore = Arc::clone(&semaphore);
 
                 tasks.spawn(async move {
+                    // Bound how many databases we query at once so peak connections do not
+                    // scale with the number of databases in the cluster.
+                    let Ok(_permit) = semaphore.acquire_owned().await else {
+                        return Err(anyhow!(
+                            "index_stats: concurrency semaphore closed before acquiring permit"
+                        ));
+                    };
                     let datname_for_timeout = datname.clone();
                     let use_shared = default_db.as_deref() == Some(datname.as_str());
 
@@ -263,6 +301,7 @@ impl Collector for IndexStatsCollector {
 
             let mut all_samples = Vec::new();
             let mut failures = Vec::new();
+            let mut failed_db_count = 0;
             while !tasks.is_empty() {
                 match tokio::time::timeout(TASK_JOIN_WAIT_TIMEOUT, tasks.join_next()).await {
                     Ok(Some(Ok(Ok(Some(sample))))) => all_samples.push(sample),
@@ -270,10 +309,12 @@ impl Collector for IndexStatsCollector {
                     Ok(Some(Ok(Err(e)))) => {
                         error!(error=?e, "index_stats: task returned error");
                         failures.push(e.to_string());
+                        failed_db_count += 1;
                     }
                     Ok(Some(Err(e))) => {
                         error!(error=?e, "index_stats: task join error");
                         failures.push(e.to_string());
+                        failed_db_count += 1;
                     }
                     Ok(None) => break,
                     Err(_) => {
@@ -282,22 +323,22 @@ impl Collector for IndexStatsCollector {
                         failures.push(format!(
                             "timed out waiting for {pending_tasks} database collection task(s) after {TASK_JOIN_WAIT_TIMEOUT:?}"
                         ));
+                        failed_db_count += pending_tasks;
                         break;
                     }
                 }
             }
 
-            if all_samples.is_empty() && !failures.is_empty() {
+            if all_databases_failed(num_dbs, failed_db_count) {
                 return Err(anyhow!(
-                    "index_stats collection failed for {} database task(s): {}",
-                    failures.len(),
+                    "index_stats collection failed for ALL {failed_db_count} database task(s): {}",
                     failures.join("; ")
                 ));
             }
 
             if !failures.is_empty() {
                 error!(
-                    failed_databases = failures.len(),
+                    failed_databases = failed_db_count,
                     errors = %failures.join("; "),
                     "index_stats: continuing with partial snapshot after per-database failures"
                 );
@@ -322,6 +363,12 @@ impl Collector for IndexStatsCollector {
                 self.valid
                     .with_label_values(&labels)
                     .set(i64_to_f64(sample.valid));
+                self.idx_blks_read
+                    .with_label_values(&labels)
+                    .set(i64_to_f64(sample.idx_blks_read));
+                self.idx_blks_hit
+                    .with_label_values(&labels)
+                    .set(i64_to_f64(sample.idx_blks_hit));
 
                 debug!(
                     datname = %sample.datname,
@@ -362,5 +409,26 @@ mod tests {
         assert!(INDEX_STATS_QUERY.contains("current_database() AS datname"));
         assert!(INDEX_STATS_QUERY.contains("pg_stat_user_indexes"));
         assert!(INDEX_STATS_QUERY.contains("::bigint"));
+    }
+
+    #[test]
+    fn test_index_stats_query_includes_block_io() {
+        assert!(
+            INDEX_STATS_QUERY.contains("LEFT JOIN pg_statio_user_indexes"),
+            "query should left-join pg_statio_user_indexes so missing rows do not drop indexes"
+        );
+        assert!(
+            INDEX_STATS_QUERY.contains("io.idx_blks_read"),
+            "query should aggregate idx_blks_read from pg_statio_user_indexes"
+        );
+        assert!(
+            INDEX_STATS_QUERY.contains("io.idx_blks_hit"),
+            "query should aggregate idx_blks_hit from pg_statio_user_indexes"
+        );
+        assert!(
+            INDEX_STATS_QUERY.contains("AS total_idx_blks_read")
+                && INDEX_STATS_QUERY.contains("AS total_idx_blks_hit"),
+            "query should expose aliased block-I/O aggregates"
+        );
     }
 }

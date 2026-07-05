@@ -1260,7 +1260,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_stat_activity_idle_in_transaction{job=\"$job\", instance=\"$instance\"}",
+          "expr": "pg_stat_activity_idle_in_transaction{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}",
           "legendFormat": "{{datname}} - idle_in_transaction",
           "refId": "A"
         },
@@ -1269,7 +1269,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_stat_activity_idle_in_transaction_aborted{job=\"$job\", instance=\"$instance\"}",
+          "expr": "pg_stat_activity_idle_in_transaction_aborted{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}",
           "legendFormat": "{{datname}} - idle_in_transaction_aborted",
           "refId": "B"
         }
@@ -1573,7 +1573,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(pg_stat_activity_active_connections{instance=~\"$instance\"})",
+          "expr": "sum(pg_stat_activity_active_connections{instance=~\"$instance\", datname=~\"$database\"})",
           "legendFormat": "Active Connections",
           "refId": "A"
         },
@@ -1582,7 +1582,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(pg_stat_activity_idle_connections{instance=~\"$instance\"})",
+          "expr": "sum(pg_stat_activity_idle_connections{instance=~\"$instance\", datname=~\"$database\"})",
           "legendFormat": "Idle Connections",
           "refId": "B"
         },
@@ -1591,7 +1591,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(pg_stat_activity_count{instance=~\"$instance\", state=\"idle in transaction\"})",
+          "expr": "sum(pg_stat_activity_count{instance=~\"$instance\", state=\"idle in transaction\", datname=~\"$database\"})",
           "legendFormat": "Idle in Transaction",
           "refId": "C"
         },
@@ -3434,7 +3434,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_vacuum_database_freeze_age_pct_of_max{job=\"$job\", instance=\"$instance\"}",
+          "expr": "pg_vacuum_database_freeze_age_pct_of_max{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}",
           "legendFormat": "{{datname}}",
           "refId": "A"
         }
@@ -3765,7 +3765,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Progress of currently running vacuum operations (0.0-1.0 ratio). Useful only while a manual vacuum or autovacuum is actively running. If this panel is empty and vacuum pressure panels are high, vacuum is not currently catching up.",
+      "description": "Progress of currently running vacuum operations (0.0-1.0 ratio). Useful only while a manual vacuum or autovacuum is actively running. If this panel is empty and vacuum pressure panels are high, vacuum is not currently catching up.\n\nThe exporter resolves table labels by querying each database locally, so the panel can show `database` and `schema.table` labels across the cluster. For manual psql diagnosis, connect to the target database shown in the panel before joining `pg_stat_progress_vacuum` to `pg_class`:\n\n```sql\nSELECT\n    current_database() AS database,\n    n.nspname || '.' || c.relname AS table,\n    p.phase,\n    p.heap_blks_scanned || '/' || p.heap_blks_total AS heap_progress,\n    p.index_vacuum_count\nFROM pg_stat_progress_vacuum p\nLEFT JOIN pg_class c ON p.relid = c.oid\nLEFT JOIN pg_namespace n ON n.oid = c.relnamespace;\n```\n\n**What is a good state?**\nIdeally, vacuums should run quickly and disappear from this panel. If you see a vacuum stuck at the same percentage for a long time (especially in the `scanning heap` or `vacuuming indexes` phases), it may be blocked by a long-running transaction holding an old snapshot, or it may be suffering from slow disk I/O. Check your lock and activity panels to see if anything is blocking it!\n",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3843,7 +3843,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_vacuum_heap_progress{job=\"$job\", instance=\"$instance\"}",
+          "expr": "pg_vacuum_heap_progress{job=\"$job\", instance=\"$instance\", database=~\"$database\"}",
           "legendFormat": "{{database}}.{{table}}",
           "refId": "A"
         }
@@ -7309,6 +7309,109 @@
           ],
           "title": "Sequential Scan Rate (per second)",
           "type": "timeseries"
+        },
+        {
+          "type": "timeseries",
+          "title": "Table Cache Hit Ratio",
+          "description": "To drill in and find which tables have the worst cache hit ratio or highest disk I/O, run in psql:\n\n```sql\nSELECT relname,\n       heap_blks_read,\n       heap_blks_hit,\n       round(heap_blks_hit::numeric / nullif(heap_blks_hit + heap_blks_read, 0), 4) AS hit_ratio\nFROM pg_statio_user_tables\nORDER BY heap_blks_read DESC LIMIT 10;\n```\n\n**What is a good value?**\nA healthy cache hit ratio is typically **> 0.99 (99%)**. If your ratio consistently drops below 0.95, it indicates that PostgreSQL is frequently reading from disk because active table data does not fit in memory. You may need to increase `shared_buffers` or provision more RAM.\n",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "id": 727919,
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 182
+          },
+          "targets": [
+            {
+              "expr": "sum by (datname) (rate(pg_stat_user_tables_heap_blks_hit_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[$__rate_interval])) / (sum by (datname) (rate(pg_stat_user_tables_heap_blks_hit_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[$__rate_interval])) + sum by (datname) (rate(pg_stat_user_tables_heap_blks_read_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[$__rate_interval])))",
+              "legendFormat": "{{datname}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "fillOpacity": 10
+              },
+              "unit": "percentunit"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "mean"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Table Block I/O (Hits vs Reads)",
+          "description": "To drill in and find which tables have the worst cache hit ratio or highest disk I/O, run in psql:\n\n```sql\nSELECT relname,\n       heap_blks_read,\n       heap_blks_hit,\n       round(heap_blks_hit::numeric / nullif(heap_blks_hit + heap_blks_read, 0), 4) AS hit_ratio\nFROM pg_statio_user_tables\nORDER BY heap_blks_read DESC LIMIT 10;\n```\n\n**What is a good value?**\nA healthy cache hit ratio is typically **> 0.99 (99%)**. If your ratio consistently drops below 0.95, it indicates that PostgreSQL is frequently reading from disk because active table data does not fit in memory. You may need to increase `shared_buffers` or provision more RAM.\n",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "id": 237140,
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 182
+          },
+          "targets": [
+            {
+              "expr": "sum by (datname) (rate(pg_stat_user_tables_heap_blks_hit_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[$__rate_interval]))",
+              "legendFormat": "{{datname}} (Hits)",
+              "refId": "A"
+            },
+            {
+              "expr": "sum by (datname) (rate(pg_stat_user_tables_heap_blks_read_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[$__rate_interval]))",
+              "legendFormat": "{{datname}} (Reads)",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "fillOpacity": 10
+              },
+              "unit": "ops"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "mean"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          }
         }
       ],
       "title": "Table Statistics (requires --collector.stat)",
@@ -7705,6 +7808,109 @@
           ],
           "title": "Index Size by Database",
           "type": "timeseries"
+        },
+        {
+          "type": "timeseries",
+          "title": "Index Cache Hit Ratio",
+          "description": "To drill in and find which indexes have the worst cache hit ratio or highest disk I/O, run in psql:\n\n```sql\nSELECT relname AS table_name,\n       indexrelname AS index_name,\n       idx_blks_read,\n       idx_blks_hit,\n       round(idx_blks_hit::numeric / nullif(idx_blks_hit + idx_blks_read, 0), 4) AS hit_ratio\nFROM pg_statio_user_indexes\nORDER BY idx_blks_read DESC LIMIT 10;\n```\n\n**What is a good value?**\nA healthy index cache hit ratio is typically **> 0.99 (99%)**. Indexes are critical for fast lookups and should ideally reside entirely in memory. If this ratio drops below 0.95, queries will suffer significant disk I/O latency. Consider increasing `shared_buffers`, adding RAM, or dropping unused/duplicate indexes to free up cache space.\n",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "id": 135288,
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 168
+          },
+          "targets": [
+            {
+              "expr": "sum by (datname) (rate(pg_index_idx_blks_hit_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[$__rate_interval])) / (sum by (datname) (rate(pg_index_idx_blks_hit_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[$__rate_interval])) + sum by (datname) (rate(pg_index_idx_blks_read_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[$__rate_interval])))",
+              "legendFormat": "{{datname}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "fillOpacity": 10
+              },
+              "unit": "percentunit"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "mean"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Index Block I/O (Hits vs Reads)",
+          "description": "To drill in and find which indexes have the worst cache hit ratio or highest disk I/O, run in psql:\n\n```sql\nSELECT relname AS table_name,\n       indexrelname AS index_name,\n       idx_blks_read,\n       idx_blks_hit,\n       round(idx_blks_hit::numeric / nullif(idx_blks_hit + idx_blks_read, 0), 4) AS hit_ratio\nFROM pg_statio_user_indexes\nORDER BY idx_blks_read DESC LIMIT 10;\n```\n\n**What is a good value?**\nA healthy index cache hit ratio is typically **> 0.99 (99%)**. Indexes are critical for fast lookups and should ideally reside entirely in memory. If this ratio drops below 0.95, queries will suffer significant disk I/O latency. Consider increasing `shared_buffers`, adding RAM, or dropping unused/duplicate indexes to free up cache space.\n",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "id": 772486,
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 168
+          },
+          "targets": [
+            {
+              "expr": "sum by (datname) (rate(pg_index_idx_blks_hit_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[$__rate_interval]))",
+              "legendFormat": "{{datname}} (Hits)",
+              "refId": "A"
+            },
+            {
+              "expr": "sum by (datname) (rate(pg_index_idx_blks_read_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[$__rate_interval]))",
+              "legendFormat": "{{datname}} (Reads)",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "fillOpacity": 10
+              },
+              "unit": "ops"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "mean"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          }
         }
       ],
       "title": "Index Performance & Unused Indexes (requires --collector.index)",
