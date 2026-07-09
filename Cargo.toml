@@ -1,6 +1,6 @@
 [package]
 name = "pg_exporter"
-version = "0.15.0"
+version = "0.14.0"
 edition = "2024"
 authors = ["Nicolas Embriz <nbari@tequila.io>"]
 description = "PostgreSQL metric exporter for Prometheus"
@@ -61,7 +61,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 ulid = "1.2.1"
 url = "2.5.8"
 prometheus = "0.14.0"
-regex = "1.12.4"
+regex = "1.13.0"
 futures = "0.3.32"
 tonic = { version = "0.14.6", features = ["tls-native-roots"] }
 base64 = "0.22.1"
