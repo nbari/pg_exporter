@@ -42,6 +42,44 @@ esac
 export XDG_RUNTIME_DIR
 mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null || true
 
+# DevPod's embedded docker/compose client resolves its endpoint from the docker CLI
+# *context* (e.g. a stale `orbstack` context whose daemon is not running), and it ignores
+# the provider's DOCKER_HOST option. The docker client honours the DOCKER_HOST *env var*
+# over the context, so — for this podman-first project — point DOCKER_HOST at the podman
+# socket when the caller has not set one. This makes `devpod up` target podman regardless
+# of the active docker context.
+#
+# podman serves the Docker-compatible API on this socket, so DevPod / docker-compose talk
+# to it transparently. Set DOCKER_HOST yourself to override (e.g. to use Docker Desktop).
+if [ -z "${DOCKER_HOST:-}" ] && command -v podman >/dev/null 2>&1; then
+    podman_host=""
+    case "$(uname -s)" in
+    Darwin | *_NT-* | MINGW* | MSYS* | CYGWIN*)
+        # podman runs in a VM; only `podman machine inspect` knows the host-side socket
+        # (e.g. /var/folders/.../podman-machine-default-api.sock).
+        machine_sock="$(podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}' 2>/dev/null || true)"
+        [ -n "$machine_sock" ] && [ -S "$machine_sock" ] && podman_host="unix://${machine_sock}"
+        ;;
+    *)
+        # Rootless Linux podman socket locations.
+        for candidate in \
+            "${XDG_RUNTIME_DIR}/podman/podman.sock" \
+            "/run/user/$(id -u)/podman/podman.sock" \
+            "/run/podman/podman.sock"; do
+            if [ -S "$candidate" ]; then
+                podman_host="unix://${candidate}"
+                break
+            fi
+        done
+        ;;
+    esac
+
+    if [ -n "$podman_host" ]; then
+        export DOCKER_HOST="$podman_host"
+        echo "==> Using podman socket for DevPod: DOCKER_HOST=${DOCKER_HOST}"
+    fi
+fi
+
 # Remind the user to wire up the dedicated DevPod ssh config (idempotent hint only;
 # we don't edit ~/.ssh/config for you).
 if [ "$ssh_config" = "$HOME/.ssh/devpod" ] &&

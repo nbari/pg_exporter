@@ -577,12 +577,14 @@ async fn test_stat_user_tables_collector_tracks_table_size() -> Result<()> {
         .find(|m| m.name() == "pg_stat_user_tables_table_size_bytes");
 
     if let Some(metric_family) = table_size {
-        // Find our test table
-        let table_suffix = format!("_{}", std::process::id());
+        // Find our test table by its exact unique name. Matching on a bare `_{pid}` suffix
+        // is unsafe because cargo runs tests multi-threaded in one process, so other
+        // concurrent tests create tables ending in the same `_{pid}` and a loose match can
+        // grab an unrelated (empty) table.
         let our_table = metric_family.get_metric().iter().find(|m| {
             m.get_label()
                 .iter()
-                .any(|l| l.name() == "relname" && l.value().ends_with(&table_suffix))
+                .any(|l| l.name() == "relname" && l.value() == table_name)
         });
 
         if let Some(metric) = our_table {

@@ -7,6 +7,7 @@ mod common;
 
 pub mod activity;
 pub mod connection;
+pub mod connection_hardening;
 pub mod database;
 pub mod default;
 pub mod index;

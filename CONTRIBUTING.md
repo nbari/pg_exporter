@@ -120,6 +120,27 @@ connection-constrained clusters (e.g. AWS RDS), that fan-out follows a strict mo
 database and can exhaust `max_connections`. This invariant is locked by
 `tests/collectors/connection.rs` (fresh backend PID per call + closed on drop); keep it green.
 
+### Scrape Safety Model
+
+Every exporter-managed scrape connection must pass through the shared hardening in
+`src/collectors/util.rs`: default `application_name`, bounded connection establishment,
+server-side `lock_timeout`, and server-side `statement_timeout`. The connect timeout bounds
+DNS/TCP/TLS/authentication before PostgreSQL can enforce server-side settings. `lock_timeout`
+prevents lock-blocked scrapes from piling up behind `ACCESS EXCLUSIVE` locks;
+`statement_timeout` prevents already-running scrape queries from outliving the HTTP scrape
+indefinitely.
+
+Do not add collector-local `tokio::time::timeout(...)` wrappers around database work. A
+client-side timeout can drop the Rust future while the PostgreSQL backend continues waiting
+or running server-side. Prefer PostgreSQL's server-side cancellation knobs for query work,
+and keep any new per-database collector work behind `util::acquire_db_query_permit` plus
+`util::open_db_connection`, which is the only place that may apply a client-side timeout to
+connection establishment.
+
+The source-level guard in `tests/collector_safety.rs` blocks direct collector-side
+`PgConnection::connect`, collector-local pools, collector-local semaphores, and client-side
+database timeouts. Update that guard only when the connection-safety model itself changes.
+
 ---
 
 ## Git Hooks

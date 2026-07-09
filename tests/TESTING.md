@@ -197,3 +197,11 @@ After any production panic:
 2. Fix the code
 3. Verify the test now passes
 4. Update this guide with lessons learned
+
+After any production scrape-safety issue:
+1. Add an integration test that reproduces the database-side condition, such as a held lock
+2. Verify plain PostgreSQL outages still return `200` with `pg_up 0`
+3. Verify timeout or stale-data risks fail visibly (`503` or `504`) instead of returning stale `200` data
+4. Assert the exporter connection footprint remains bounded while the condition is active
+5. Keep `tests/collector_safety.rs` green so collectors cannot bypass the shared connection
+   and timeout model

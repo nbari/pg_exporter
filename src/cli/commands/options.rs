@@ -1,5 +1,5 @@
 use clap::{Arg, Command, value_parser};
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 
 pub fn add_collector_option_args(cmd: Command) -> Command {
     cmd.arg(
@@ -23,14 +23,15 @@ pub fn add_collector_option_args(cmd: Command) -> Command {
     .arg(
         Arg::new("collectors.max-db-concurrency")
             .long("collectors.max-db-concurrency")
-            .help("Max databases queried concurrently per multi-database collector")
+            .help("Max non-default databases queried concurrently across all collectors")
             .long_help(
-                "Maximum number of databases queried concurrently within a single scrape of a \
-                 multi-database collector (stat, index).\n\n\
+                "Maximum number of non-default databases queried concurrently across all \
+                 multi-database collectors (stat, index, vacuum name resolution).\n\n\
                  A PostgreSQL connection is bound to one database, so these collectors open one \
-                 connection per database. This caps how many run at once, keeping peak connections \
-                 independent of the number of databases in the cluster (important on instances with a \
-                 low, shared max_connections such as AWS RDS).\n\n\
+                 ephemeral connection per non-default database query. This caps how many run at \
+                 once globally, keeping peak exporter connections bounded to the shared pool (3) \
+                 plus this value, independent of the number of databases in the cluster (important \
+                 on instances with a low, shared max_connections such as AWS RDS).\n\n\
                  Lower values are gentler on connection limits; higher values make scrapes faster on \
                  clusters with many databases (at the cost of more concurrent connections).\n\n\
                  Examples:\n\
@@ -43,11 +44,93 @@ pub fn add_collector_option_args(cmd: Command) -> Command {
             .value_name("N")
             .value_parser(value_parser!(NonZeroUsize)),
     )
+    .arg(connect_timeout_arg())
+    .arg(
+        Arg::new("scrape.lock-timeout-ms")
+            .long("scrape.lock-timeout-ms")
+            .help("Default PostgreSQL lock_timeout for scrape connections, in milliseconds")
+            .long_help(
+                "Default PostgreSQL lock_timeout injected into scrape connections, in milliseconds.\n\n\
+                 This aborts lock-blocked scrape queries server-side so blocked backends release \
+                 their connection slots instead of accumulating across scrapes. The DSN/PGOPTIONS \
+                 value wins when it explicitly sets lock_timeout, including lock_timeout=0.\n\n\
+                 Examples:\n\
+                   --scrape.lock-timeout-ms 2000\n\
+                   --scrape.lock-timeout-ms 5000\n\
+                   PG_EXPORTER_LOCK_TIMEOUT_MS=1000",
+            )
+            .env("PG_EXPORTER_LOCK_TIMEOUT_MS")
+            .default_value(LOCK_TIMEOUT_MS_DEFAULT)
+            .value_name("MS")
+            .value_parser(value_parser!(NonZeroU64)),
+    )
+    .arg(
+        Arg::new("scrape.statement-timeout-ms")
+            .long("scrape.statement-timeout-ms")
+            .help("Default PostgreSQL statement_timeout for scrape connections, in milliseconds")
+            .long_help(
+                "Default PostgreSQL statement_timeout injected into scrape connections, in milliseconds.\n\n\
+                 This is the server-side backstop for slow or stuck scrape queries after they start \
+                 running. It must be positive and lower than --scrape.timeout-ms; statement_timeout=0 \
+                 is rejected because it disables the timeout.\n\n\
+                 Examples:\n\
+                   --scrape.statement-timeout-ms 10000\n\
+                   --scrape.statement-timeout-ms 30000\n\
+                   PG_EXPORTER_STATEMENT_TIMEOUT_MS=15000",
+            )
+            .env("PG_EXPORTER_STATEMENT_TIMEOUT_MS")
+            .default_value(STATEMENT_TIMEOUT_MS_DEFAULT)
+            .value_name("MS")
+            .value_parser(value_parser!(NonZeroU64)),
+    )
+    .arg(
+        Arg::new("scrape.timeout-ms")
+            .long("scrape.timeout-ms")
+            .help("Whole /metrics scrape timeout, in milliseconds")
+            .long_help(
+                "Whole /metrics scrape timeout, in milliseconds.\n\n\
+                 This bounds the HTTP scrape wall-clock duration. It must be longer than \
+                 statement_timeout so PostgreSQL aborts individual queries before the exporter aborts \
+                 the scrape. It must be positive.\n\n\
+                 Examples:\n\
+                   --scrape.timeout-ms 15000\n\
+                   --scrape.timeout-ms 60000\n\
+                   PG_EXPORTER_SCRAPE_TIMEOUT_MS=20000",
+            )
+            .env("PG_EXPORTER_SCRAPE_TIMEOUT_MS")
+            .default_value(SCRAPE_TIMEOUT_MS_DEFAULT)
+            .value_name("MS")
+            .value_parser(value_parser!(NonZeroU64)),
+    )
+}
+
+fn connect_timeout_arg() -> Arg {
+    Arg::new("scrape.connect-timeout-ms")
+        .long("scrape.connect-timeout-ms")
+        .help("PostgreSQL connection-establishment timeout, in milliseconds")
+        .long_help(
+            "PostgreSQL connection-establishment timeout, in milliseconds.\n\n\
+             This bounds DNS, TCP, TLS, authentication, and shared-pool connection acquisition \
+             before any server-side PostgreSQL timeout can apply. It must be positive and lower \
+             than --scrape.timeout-ms.\n\n\
+             Examples:\n\
+               --scrape.connect-timeout-ms 5000\n\
+               --scrape.connect-timeout-ms 10000\n\
+               PG_EXPORTER_CONNECT_TIMEOUT_MS=3000",
+        )
+        .env("PG_EXPORTER_CONNECT_TIMEOUT_MS")
+        .default_value(CONNECT_TIMEOUT_MS_DEFAULT)
+        .value_name("MS")
+        .value_parser(value_parser!(NonZeroU64))
 }
 
 /// String form of the default max per-database concurrency, kept in sync with
 /// [`crate::collectors::MAX_DB_QUERY_CONCURRENCY`] by `max_db_concurrency_default_matches_const`.
 const MAX_DB_CONCURRENCY_DEFAULT: &str = "5";
+const CONNECT_TIMEOUT_MS_DEFAULT: &str = "5000";
+const LOCK_TIMEOUT_MS_DEFAULT: &str = "2000";
+const STATEMENT_TIMEOUT_MS_DEFAULT: &str = "10000";
+const SCRAPE_TIMEOUT_MS_DEFAULT: &str = "15000";
 
 #[cfg(test)]
 mod tests {
@@ -129,6 +212,143 @@ mod tests {
     }
 
     #[test]
+    fn test_scrape_timeout_defaults() {
+        temp_env::with_var("PG_EXPORTER_CONNECT_TIMEOUT_MS", None::<String>, || {
+            temp_env::with_var("PG_EXPORTER_LOCK_TIMEOUT_MS", None::<String>, || {
+                temp_env::with_var("PG_EXPORTER_STATEMENT_TIMEOUT_MS", None::<String>, || {
+                    temp_env::with_var("PG_EXPORTER_SCRAPE_TIMEOUT_MS", None::<String>, || {
+                        let matches = commands::new().get_matches_from(vec!["pg_exporter"]);
+
+                        assert_eq!(
+                            matches
+                                .get_one::<NonZeroU64>("scrape.connect-timeout-ms")
+                                .map(|value| value.get()),
+                            Some(5_000)
+                        );
+                        assert_eq!(
+                            matches
+                                .get_one::<NonZeroU64>("scrape.lock-timeout-ms")
+                                .map(|value| value.get()),
+                            Some(2_000)
+                        );
+                        assert_eq!(
+                            matches
+                                .get_one::<NonZeroU64>("scrape.statement-timeout-ms")
+                                .map(|value| value.get()),
+                            Some(10_000)
+                        );
+                        assert_eq!(
+                            matches
+                                .get_one::<NonZeroU64>("scrape.timeout-ms")
+                                .map(|value| value.get()),
+                            Some(15_000)
+                        );
+                    });
+                });
+            });
+        });
+    }
+
+    #[test]
+    fn test_scrape_timeouts_from_env() {
+        temp_env::with_var("PG_EXPORTER_CONNECT_TIMEOUT_MS", Some("7000"), || {
+            temp_env::with_var("PG_EXPORTER_LOCK_TIMEOUT_MS", Some("3000"), || {
+                temp_env::with_var("PG_EXPORTER_STATEMENT_TIMEOUT_MS", Some("20000"), || {
+                    temp_env::with_var("PG_EXPORTER_SCRAPE_TIMEOUT_MS", Some("25000"), || {
+                        let matches = commands::new().get_matches_from(vec!["pg_exporter"]);
+
+                        assert_eq!(
+                            matches
+                                .get_one::<NonZeroU64>("scrape.connect-timeout-ms")
+                                .map(|value| value.get()),
+                            Some(7_000)
+                        );
+                        assert_eq!(
+                            matches
+                                .get_one::<NonZeroU64>("scrape.lock-timeout-ms")
+                                .map(|value| value.get()),
+                            Some(3_000)
+                        );
+                        assert_eq!(
+                            matches
+                                .get_one::<NonZeroU64>("scrape.statement-timeout-ms")
+                                .map(|value| value.get()),
+                            Some(20_000)
+                        );
+                        assert_eq!(
+                            matches
+                                .get_one::<NonZeroU64>("scrape.timeout-ms")
+                                .map(|value| value.get()),
+                            Some(25_000)
+                        );
+                    });
+                });
+            });
+        });
+    }
+
+    #[test]
+    fn test_scrape_timeout_cli_overrides_env() {
+        temp_env::with_var("PG_EXPORTER_CONNECT_TIMEOUT_MS", Some("7000"), || {
+            temp_env::with_var("PG_EXPORTER_LOCK_TIMEOUT_MS", Some("3000"), || {
+                temp_env::with_var("PG_EXPORTER_STATEMENT_TIMEOUT_MS", Some("20000"), || {
+                    temp_env::with_var("PG_EXPORTER_SCRAPE_TIMEOUT_MS", Some("25000"), || {
+                        let matches = commands::new().get_matches_from(vec![
+                            "pg_exporter",
+                            "--scrape.connect-timeout-ms",
+                            "8000",
+                            "--scrape.lock-timeout-ms",
+                            "4000",
+                            "--scrape.statement-timeout-ms",
+                            "30000",
+                            "--scrape.timeout-ms",
+                            "35000",
+                        ]);
+
+                        assert_eq!(
+                            matches
+                                .get_one::<NonZeroU64>("scrape.connect-timeout-ms")
+                                .map(|value| value.get()),
+                            Some(8_000)
+                        );
+                        assert_eq!(
+                            matches
+                                .get_one::<NonZeroU64>("scrape.lock-timeout-ms")
+                                .map(|value| value.get()),
+                            Some(4_000)
+                        );
+                        assert_eq!(
+                            matches
+                                .get_one::<NonZeroU64>("scrape.statement-timeout-ms")
+                                .map(|value| value.get()),
+                            Some(30_000)
+                        );
+                        assert_eq!(
+                            matches
+                                .get_one::<NonZeroU64>("scrape.timeout-ms")
+                                .map(|value| value.get()),
+                            Some(35_000)
+                        );
+                    });
+                });
+            });
+        });
+    }
+
+    #[test]
+    fn test_scrape_timeouts_reject_zero() {
+        for flag in [
+            "--scrape.connect-timeout-ms",
+            "--scrape.lock-timeout-ms",
+            "--scrape.statement-timeout-ms",
+            "--scrape.timeout-ms",
+        ] {
+            let result = commands::new().try_get_matches_from(vec!["pg_exporter", flag, "0"]);
+            assert!(result.is_err(), "Should reject zero for {flag}");
+        }
+    }
+
+    #[test]
     fn test_max_db_concurrency_from_env() {
         temp_env::with_var("PG_EXPORTER_MAX_DB_CONCURRENCY", Some("12"), || {
             let matches = commands::new().get_matches_from(vec!["pg_exporter"]);
@@ -174,6 +394,26 @@ mod tests {
         assert_eq!(
             MAX_DB_CONCURRENCY_DEFAULT.parse::<usize>().ok(),
             Some(crate::collectors::MAX_DB_QUERY_CONCURRENCY)
+        );
+    }
+
+    #[test]
+    fn scrape_timeout_defaults_match_consts() {
+        assert_eq!(
+            CONNECT_TIMEOUT_MS_DEFAULT.parse::<u64>().ok(),
+            Some(crate::collectors::DEFAULT_CONNECT_TIMEOUT_MS)
+        );
+        assert_eq!(
+            LOCK_TIMEOUT_MS_DEFAULT.parse::<u64>().ok(),
+            Some(crate::collectors::DEFAULT_LOCK_TIMEOUT_MS)
+        );
+        assert_eq!(
+            STATEMENT_TIMEOUT_MS_DEFAULT.parse::<u64>().ok(),
+            Some(crate::collectors::DEFAULT_STATEMENT_TIMEOUT_MS)
+        );
+        assert_eq!(
+            SCRAPE_TIMEOUT_MS_DEFAULT.parse::<u64>().ok(),
+            Some(crate::collectors::DEFAULT_SCRAPE_TIMEOUT_MS)
         );
     }
 

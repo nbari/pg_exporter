@@ -281,6 +281,14 @@ async fn test_vacuum_progress_collector_captures_actual_vacuum() -> Result<()> {
                 .fetch_one(&pool)
                 .await?;
 
+                // Other integration tests create and drop isolated `test_*` databases in
+                // parallel. `pg_stat_progress_vacuum` can report a vacuum from one of those
+                // databases, then the database may be dropped before this assertion checks
+                // `pg_database`. That is test-suite interference, not an invalid label.
+                if !database_exists && db.starts_with("test_") {
+                    continue;
+                }
+
                 assert!(
                     database_exists,
                     "Database label should resolve to an existing database, got: {db}"

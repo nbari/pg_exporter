@@ -1,10 +1,9 @@
-use crate::collectors::registry::CollectorRegistry;
+use crate::collectors::registry::{CollectorRegistry, ScrapeError};
 use axum::{
     extract::Extension,
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
-use prometheus::Encoder;
 use sqlx::PgPool;
 use tracing::{debug, error, instrument};
 
@@ -26,24 +25,20 @@ pub async fn metrics(
         }
         Err(e) => {
             error!("Failed to collect metrics: {}", e);
-            // Even on error, we return 200 with best-effort results if available.
-            // registry.gather() could be used here to get at least pg_up and build info.
-            let mut buffer = Vec::new();
-            let encoder = prometheus::TextEncoder::new();
-            let metric_families = registry.registry().gather();
-            if let Err(encode_err) = encoder.encode(&metric_families, &mut buffer) {
-                error!("Failed to encode metrics on error path: {}", encode_err);
-                return (
-                    StatusCode::OK,
-                    headers,
-                    format!(
-                        "# Error collecting metrics: {e}\n# Error encoding metrics: {encode_err}"
-                    ),
-                )
-                    .into_response();
-            }
+            let status = match e {
+                ScrapeError::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
+                ScrapeError::Busy
+                | ScrapeError::CollectorFailed(_)
+                | ScrapeError::Encode(_)
+                | ScrapeError::Utf8(_) => StatusCode::SERVICE_UNAVAILABLE,
+            };
 
-            (StatusCode::OK, headers, buffer).into_response()
+            (
+                status,
+                headers,
+                format!("# Error collecting metrics: {e}\n"),
+            )
+                .into_response()
         }
     }
 }

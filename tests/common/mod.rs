@@ -396,3 +396,149 @@ pub async fn wait_for_server(port: u16, max_attempts: u32) -> bool {
 pub fn get_test_url(port: u16) -> String {
     format!("http://localhost:{port}")
 }
+
+// ---------------------------------------------------------------------------
+// Container-runtime discovery for testcontainers-based integration tests.
+//
+// Shared by every test that spins up its own PostgreSQL container (replication
+// topology, connection hardening, ...). testcontainers/bollard connect to the
+// runtime named by `DOCKER_HOST`; these helpers locate a Docker or Podman socket
+// so the tests can run on Linux, rootless Podman, and macOS/Windows `podman
+// machine` hosts alike.
+// ---------------------------------------------------------------------------
+
+fn socket_exists(host: &str) -> bool {
+    host.strip_prefix("unix://")
+        .is_none_or(|path| std::path::Path::new(path).exists())
+}
+
+fn testcontainers_runtime_candidates() -> Vec<String> {
+    let mut candidates = vec!["unix:///var/run/docker.sock".to_string()];
+    if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR")
+        && !runtime_dir.is_empty()
+    {
+        candidates.push(format!("unix://{runtime_dir}/.docker/run/docker.sock"));
+    }
+    if let Ok(home) = env::var("HOME")
+        && !home.is_empty()
+    {
+        candidates.push(format!("unix://{home}/.docker/run/docker.sock"));
+        candidates.push(format!("unix://{home}/.docker/desktop/docker.sock"));
+    }
+    candidates
+}
+
+/// Ask `podman machine` for its host-side API socket, as a `unix://` URI.
+///
+/// On macOS/Windows the podman daemon runs inside a VM and exposes a forwarded unix
+/// socket on the host whose path is not one of the well-known Linux locations. This is the
+/// only reliable way to find it, so testcontainers can be pointed at it via `DOCKER_HOST`.
+fn detect_podman_machine_socket() -> Option<String> {
+    let output = std::process::Command::new("podman")
+        .args([
+            "machine",
+            "inspect",
+            "--format",
+            "{{.ConnectionInfo.PodmanSocket.Path}}",
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let path = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    if path.is_empty() {
+        return None;
+    }
+
+    let uri = format!("unix://{path}");
+    socket_exists(&uri).then_some(uri)
+}
+
+fn detect_podman_socket() -> Option<String> {
+    let mut candidates = vec![
+        "unix:///run/podman/podman.sock".to_string(),
+        "unix:///var/run/podman/podman.sock".to_string(),
+    ];
+    if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR")
+        && !runtime_dir.is_empty()
+    {
+        candidates.push(format!("unix://{runtime_dir}/podman/podman.sock"));
+    }
+    if let Ok(uid) = env::var("UID")
+        && !uid.is_empty()
+    {
+        candidates.push(format!("unix:///run/user/{uid}/podman/podman.sock"));
+    }
+    // macOS (and other `podman machine` hosts): the API socket lives under a
+    // machine-specific path (e.g. /var/folders/.../podman-machine-default-api.sock)
+    // that is only discoverable by asking podman itself.
+    if let Some(machine_socket) = detect_podman_machine_socket() {
+        candidates.push(machine_socket);
+    }
+
+    candidates
+        .into_iter()
+        .find(|candidate| socket_exists(candidate))
+}
+
+fn find_container_runtime() -> Option<String> {
+    if let Ok(existing) = env::var("DOCKER_HOST")
+        && !existing.is_empty()
+        && socket_exists(&existing)
+    {
+        return Some(existing);
+    }
+
+    testcontainers_runtime_candidates()
+        .into_iter()
+        .find(|candidate| socket_exists(candidate))
+        .or_else(detect_podman_socket)
+}
+
+/// Whether a container runtime is required (CI or explicit opt-in) rather than optional.
+#[must_use]
+pub fn should_require_container_runtime() -> bool {
+    let in_ci = env::var("CI")
+        .ok()
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+    let force = env::var("PG_EXPORTER_REQUIRE_TESTCONTAINERS")
+        .ok()
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE"));
+
+    in_ci || force
+}
+
+/// Ensure a container runtime is available before running a testcontainers-based test.
+///
+/// Returns `Ok(true)` when a runtime socket is found, `Ok(false)` when none is found and
+/// the test should skip (local dev without a runtime), and an error when a runtime is
+/// required (CI, or `PG_EXPORTER_REQUIRE_TESTCONTAINERS=1`) but missing.
+///
+/// # Errors
+///
+/// Returns an error when a container runtime is required but none is available.
+pub fn ensure_container_runtime_for_test(test_name: &str) -> Result<bool> {
+    if find_container_runtime().is_some() {
+        return Ok(true);
+    }
+
+    let mut message = format!(
+        "No container runtime socket found (checked Podman + Docker), cannot run {test_name}"
+    );
+
+    if let Some(podman_socket) = detect_podman_socket() {
+        message.push_str(". Podman socket detected at ");
+        message.push_str(&podman_socket);
+        message.push_str("; set DOCKER_HOST to this value so testcontainers can use it");
+    }
+
+    if should_require_container_runtime() {
+        anyhow::bail!("{message}");
+    }
+
+    eprintln!("{message}; skipping");
+    Ok(false)
+}

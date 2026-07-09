@@ -45,15 +45,31 @@ test-replica:
     docker_host="${DOCKER_HOST:-}"
 
     if [[ -z "${docker_host}" ]]; then
-        if [[ -S /var/run/docker.sock ]]; then
-            docker_host="unix:///var/run/docker.sock"
+        # Prefer podman (the project's primary runtime). On macOS/Windows the podman
+        # daemon runs in a VM and exposes a host-side socket under a machine-specific
+        # path (e.g. /var/folders/.../podman-machine-default-api.sock) that only
+        # `podman machine inspect` can reveal, so check that before the Linux paths.
+        machine_sock=""
+        if command -v podman >/dev/null 2>&1; then
+            machine_sock="$(podman machine inspect --format '{{{{.ConnectionInfo.PodmanSocket.Path}}' 2>/dev/null || true)"
+        fi
+
+        if [[ -n "${machine_sock}" && -S "${machine_sock}" ]]; then
+            docker_host="unix://${machine_sock}"
         elif [[ -n "${XDG_RUNTIME_DIR:-}" && -S "${XDG_RUNTIME_DIR}/podman/podman.sock" ]]; then
             docker_host="unix://${XDG_RUNTIME_DIR}/podman/podman.sock"
         elif [[ -S "/run/user/$(id -u)/podman/podman.sock" ]]; then
             docker_host="unix:///run/user/$(id -u)/podman/podman.sock"
+        elif [[ -S /run/podman/podman.sock ]]; then
+            docker_host="unix:///run/podman/podman.sock"
+        elif [[ -S /var/run/docker.sock ]]; then
+            docker_host="unix:///var/run/docker.sock"
         else
             echo "❌ No Docker/Podman socket found for testcontainers" >&2
             echo "Set DOCKER_HOST, e.g.:" >&2
+            echo "  # macOS podman machine:" >&2
+            echo "  export DOCKER_HOST=\"unix://\$(podman machine inspect --format '{{{{.ConnectionInfo.PodmanSocket.Path}}')\"" >&2
+            echo "  # rootless Linux:" >&2
             echo "  export DOCKER_HOST=unix:///run/user/\$UID/podman/podman.sock" >&2
             exit 1
         fi

@@ -3,14 +3,17 @@ use crate::{
     collectors::{
         COLLECTOR_NAMES, Collector, all_factories,
         config::CollectorConfig,
-        util::{get_excluded_databases, set_excluded_databases, set_max_db_concurrency},
+        util::{
+            get_excluded_databases, set_excluded_databases, set_max_db_concurrency,
+            set_scrape_timeouts,
+        },
     },
 };
 use anyhow::{Result, anyhow};
 use clap::ArgMatches;
 use secrecy::SecretString;
 use std::fs;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::info;
 
 /// Read DSN with priority: `PG_EXPORTER_DSN_FILE` > `PG_EXPORTER_DSN`/--dsn > default
@@ -42,6 +45,9 @@ pub fn handler(matches: &clap::ArgMatches) -> Result<Action> {
 
     // Initialize the per-database collection concurrency limit once from CLI/env
     init_max_db_concurrency(matches);
+
+    // Initialize scrape timeout defaults once from CLI/env
+    init_scrape_timeouts(matches);
 
     info!("Excluded databases: {:?}", get_excluded_databases());
 
@@ -87,6 +93,36 @@ fn init_max_db_concurrency(matches: &ArgMatches) {
     if let Some(value) = matches.get_one::<NonZeroUsize>("collectors.max-db-concurrency") {
         set_max_db_concurrency(value.get());
     }
+}
+
+fn init_scrape_timeouts(matches: &ArgMatches) {
+    let connect_timeout_ms = matches
+        .get_one::<NonZeroU64>("scrape.connect-timeout-ms")
+        .map_or(crate::collectors::DEFAULT_CONNECT_TIMEOUT_MS, |value| {
+            value.get()
+        });
+    let lock_timeout_ms = matches
+        .get_one::<NonZeroU64>("scrape.lock-timeout-ms")
+        .map_or(crate::collectors::DEFAULT_LOCK_TIMEOUT_MS, |value| {
+            value.get()
+        });
+    let statement_timeout_ms = matches
+        .get_one::<NonZeroU64>("scrape.statement-timeout-ms")
+        .map_or(crate::collectors::DEFAULT_STATEMENT_TIMEOUT_MS, |value| {
+            value.get()
+        });
+    let scrape_timeout_ms = matches
+        .get_one::<NonZeroU64>("scrape.timeout-ms")
+        .map_or(crate::collectors::DEFAULT_SCRAPE_TIMEOUT_MS, |value| {
+            value.get()
+        });
+
+    set_scrape_timeouts(
+        connect_timeout_ms,
+        lock_timeout_ms,
+        statement_timeout_ms,
+        scrape_timeout_ms,
+    );
 }
 
 #[must_use]

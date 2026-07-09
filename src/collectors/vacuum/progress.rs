@@ -1,18 +1,16 @@
 use crate::collectors::{
     i64_to_f64,
-    util::{get_default_database, get_excluded_databases, open_db_connection},
+    util::{
+        acquire_db_query_permit, get_default_database, get_excluded_databases, open_db_connection,
+    },
     Collector,
 };
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, IntGauge, IntGaugeVec, Opts, Registry};
 use sqlx::{postgres::PgRow, PgPool, Row};
-use std::time::Duration;
 use tracing::{debug, info_span, instrument};
 use tracing_futures::Instrument as _;
-
-/// Timeout for a single lazy per-database table-name resolution query.
-const NAME_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Cluster-wide snapshot of in-progress vacuums.
 ///
@@ -204,7 +202,15 @@ impl VacuumProgressCollector {
             return None;
         }
 
-        let mut conn = match open_db_connection(datname).await {
+        let permit = match acquire_db_query_permit().await {
+            Ok(permit) => permit,
+            Err(e) => {
+                debug!(database = %datname, error = %e, "vacuum_progress: cannot acquire database query permit to resolve table name");
+                return None;
+            }
+        };
+
+        let mut conn = match open_db_connection(datname, &permit).await {
             Ok(conn) => conn,
             Err(e) => {
                 debug!(database = %datname, error = %e, "vacuum_progress: cannot open connection to resolve table name");
@@ -212,18 +218,14 @@ impl VacuumProgressCollector {
             }
         };
 
-        let resolve = sqlx::query_scalar::<_, String>(RESOLVE_RELID_QUERY)
+        match sqlx::query_scalar::<_, String>(RESOLVE_RELID_QUERY)
             .bind(relid)
-            .fetch_optional(&mut conn);
-
-        match tokio::time::timeout(NAME_RESOLUTION_TIMEOUT, resolve).await {
-            Ok(Ok(name)) => name,
-            Ok(Err(e)) => {
+            .fetch_optional(&mut conn)
+            .await
+        {
+            Ok(name) => name,
+            Err(e) => {
                 debug!(database = %datname, relid, error = %e, "vacuum_progress: relid name lookup failed");
-                None
-            }
-            Err(_) => {
-                debug!(database = %datname, relid, "vacuum_progress: relid name lookup timed out");
                 None
             }
         }

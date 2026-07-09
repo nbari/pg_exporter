@@ -146,6 +146,53 @@ echo "postgresql://postgres_exporter:password@postgres:5432/postgres" | docker s
 
 Priority order: `PG_EXPORTER_DSN_FILE` > `PG_EXPORTER_DSN` > `--dsn` flag > default value
 
+### Scrape safety: timeouts and connection budget
+
+Every connection the exporter opens to scrape metrics gets timeout defaults:
+
+* connect/acquire timeout `5000 ms` via `--scrape.connect-timeout-ms` / `PG_EXPORTER_CONNECT_TIMEOUT_MS`
+* `lock_timeout = 2000 ms` via `--scrape.lock-timeout-ms` / `PG_EXPORTER_LOCK_TIMEOUT_MS`
+* `statement_timeout = 10000 ms` via `--scrape.statement-timeout-ms` / `PG_EXPORTER_STATEMENT_TIMEOUT_MS`
+* whole `/metrics` scrape timeout `15000 ms` via `--scrape.timeout-ms` / `PG_EXPORTER_SCRAPE_TIMEOUT_MS`
+
+The connect/acquire timeout bounds DNS, TCP, TLS, authentication, and shared-pool
+connection acquisition before PostgreSQL can enforce server-side timeouts. Scrape queries
+normally take weak `AccessShareLock`s, but a concurrent
+`AccessExclusiveLock` (routine DDL such as `ALTER TABLE`, `VACUUM FULL`, `REINDEX`,
+`TRUNCATE`, or an abandoned transaction) can block them server-side. `lock_timeout` makes a
+lock-blocked scrape fail fast and release its connection slot. `statement_timeout` is the
+server-side backstop for slow queries after they start running. The whole-scrape timeout
+turns an overlong HTTP scrape into a `504`.
+
+The exporter allows the DSN/`PGOPTIONS` to override `lock_timeout`, including
+`lock_timeout=0`, matching the usual PostgreSQL operator model. `statement_timeout=0` is
+rejected because it disables the server-side query timeout; use a positive value or omit it
+to keep the default. Any custom `statement_timeout` must be lower than the whole-scrape
+timeout, so PostgreSQL aborts backend work before `/metrics` gives up.
+
+    # raise connect timeout to 10s, lock_timeout to 5s, and statement_timeout to 30s;
+    # scrape timeout must be higher than connect and statement timeouts
+    pg_exporter \
+      --scrape.connect-timeout-ms 10000 \
+      --scrape.timeout-ms 40000 \
+      --dsn "postgresql://postgres_exporter@localhost:5432/postgres?options=-c%20lock_timeout%3D5000%20-c%20statement_timeout%3D30000"
+
+    # allowed: disable only lock-wait aborts, while statement/scrape timeouts still apply
+    PGOPTIONS="-c lock_timeout=0" pg_exporter --dsn postgresql://localhost:5432/postgres
+
+Only one `/metrics` scrape runs at a time. A plain PostgreSQL connectivity outage returns
+`200` with `pg_up 0` and only fresh exporter-status metrics, so Prometheus can distinguish
+"exporter down" from "database down". A concurrent scrape returns `503`; collector/query or
+encoding failures return `503`; a whole-scrape timeout returns `504`. The exporter does not
+return stale collector data on failed scrapes. If a scrape reaches the HTTP timeout, the
+exporter keeps the scrape gate closed until in-flight collector work has unwound, preventing
+a new scrape from starting another wave of PostgreSQL backend work while the previous one is
+still cancelling server-side.
+
+If Prometheus has a lower `scrape_timeout` than `--scrape.timeout-ms`, Prometheus may record
+its own client-side timeout before the exporter can return `504`. Keep the Prometheus scrape
+timeout higher than the exporter timeout when you want the HTTP status code to be visible.
+
 ## Available collectors
 
 The following collectors are available:
@@ -175,12 +222,14 @@ to reduce `pg_stat_statements` cardinality and scrape cost:
 The `statements` collector defaults to `--statements.top-n 25` if not specified. You can also use
 `PG_EXPORTER_STATEMENTS_TOP_N`.
 
-On clusters with many databases, the multi-database collectors (`stat`, `index`) query one
-database at a time up to a concurrency limit — each database needs its own connection, so this
-keeps peak connections independent of the number of databases (important on connection-limited
-instances such as AWS RDS). It defaults to `--collectors.max-db-concurrency 5`; raise it for faster
-scrapes on large clusters with connection headroom, or lower it on small/shared instances. You can
-also use `PG_EXPORTER_MAX_DB_CONCURRENCY`.
+On clusters with many databases, the multi-database collectors (`stat`, `index`) share a
+global non-default-database concurrency limit. Each database needs its own ephemeral
+connection, so this keeps peak exporter connections independent of the number of databases
+(important on connection-limited instances such as AWS RDS). The shared pool uses at most
+`3` connections and `--collectors.max-db-concurrency` defaults to `5`, so the default maximum
+active database connections used by one exporter process is `3 + 5 = 8`. If you set
+`--collectors.max-db-concurrency N`, the maximum is `3 + N` per exporter process. Multiple
+exporter replicas multiply that budget. You can also use `PG_EXPORTER_MAX_DB_CONCURRENCY`.
 
     pg_exporter --collector.stat --collectors.max-db-concurrency 10
 
@@ -244,12 +293,14 @@ This collectors are enabled by default:
 
 ## Scrape Behavior
 
-`pg_exporter` is designed to be resilient to PostgreSQL outages:
+`pg_exporter` keeps `/metrics` scrapeable across plain PostgreSQL outages, while failing
+visibly when the current collector data cannot be trusted:
 
-* **High Availability** – The exporter starts and stays available even if the database is down.
-* **HTTP 200 Always** – The `/metrics` endpoint always responds with HTTP 200 to avoid triggering unnecessary Prometheus "down" alerts for the exporter itself.
-* **`pg_up` Metric** – Use the `pg_up` metric (1 for up, 0 for down) to monitor database connectivity.
-* **Metric Omission** – When the database is unreachable, database-dependent metrics are omitted from the output rather than being reported as zero.
+* **HTTP server availability** - The exporter can start and bind even if PostgreSQL is down.
+* **Database down** - `/metrics` returns `200` with `pg_up 0` and exporter-status metrics only.
+* **Successful database scrapes** - `/metrics` returns `200` after the current collector scrape completes.
+* **Failed collector scrapes** - concurrent scrapes, collector/query failures, and encoding failures return `503`; whole-scrape timeouts return `504`.
+* **No stale collector metrics** - failed collector scrapes return an error body, and database-down scrapes filter out any previous collector snapshot.
 
 ## Systemd Boot Ordering
 

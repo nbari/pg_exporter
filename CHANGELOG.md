@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-07-09
+
+### Added
+- **Scrape Safety Defaults** ([#23](https://github.com/nbari/pg_exporter/issues/23)): Added timeout defaults to every exporter-managed scrape connection: connect/acquire timeout `5000ms`, server-side `lock_timeout=2000ms`, server-side `statement_timeout=10000ms`, and a whole `/metrics` scrape timeout of `15000ms`. These are configurable with `--scrape.connect-timeout-ms` / `PG_EXPORTER_CONNECT_TIMEOUT_MS`, `--scrape.lock-timeout-ms` / `PG_EXPORTER_LOCK_TIMEOUT_MS`, `--scrape.statement-timeout-ms` / `PG_EXPORTER_STATEMENT_TIMEOUT_MS`, and `--scrape.timeout-ms` / `PG_EXPORTER_SCRAPE_TIMEOUT_MS`.
+- **Operator-Controlled Timeout Overrides**: `lock_timeout` can still be overridden from the DSN or `PGOPTIONS`, including `lock_timeout=0`, matching PostgreSQL's normal operator model. `statement_timeout=0` is rejected because it disables the server-side backstop; any custom `statement_timeout` must be positive and lower than the whole scrape timeout.
+- **Scrape Gate and HTTP Failure Semantics**: Added a single-scrape gate for `/metrics`. A concurrent scrape returns `503 Service Unavailable`, collector/query/encoding failures return `503`, and a whole-scrape timeout returns `504 Gateway Timeout`. Plain PostgreSQL outages keep returning `200` with `pg_up 0` so alerting can distinguish "exporter down" from "database down".
+- **Critical Regression Coverage**: Added locked-table reproductions for the failure mode from #23, an end-to-end `/metrics` regression that holds `ACCESS EXCLUSIVE` on a table, bounded-connection assertions, and a source-level safety test that prevents collectors from bypassing the shared connection budget or adding client-side database timeouts.
+- **Bounded Per-Database Connects**: Restored the 5-second client-side timeout around ephemeral per-database `PgConnection::connect_with` calls and added a guardrail so future refactors cannot leave multi-database collectors with unbounded connection establishment.
+
+### Changed
+- **No Stale Collector Data on Failed Scrapes**: `/metrics` no longer returns stale collector data when the current scrape fails. Plain database outages still return `200`, but the response is filtered to fresh exporter-status metrics (`pg_up 0` and build info) instead of the previous collector snapshot.
+- **Bounded Connection Model Tightened**: The exporter uses the shared pool for the default database and cluster-wide views, and ephemeral per-database connections behind the global `--collectors.max-db-concurrency` gate for non-default database catalog queries. The default maximum active database connections per exporter process is the shared pool (`3`) plus the per-database gate (`5`), for a default of about `8`.
+- **Server-Side Timeout Model**: Removed collector-side client timeouts around database work so Rust does not abandon futures while PostgreSQL backends keep running. PostgreSQL's `lock_timeout` and `statement_timeout` are now the authoritative query-cancellation mechanisms, with the HTTP scrape timeout acting as the final user-facing boundary.
+
+### Fixed
+- **Locked Table Could Exhaust PostgreSQL Connections** ([#23](https://github.com/nbari/pg_exporter/issues/23)): A long-held `ACCESS EXCLUSIVE` lock could make scrape queries wait indefinitely, and repeated scrapes could accumulate blocked PostgreSQL backends until `max_connections` was exhausted. The default `lock_timeout` now makes lock-blocked scrape queries fail fast and release their connection slots.
+- **Hidden Extra Pool Removed**: Removed the registry recovery pool so the exporter's connection footprint is easier to reason about and stays within the documented shared-pool plus per-database-concurrency budget.
+- **Collector Safety Across Multi-Database Collectors**: Hardened `stat_user_tables`, `index_stats`, and `index_unused` so non-default database fan-out goes through the shared global permit and `util::open_db_connection`, keeping connections ephemeral and bounded across collectors.
+
 ## [0.14.0] - 2026-07-05
 
 ### Added

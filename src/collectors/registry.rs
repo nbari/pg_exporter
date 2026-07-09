@@ -4,22 +4,23 @@ use crate::{
         config::CollectorConfig,
         exporter::ScraperCollector,
         statements::StatementsCollector,
-        util::{connect_options_for_db, get_default_database, get_pg_version, set_pg_version},
+        util::{get_pg_version, get_scrape_timeout, set_pg_version},
     },
     exporter::GIT_COMMIT_HASH,
 };
 use futures::stream::{FuturesUnordered, StreamExt};
 use prometheus::{Encoder, Gauge, GaugeVec, Opts, Registry, TextEncoder};
-use sqlx::postgres::PgConnectOptions;
 use std::{
     env,
+    error::Error,
+    fmt,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
-use tokio::sync::RwLock;
+use tokio::{sync::Semaphore, time::timeout};
 use tracing::{debug, debug_span, error, info, info_span, instrument, warn};
 use tracing_futures::Instrument as _;
 
@@ -36,14 +37,55 @@ fn build_collector(
     }
 }
 
+#[derive(Debug)]
+pub enum ScrapeError {
+    Busy,
+    Timeout(Duration),
+    CollectorFailed(Vec<String>),
+    Encode(prometheus::Error),
+    Utf8(std::string::FromUtf8Error),
+}
+
+impl fmt::Display for ScrapeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Busy => f.write_str("another /metrics scrape is already running"),
+            Self::Timeout(duration) => write!(f, "scrape exceeded timeout of {duration:?}"),
+            Self::CollectorFailed(errors) => {
+                write!(f, "one or more collectors failed: {}", errors.join("; "))
+            }
+            Self::Encode(error) => write!(f, "failed to encode metrics: {error}"),
+            Self::Utf8(error) => write!(f, "failed to convert metrics to UTF-8: {error}"),
+        }
+    }
+}
+
+impl Error for ScrapeError {}
+
+impl From<prometheus::Error> for ScrapeError {
+    fn from(error: prometheus::Error) -> Self {
+        Self::Encode(error)
+    }
+}
+
+impl From<std::string::FromUtf8Error> for ScrapeError {
+    fn from(error: std::string::FromUtf8Error) -> Self {
+        Self::Utf8(error)
+    }
+}
+
+enum ActivePool {
+    Available(sqlx::PgPool),
+    Unavailable,
+}
+
 #[derive(Clone)]
 pub struct CollectorRegistry {
     collectors: Vec<CollectorType>,
     registry: Arc<Registry>,
     pg_up_gauge: Gauge,
     scraper: Option<Arc<ScraperCollector>>,
-    recovery_pool: Arc<RwLock<Option<sqlx::PgPool>>>,
-    recovery_connect_options: Option<PgConnectOptions>,
+    scrape_gate: Arc<Semaphore>,
     encode_buffer_capacity: Arc<AtomicUsize>,
 }
 
@@ -56,20 +98,6 @@ impl CollectorRegistry {
     #[allow(clippy::expect_used)]
     #[must_use]
     pub fn new(config: &CollectorConfig) -> Self {
-        Self::new_with_recovery_options(config, None)
-    }
-
-    /// Creates a new `CollectorRegistry` with instance-specific recovery options.
-    ///
-    /// # Panics
-    ///
-    /// Panics if core metrics fail to register (should never happen)
-    #[allow(clippy::expect_used)]
-    #[must_use]
-    pub fn new_with_recovery_options(
-        config: &CollectorConfig,
-        recovery_connect_options: Option<PgConnectOptions>,
-    ) -> Self {
         let registry = Arc::new(Registry::new());
 
         // Register pg_up gauge
@@ -141,37 +169,18 @@ impl CollectorRegistry {
             registry,
             pg_up_gauge,
             scraper: scraper_opt,
-            recovery_pool: Arc::new(RwLock::new(None)),
-            recovery_connect_options,
+            scrape_gate: Arc::new(Semaphore::new(1)),
             encode_buffer_capacity: Arc::new(AtomicUsize::new(0)),
         }
     }
 
-    fn build_fresh_pool(&self) -> anyhow::Result<sqlx::PgPool> {
-        let opts = if let Some(opts) = self.recovery_connect_options.clone() {
-            opts
-        } else {
-            let default_db = get_default_database().unwrap_or("postgres");
-            connect_options_for_db(default_db)?
-        };
-
-        Ok(sqlx::postgres::PgPoolOptions::new()
-            .min_connections(0)
-            .max_connections(3)
-            .acquire_timeout(Duration::from_secs(5))
-            .max_lifetime(Duration::from_mins(2))
-            .test_before_acquire(false)
-            .connect_lazy_with(opts))
-    }
-
-    async fn connectivity_check(pool: &sqlx::PgPool, retry: bool) -> Result<(), sqlx::Error> {
+    async fn connectivity_check(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
         let connect_span = info_span!(
             "db.connectivity_check",
             otel.kind = "client",
             db.system = "postgresql",
             db.operation = "SELECT",
-            db.statement = "SELECT 1",
-            retry
+            db.statement = "SELECT 1"
         );
 
         sqlx::query("SELECT 1")
@@ -199,66 +208,17 @@ impl CollectorRegistry {
         }
     }
 
-    async fn recover_with_fresh_pool(
-        &self,
-        active_pool_error: &sqlx::Error,
-    ) -> Option<sqlx::PgPool> {
-        match self.build_fresh_pool() {
-            Ok(fresh_pool) => match Self::connectivity_check(&fresh_pool, true).await {
-                Ok(()) => {
-                    warn!(
-                        "Connectivity recovered with a fresh pool after failure ({}); caching recovered pool for reuse",
-                        active_pool_error
-                    );
-                    *self.recovery_pool.write().await = Some(fresh_pool.clone());
-                    self.pg_up_gauge.set(1.0);
-                    self.ensure_version_initialized(&fresh_pool).await;
-                    Some(fresh_pool)
-                }
-                Err(retry_err) => {
-                    error!(
-                        "Failed to connect to PostgreSQL (active pool: {}, fresh pool retry: {})",
-                        active_pool_error, retry_err
-                    );
-                    self.pg_up_gauge.set(0.0);
-                    None
-                }
-            },
-            Err(build_err) => {
-                error!(
-                    "Failed to connect to PostgreSQL (active pool: {}) and could not build fresh pool: {}",
-                    active_pool_error, build_err
-                );
-                self.pg_up_gauge.set(0.0);
-                None
-            }
-        }
-    }
-
-    async fn select_active_pool(&self, shared_pool: &sqlx::PgPool) -> (sqlx::PgPool, bool) {
-        let recovery_pool = self.recovery_pool.read().await.clone();
-        let active_pool = recovery_pool.clone().unwrap_or_else(|| shared_pool.clone());
-        let using_recovery_pool = recovery_pool.is_some();
-
-        match Self::connectivity_check(&active_pool, false).await {
+    async fn select_active_pool(&self, shared_pool: &sqlx::PgPool) -> ActivePool {
+        match Self::connectivity_check(shared_pool).await {
             Ok(()) => {
                 self.pg_up_gauge.set(1.0);
-                self.ensure_version_initialized(&active_pool).await;
-                (active_pool, true)
+                self.ensure_version_initialized(shared_pool).await;
+                ActivePool::Available(shared_pool.clone())
             }
-            Err(active_pool_error) => {
-                if using_recovery_pool {
-                    warn!(
-                        "Recovery pool failed connectivity check ({}); clearing cached recovery pool",
-                        active_pool_error
-                    );
-                    *self.recovery_pool.write().await = None;
-                }
-
-                match self.recover_with_fresh_pool(&active_pool_error).await {
-                    Some(recovered_pool) => (recovered_pool, true),
-                    None => (active_pool, false),
-                }
+            Err(error) => {
+                error!("Failed to connect to PostgreSQL: {}", error);
+                self.pg_up_gauge.set(0.0);
+                ActivePool::Unavailable
             }
         }
     }
@@ -269,13 +229,50 @@ impl CollectorRegistry {
     ///
     /// Returns an error if metric collection or encoding fails
     #[instrument(skip(self, pool), level = "info", err, fields(otel.kind = "internal"))]
-    pub(crate) async fn collect_all_bytes(&self, pool: &sqlx::PgPool) -> anyhow::Result<Vec<u8>> {
+    pub(crate) async fn collect_all_bytes(
+        &self,
+        pool: &sqlx::PgPool,
+    ) -> Result<Vec<u8>, ScrapeError> {
+        let permit = self
+            .scrape_gate
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ScrapeError::Busy)?;
+
+        let scrape_timeout = get_scrape_timeout();
+        let registry = self.clone();
+        let pool = pool.clone();
+        let scrape_task = tokio::spawn(async move {
+            let _permit = permit;
+            registry.collect_all_bytes_inner(&pool).await
+        });
+
+        // On timeout, dropping the JoinHandle detaches the task instead of aborting it.
+        // That intentionally keeps the scrape gate permit held until collector futures
+        // unwind, so the next scrape cannot start another wave of DB work while the
+        // previous scrape's PostgreSQL backends are still cancelling server-side.
+        match timeout(scrape_timeout, scrape_task).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => Err(ScrapeError::CollectorFailed(vec![format!(
+                "scrape task failed: {error}"
+            )])),
+            Err(_) => Err(ScrapeError::Timeout(scrape_timeout)),
+        }
+    }
+
+    async fn collect_all_bytes_inner(&self, pool: &sqlx::PgPool) -> Result<Vec<u8>, ScrapeError> {
         // Increment scrape counter if scraper is available
         if let Some(ref scraper) = self.scraper {
             scraper.increment_scrapes();
         }
 
-        let (active_pool, is_up) = self.select_active_pool(pool).await;
+        let active_pool = match self.select_active_pool(pool).await {
+            ActivePool::Available(active_pool) => active_pool,
+            ActivePool::Unavailable => {
+                warn!("PostgreSQL unavailable; returning pg_up=0 without stale collector metrics");
+                return self.encode_outage_metrics();
+            }
+        };
 
         // Launch all collectors concurrently.
         let mut tasks = FuturesUnordered::new();
@@ -287,16 +284,6 @@ impl CollectorRegistry {
 
         for collector in &self.collectors {
             let name = collector.name();
-
-            // Skip DB-dependent collectors if DB is down.
-            // "exporter" collector should always run as it tracks scrape stats.
-            if !is_up && name != "exporter" {
-                debug!(
-                    "Skipping DB-dependent collector '{}' because DB is down",
-                    name
-                );
-                continue;
-            }
 
             // Create a span per collector execution to visualize overlap in traces.
             let span = info_span!("collector.collect", collector = %name, otel.kind = "internal");
@@ -333,19 +320,44 @@ impl CollectorRegistry {
         }
 
         // Drain completions as they finish (unordered).
-        while let Some((name, _res)) = tasks.next().await {
-            debug!("Collected metrics from '{}'", name);
+        let mut failures = Vec::new();
+        while let Some((name, res)) = tasks.next().await {
+            match res {
+                Ok(()) => debug!("Collected metrics from '{}'", name),
+                Err(error) => failures.push(format!("{name}: {error}")),
+            }
+        }
+
+        if !failures.is_empty() {
+            return Err(ScrapeError::CollectorFailed(failures));
         }
 
         // Encode current registry into Prometheus exposition format.
+        let metric_families = self.registry.gather();
+        self.encode_metric_families(&metric_families)
+    }
+
+    fn encode_outage_metrics(&self) -> Result<Vec<u8>, ScrapeError> {
+        let metric_families = self
+            .registry
+            .gather()
+            .into_iter()
+            .filter(|family| matches!(family.name(), "pg_up" | "pg_exporter_build_info"))
+            .collect::<Vec<_>>();
+
+        self.encode_metric_families(&metric_families)
+    }
+
+    fn encode_metric_families(
+        &self,
+        metric_families: &[prometheus::proto::MetricFamily],
+    ) -> Result<Vec<u8>, ScrapeError> {
         let encode_span = debug_span!("prometheus.encode");
         let guard = encode_span.enter();
 
         let encoder = TextEncoder::new();
-        let metric_families = self.registry.gather();
-
         let mut buffer = Vec::with_capacity(self.encode_buffer_capacity.load(Ordering::Relaxed));
-        encoder.encode(&metric_families, &mut buffer)?;
+        encoder.encode(metric_families, &mut buffer)?;
         self.encode_buffer_capacity
             .store(buffer.capacity(), Ordering::Relaxed);
 
@@ -368,7 +380,7 @@ impl CollectorRegistry {
     /// # Errors
     ///
     /// Returns an error if metric collection or encoding fails
-    pub async fn collect_all(&self, pool: &sqlx::PgPool) -> anyhow::Result<String> {
+    pub async fn collect_all(&self, pool: &sqlx::PgPool) -> Result<String, ScrapeError> {
         Ok(String::from_utf8(self.collect_all_bytes(pool).await?)?)
     }
 
@@ -420,15 +432,22 @@ mod tests {
             .connect_lazy("postgresql://localhost:54321/postgres")
             .expect("failed to connect lazy to invalid DB");
 
-        let _ = registry.collect_all(&pool).await;
+        let output = registry
+            .collect_all(&pool)
+            .await
+            .expect("DB-down scrape should still return exporter status metrics");
 
         assert!((registry.pg_up_gauge.get() - 0.0).abs() < f64::EPSILON);
+        assert!(output.contains("pg_up 0"));
+        assert!(output.contains("pg_exporter_build_info"));
+        assert!(!output.contains("Error collecting metrics"));
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn test_pg_up_not_overwritten_by_collector_success() {
-        // "exporter" collector always runs and should "succeed" even if DB is down
+        // DB outages return a status-only payload. They must not let DB-independent
+        // collector registration or scrape accounting overwrite pg_up=0.
         let config = CollectorConfig::new(25).with_enabled(&["exporter".to_string()]);
         let registry = CollectorRegistry::new(&config);
 
@@ -438,11 +457,18 @@ mod tests {
             .connect_lazy("postgresql://localhost:54321/postgres")
             .expect("failed to connect lazy to invalid DB");
 
-        let _ = registry.collect_all(&pool).await;
+        let output = registry
+            .collect_all(&pool)
+            .await
+            .expect("DB-down scrape should still return exporter status metrics");
 
-        // Even though "exporter" collector ran and succeeded (returned Ok(())),
         // pg_up MUST stay at 0.0 because the connectivity check failed.
         assert!((registry.pg_up_gauge.get() - 0.0).abs() < f64::EPSILON);
+        assert!(output.contains("pg_up 0"));
+        assert!(
+            !output.contains("pg_exporter_scrapes_total"),
+            "outage payload must not expose stale exporter collector samples: {output}"
+        );
     }
 
     #[tokio::test]
@@ -563,6 +589,53 @@ mod tests {
                 "DB-dependent metric should have no samples during outage"
             );
         }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn test_database_outage_response_filters_stale_collector_metrics() {
+        let dsn = std::env::var("PG_EXPORTER_DSN").unwrap_or_else(|_| {
+            "postgresql://postgres:postgres@localhost:5432/postgres".to_string()
+        });
+        let config = CollectorConfig::new(25).with_enabled(&["default".to_string()]);
+        let registry = CollectorRegistry::new(&config);
+
+        let real_pool = PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy(&dsn)
+            .expect("failed to connect lazy to test DB");
+
+        if sqlx::query("SELECT 1").fetch_one(&real_pool).await.is_err() {
+            return;
+        }
+
+        let healthy_output = registry
+            .collect_all(&real_pool)
+            .await
+            .expect("healthy scrape should succeed");
+        assert!(healthy_output.contains("pg_up 1"));
+        assert!(
+            healthy_output.contains("pg_settings_server_version_num"),
+            "healthy scrape should populate default collector metrics"
+        );
+
+        let broken_pool = PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(100))
+            .connect_lazy("postgresql://localhost:54321/postgres")
+            .expect("failed to connect lazy to invalid DB");
+
+        let outage_output = registry
+            .collect_all(&broken_pool)
+            .await
+            .expect("DB-down scrape should still return exporter status metrics");
+
+        assert!(outage_output.contains("pg_up 0"));
+        assert!(outage_output.contains("pg_exporter_build_info"));
+        assert!(
+            !outage_output.contains("pg_settings_server_version_num"),
+            "DB-down scrape must not expose stale default collector metrics: {outage_output}"
+        );
+        assert!(!outage_output.contains("Error collecting metrics"));
     }
 
     #[test]

@@ -228,7 +228,7 @@ async fn test_exporter_default_bind_auto_detect() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_exporter_starts_even_when_db_down() -> Result<()> {
+async fn test_exporter_returns_200_with_pg_up_zero_when_db_down() -> Result<()> {
     // Attempt to initialize tracing, ignore if already initialized
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -255,23 +255,24 @@ async fn test_exporter_starts_even_when_db_down() -> Result<()> {
         .send()
         .await?;
 
-    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.status(),
+        200,
+        "plain PostgreSQL outage must keep /metrics scrapeable so pg_up=0 is visible"
+    );
 
     let body = response.text().await?;
     assert!(
         body.contains("pg_up 0"),
-        "pg_up should be 0 when DB is down"
+        "DB-down scrape should expose pg_up=0, got body: {body}"
     );
     assert!(
         body.contains("pg_exporter_build_info"),
-        "Core build-info metric should still be exposed during outage"
+        "DB-down scrape should keep exporter status metrics, got body: {body}"
     );
-
-    // DB-dependent metrics should be omitted.
-    // Default collector normally exports pg_settings_count
     assert!(
-        !body.contains("pg_settings_count"),
-        "DB-dependent metrics should be omitted"
+        !body.contains("Error collecting metrics"),
+        "plain DB outage must not be turned into a scrape error body: {body}"
     );
 
     handle.abort();

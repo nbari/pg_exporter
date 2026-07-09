@@ -1,13 +1,12 @@
 use crate::collectors::util::{
-    get_default_database, get_excluded_databases, get_max_db_concurrency, open_db_connection,
+    acquire_db_query_permit, get_default_database, get_excluded_databases, open_db_connection,
 };
 use crate::collectors::{Collector, all_databases_failed, i64_to_f64};
 use anyhow::{Result, anyhow};
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, Opts, Registry};
 use sqlx::{PgPool, Row, postgres::PgRow};
-use std::{sync::Arc, time::Duration};
-use tokio::{sync::Semaphore, task::JoinSet};
+use tokio::task::JoinSet;
 use tracing::{debug, error, info_span, instrument};
 use tracing_futures::Instrument as _;
 
@@ -53,8 +52,6 @@ impl Default for IndexStatsCollector {
 }
 
 const INDEX_STATS_LABELS: [&str; 1] = ["datname"];
-const PER_DATABASE_COLLECTION_TIMEOUT: Duration = Duration::from_secs(5);
-const TASK_JOIN_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Per-database aggregate of index usage statistics.
 ///
@@ -235,25 +232,16 @@ impl Collector for IndexStatsCollector {
             let shared_pool = pool.clone();
             let default_db = get_default_database().map(std::string::ToString::to_string);
 
-            // 2) One task per DB: reuse shared pool for the default DB, tiny pool for others.
+            // 2) One task per DB. The default DB reuses the shared pool; every other database
+            // must pass through the global per-database connection limiter.
             let mut tasks: JoinSet<Result<Option<IndexStatsSample>>> = JoinSet::new();
-            let semaphore = Arc::new(Semaphore::new(get_max_db_concurrency()));
 
             let num_dbs = dbs.len();
             for datname in dbs {
                 let shared_pool = shared_pool.clone();
                 let default_db = default_db.clone();
-                let semaphore = Arc::clone(&semaphore);
 
                 tasks.spawn(async move {
-                    // Bound how many databases we query at once so peak connections do not
-                    // scale with the number of databases in the cluster.
-                    let Ok(_permit) = semaphore.acquire_owned().await else {
-                        return Err(anyhow!(
-                            "index_stats: concurrency semaphore closed before acquiring permit"
-                        ));
-                    };
-                    let datname_for_timeout = datname.clone();
                     let use_shared = default_db.as_deref() == Some(datname.as_str());
 
                     let query_span = info_span!(
@@ -267,64 +255,57 @@ impl Collector for IndexStatsCollector {
                         reuse_pool = use_shared
                     );
 
-                    tokio::time::timeout(PER_DATABASE_COLLECTION_TIMEOUT, async move {
-                        let row_res: anyhow::Result<Option<PgRow>> = if use_shared {
-                            sqlx::query(INDEX_STATS_QUERY)
-                                .fetch_optional(&shared_pool)
+                    let db_query_permit = if use_shared {
+                        None
+                    } else {
+                        Some(acquire_db_query_permit().await.map_err(|e| {
+                            anyhow!("index_stats: failed to acquire database query permit: {e}")
+                        })?)
+                    };
+
+                    let row_res: anyhow::Result<Option<PgRow>> = if use_shared {
+                        sqlx::query(INDEX_STATS_QUERY)
+                            .fetch_optional(&shared_pool)
+                            .instrument(query_span)
+                            .await
+                            .map_err(Into::into)
+                    } else {
+                        let Some(permit) = db_query_permit.as_ref() else {
+                            return Err(anyhow!("index_stats: missing database query permit"));
+                        };
+                        match open_db_connection(&datname, permit).await {
+                            Ok(mut conn) => sqlx::query(INDEX_STATS_QUERY)
+                                .fetch_optional(&mut conn)
                                 .instrument(query_span)
                                 .await
-                                .map_err(Into::into)
-                        } else {
-                            match open_db_connection(&datname).await {
-                                Ok(mut conn) => sqlx::query(INDEX_STATS_QUERY)
-                                    .fetch_optional(&mut conn)
-                                    .instrument(query_span)
-                                    .await
-                                    .map_err(Into::into),
-                                Err(e) => Err(e),
-                            }
-                        };
-
-                        match row_res? {
-                            Some(row) => Ok(Some(Self::sample_from_row(&row)?)),
-                            None => Ok(None),
+                                .map_err(Into::into),
+                            Err(e) => Err(e),
                         }
-                    })
-                    .await
-                    .map_err(|_| {
-                        anyhow!(
-                            "index_stats timed out collecting metrics for database {datname_for_timeout} after {PER_DATABASE_COLLECTION_TIMEOUT:?}"
-                        )
-                    })?
+                    };
+
+                    match row_res? {
+                        Some(row) => Ok(Some(Self::sample_from_row(&row)?)),
+                        None => Ok(None),
+                    }
                 });
             }
 
             let mut all_samples = Vec::new();
             let mut failures = Vec::new();
             let mut failed_db_count = 0;
-            while !tasks.is_empty() {
-                match tokio::time::timeout(TASK_JOIN_WAIT_TIMEOUT, tasks.join_next()).await {
-                    Ok(Some(Ok(Ok(Some(sample))))) => all_samples.push(sample),
-                    Ok(Some(Ok(Ok(None)))) => {}
-                    Ok(Some(Ok(Err(e)))) => {
+            while let Some(joined) = tasks.join_next().await {
+                match joined {
+                    Ok(Ok(Some(sample))) => all_samples.push(sample),
+                    Ok(Ok(None)) => {}
+                    Ok(Err(e)) => {
                         error!(error=?e, "index_stats: task returned error");
                         failures.push(e.to_string());
                         failed_db_count += 1;
                     }
-                    Ok(Some(Err(e))) => {
+                    Err(e) => {
                         error!(error=?e, "index_stats: task join error");
                         failures.push(e.to_string());
                         failed_db_count += 1;
-                    }
-                    Ok(None) => break,
-                    Err(_) => {
-                        let pending_tasks = tasks.len();
-                        tasks.abort_all();
-                        failures.push(format!(
-                            "timed out waiting for {pending_tasks} database collection task(s) after {TASK_JOIN_WAIT_TIMEOUT:?}"
-                        ));
-                        failed_db_count += pending_tasks;
-                        break;
                     }
                 }
             }

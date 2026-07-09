@@ -4,8 +4,8 @@ use crate::{
         config::CollectorConfig,
         registry::CollectorRegistry,
         util::{
-            apply_default_application_name, get_excluded_databases,
-            set_base_connect_options_from_dsn, set_pg_version,
+            apply_connection_hardening, get_connect_timeout, get_excluded_databases,
+            set_base_connect_options_from_dsn, set_pg_version, validate_connect_timeout_budget,
         },
     },
 };
@@ -54,10 +54,6 @@ pub async fn new(
     dsn: SecretString,
     collector_config: CollectorConfig,
 ) -> Result<()> {
-    let recovery_connect_options = apply_default_application_name(
-        PgConnectOptions::from_str(dsn.expose_secret())
-            .context("Failed to parse base DSN options")?,
-    );
     let pool = connect_pool(&dsn)?;
 
     // Try to initialize version, but don't block startup if DB is down
@@ -65,10 +61,7 @@ pub async fn new(
 
     set_base_connect_options_from_dsn(&dsn).context("Failed to parse base DSN options")?;
     let enabled_collectors = collector_config.enabled_collectors_in_order();
-    let registry = CollectorRegistry::new_with_recovery_options(
-        &collector_config,
-        Some(recovery_connect_options),
-    );
+    let registry = CollectorRegistry::new(&collector_config);
 
     let app = build_router(pool.clone(), registry);
 
@@ -88,15 +81,17 @@ pub async fn new(
 }
 
 fn connect_pool(dsn: &SecretString) -> Result<sqlx::PgPool> {
-    let opts = apply_default_application_name(
+    validate_connect_timeout_budget()?;
+
+    let opts = apply_connection_hardening(
         PgConnectOptions::from_str(dsn.expose_secret())
             .context("Failed to parse base DSN options")?,
-    );
+    )?;
 
     let pool = PgPoolOptions::new()
         .min_connections(0)
         .max_connections(3)
-        .acquire_timeout(Duration::from_secs(5))
+        .acquire_timeout(get_connect_timeout())
         .max_lifetime(Duration::from_mins(2))
         .test_before_acquire(false)
         .connect_lazy_with(opts);

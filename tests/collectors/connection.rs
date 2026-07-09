@@ -9,13 +9,14 @@
 
 use super::common;
 use anyhow::{Result, anyhow};
-use pg_exporter::collectors::util::{get_max_db_concurrency, open_db_connection};
+use pg_exporter::collectors::util::{
+    acquire_db_query_permit, get_max_db_concurrency, open_db_connection,
+};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::Duration;
-use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 /// Each call must return a **fresh** backend (no cache/reuse), and dropping it must close it.
@@ -28,8 +29,10 @@ async fn open_db_connection_is_fresh_and_ephemeral() -> Result<()> {
 
     // Two per-database connections held at once must be two DISTINCT backends. A per-database
     // pool cache would hand back the same reused connection (identical backend PID).
-    let mut c1 = open_db_connection(&dbname).await?;
-    let mut c2 = open_db_connection(&dbname).await?;
+    let permit1 = acquire_db_query_permit().await?;
+    let permit2 = acquire_db_query_permit().await?;
+    let mut c1 = open_db_connection(&dbname, &permit1).await?;
+    let mut c2 = open_db_connection(&dbname, &permit2).await?;
     let pid1: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut c1)
         .await?;
@@ -44,6 +47,8 @@ async fn open_db_connection_is_fresh_and_ephemeral() -> Result<()> {
     // Dropping the connections must close them (ephemeral): the backends must disappear.
     drop(c1);
     drop(c2);
+    drop(permit1);
+    drop(permit2);
 
     let mut remaining = i64::MAX;
     for _ in 0..25 {
@@ -71,14 +76,13 @@ async fn open_db_connection_is_fresh_and_ephemeral() -> Result<()> {
 /// configured concurrency limit.
 ///
 /// Every multi-database fan-out collector (`stat`, `index`, `index_unused`) gates its
-/// ephemeral `open_db_connection` calls behind `Semaphore::new(get_max_db_concurrency())`.
-/// That semaphore is what bounds the exporter's per-database connection footprint to the
-/// concurrency limit *regardless of how many databases exist in the cluster* — the whole
-/// point of the ephemeral model. This test reproduces that exact primitive (semaphore sized
-/// to `get_max_db_concurrency()` + ephemeral `open_db_connection`) with more tasks than
-/// permits, and asserts the peak number of simultaneously-open connections never exceeds the
-/// limit. If a future change drops or weakens the semaphore, the observed peak jumps to the
-/// task count and this test fails.
+/// ephemeral `open_db_connection` calls behind the global `acquire_db_query_permit()`
+/// semaphore. That semaphore is what bounds the exporter's per-database connection
+/// footprint to the concurrency limit *regardless of how many databases exist in the
+/// cluster* — the whole point of the ephemeral model. This test exercises that shared
+/// primitive with more tasks than permits and asserts the peak number of simultaneously-open
+/// connections never exceeds the limit. If a future change drops or weakens the semaphore,
+/// the observed peak jumps to the task count and this test fails.
 #[tokio::test]
 async fn per_database_connections_never_exceed_concurrency_limit() -> Result<()> {
     let admin = common::create_test_pool().await?;
@@ -92,27 +96,24 @@ async fn per_database_connections_never_exceed_concurrency_limit() -> Result<()>
     // constraint. A removed semaphore would let all `task_count` connections open at once.
     let task_count = limit + 4;
 
-    let semaphore = Arc::new(Semaphore::new(limit));
     let in_flight = Arc::new(AtomicUsize::new(0));
     let observed_peak = Arc::new(AtomicUsize::new(0));
 
     let mut tasks = JoinSet::new();
     for _ in 0..task_count {
-        let semaphore = Arc::clone(&semaphore);
         let in_flight = Arc::clone(&in_flight);
         let observed_peak = Arc::clone(&observed_peak);
         let dbname = dbname.clone();
 
         tasks.spawn(async move {
-            let _permit = semaphore
-                .acquire_owned()
+            let permit = acquire_db_query_permit()
                 .await
-                .map_err(|_| anyhow!("concurrency semaphore closed before acquiring permit"))?;
+                .map_err(|e| anyhow!("failed to acquire global database query permit: {e}"))?;
 
             // Open the real ephemeral per-database connection, then record how many are open
             // right now. Counting between open and the matching decrement (below) measures the
             // true simultaneous connection count while the permit is held.
-            let mut conn = open_db_connection(&dbname).await?;
+            let mut conn = open_db_connection(&dbname, &permit).await?;
             let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
             observed_peak.fetch_max(now, Ordering::SeqCst);
 

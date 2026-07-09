@@ -9,7 +9,7 @@ use pg_exporter::collectors::{
 };
 use prometheus::{Registry, proto::MetricFamily};
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
-use std::{env, path::Path, time::Duration};
+use std::time::Duration;
 use testcontainers_modules::testcontainers::{
     ContainerAsync, GenericImage, ImageExt,
     core::{CmdWaitFor, ExecCommand, IntoContainerPort},
@@ -69,98 +69,6 @@ struct ReplicaSnapshot {
     lag_seconds: f64,
     is_replica: i64,
     last_replay_seconds: f64,
-}
-
-fn socket_exists(host: &str) -> bool {
-    if let Some(path) = host.strip_prefix("unix://") {
-        Path::new(path).exists()
-    } else {
-        true
-    }
-}
-
-fn testcontainers_runtime_candidates() -> Vec<String> {
-    let mut candidates = vec!["unix:///var/run/docker.sock".to_string()];
-    if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR")
-        && !runtime_dir.is_empty()
-    {
-        candidates.push(format!("unix://{runtime_dir}/.docker/run/docker.sock"));
-    }
-    if let Ok(home) = env::var("HOME")
-        && !home.is_empty()
-    {
-        candidates.push(format!("unix://{home}/.docker/run/docker.sock"));
-        candidates.push(format!("unix://{home}/.docker/desktop/docker.sock"));
-    }
-    candidates
-}
-
-fn detect_podman_socket() -> Option<String> {
-    let mut candidates = vec![
-        "unix:///run/podman/podman.sock".to_string(),
-        "unix:///var/run/podman/podman.sock".to_string(),
-    ];
-    if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR")
-        && !runtime_dir.is_empty()
-    {
-        candidates.push(format!("unix://{runtime_dir}/podman/podman.sock"));
-    }
-    if let Ok(uid) = env::var("UID")
-        && !uid.is_empty()
-    {
-        candidates.push(format!("unix:///run/user/{uid}/podman/podman.sock"));
-    }
-
-    candidates
-        .into_iter()
-        .find(|candidate| socket_exists(candidate))
-}
-
-fn find_container_runtime() -> Option<String> {
-    if let Ok(existing) = env::var("DOCKER_HOST")
-        && !existing.is_empty()
-        && socket_exists(&existing)
-    {
-        return Some(existing);
-    }
-
-    testcontainers_runtime_candidates()
-        .into_iter()
-        .find(|candidate| socket_exists(candidate))
-}
-
-fn should_require_container_runtime() -> bool {
-    let in_ci = env::var("CI")
-        .ok()
-        .is_some_and(|value| value.eq_ignore_ascii_case("true"));
-    let force = env::var("PG_EXPORTER_REQUIRE_TESTCONTAINERS")
-        .ok()
-        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE"));
-
-    in_ci || force
-}
-
-fn ensure_container_runtime_for_test(test_name: &str) -> Result<bool> {
-    if find_container_runtime().is_some() {
-        return Ok(true);
-    }
-
-    let mut message = format!(
-        "No container runtime socket found (checked Podman + Docker), cannot run {test_name}"
-    );
-
-    if let Some(podman_socket) = detect_podman_socket() {
-        message.push_str(". Podman socket detected at ");
-        message.push_str(&podman_socket);
-        message.push_str("; set DOCKER_HOST to this value so testcontainers can use it");
-    }
-
-    if should_require_container_runtime() {
-        bail!("{message}");
-    }
-
-    eprintln!("{message}; skipping");
-    Ok(false)
 }
 
 fn approx_equal_seconds(left: f64, right: f64, tolerance: f64) -> bool {
@@ -783,11 +691,11 @@ async fn assert_broken_and_error_semantics(
 #[tokio::test]
 async fn replication_lag_and_role_semantics_from_postgres_primary_replica_pair() -> Result<()> {
     let test_name = "replication_lag_and_role_semantics_from_postgres_primary_replica_pair";
-    if !ensure_container_runtime_for_test(test_name)? {
+    if !common::ensure_container_runtime_for_test(test_name)? {
         return Ok(());
     }
 
-    let require_runtime = should_require_container_runtime();
+    let require_runtime = common::should_require_container_runtime();
     let suffix = Ulid::new().to_string().to_lowercase();
     let network = format!("pg-exporter-repl-{suffix}");
     let primary_name = format!("pg-exporter-primary-{suffix}");

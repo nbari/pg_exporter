@@ -1,13 +1,12 @@
 use crate::collectors::util::{
-    get_default_database, get_excluded_databases, get_max_db_concurrency, open_db_connection,
+    acquire_db_query_permit, get_default_database, get_excluded_databases, open_db_connection,
 };
 use crate::collectors::{Collector, all_databases_failed, i64_to_f64};
 use anyhow::{Result, anyhow};
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, IntGaugeVec, Opts, Registry};
 use sqlx::{PgPool, Row, postgres::PgRow};
-use std::{sync::Arc, time::Duration};
-use tokio::{sync::Semaphore, task::JoinSet};
+use tokio::task::JoinSet;
 use tracing::{debug, error, info_span, instrument};
 use tracing_futures::Instrument as _;
 
@@ -177,8 +176,6 @@ impl StatUserTablesCollector {
 }
 
 const USER_TABLE_LABELS: [&str; 3] = ["datname", "schemaname", "relname"];
-const PER_DATABASE_COLLECTION_TIMEOUT: Duration = Duration::from_secs(5);
-const TASK_JOIN_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 const STAT_USER_TABLES_QUERY: &str = r"
     SELECT
@@ -400,25 +397,16 @@ impl Collector for StatUserTablesCollector {
             let shared_pool = pool.clone();
             let default_db = get_default_database().map(std::string::ToString::to_string);
 
-            // 2) Spawn one task per DB, reuse shared pool for default DB, tiny pool for others.
-            // A semaphore bounds how many databases are queried concurrently so peak
-            // connections do not scale with the number of databases in the cluster.
+            // 2) Spawn one task per DB. The default DB reuses the shared pool; every other
+            // database must pass through the global per-database connection limiter.
             let mut tasks = JoinSet::new();
-            let semaphore = Arc::new(Semaphore::new(get_max_db_concurrency()));
 
             let num_dbs = dbs.len();
             for datname in dbs {
                 let shared_pool = shared_pool.clone();
                 let default_db = default_db.clone();
-                let semaphore = Arc::clone(&semaphore);
 
                 tasks.spawn(async move {
-                    let Ok(_permit) = semaphore.acquire_owned().await else {
-                        return Err(anyhow!(
-                            "stat_user_tables: concurrency semaphore closed before acquiring permit"
-                        ));
-                    };
-                    let datname_for_timeout = datname.clone();
                     let use_shared = default_db.as_deref() == Some(datname.as_str());
 
                     let query_span = info_span!(
@@ -432,120 +420,117 @@ impl Collector for StatUserTablesCollector {
                         reuse_pool = use_shared
                     );
 
-                    tokio::time::timeout(PER_DATABASE_COLLECTION_TIMEOUT, async move {
-                        let rows_res: anyhow::Result<Vec<PgRow>> = if use_shared {
-                            sqlx::query(STAT_USER_TABLES_QUERY)
-                                .fetch_all(&shared_pool)
+                    let db_query_permit = if use_shared {
+                        None
+                    } else {
+                        Some(acquire_db_query_permit().await.map_err(|e| {
+                            anyhow!(
+                                "stat_user_tables: failed to acquire database query permit: {e}"
+                            )
+                        })?)
+                    };
+
+                    let rows_res: anyhow::Result<Vec<PgRow>> = if use_shared {
+                        sqlx::query(STAT_USER_TABLES_QUERY)
+                            .fetch_all(&shared_pool)
+                            .instrument(query_span)
+                            .await
+                            .map_err(Into::into)
+                    } else {
+                        let Some(permit) = db_query_permit.as_ref() else {
+                            return Err(anyhow!("stat_user_tables: missing database query permit"));
+                        };
+                        match open_db_connection(&datname, permit).await {
+                            Ok(mut conn) => sqlx::query(STAT_USER_TABLES_QUERY)
+                                .fetch_all(&mut conn)
                                 .instrument(query_span)
                                 .await
-                                .map_err(Into::into)
-                        } else {
-                            match open_db_connection(&datname).await {
-                                Ok(mut conn) => sqlx::query(STAT_USER_TABLES_QUERY)
-                                    .fetch_all(&mut conn)
-                                    .instrument(query_span)
-                                    .await
-                                    .map_err(Into::into),
-                                Err(e) => Err(e),
-                            }
-                        };
-
-                        let rows = rows_res?;
-                        let mut samples = Vec::with_capacity(rows.len());
-
-                        for row in rows {
-                            samples.push(UserTableSample {
-                                datname: row
-                                    .try_get::<Option<String>, _>("datname")?
-                                    .unwrap_or_else(|| "[unknown]".to_string()),
-                                schemaname: row.try_get("schemaname")?,
-                                relname: row.try_get("relname")?,
-                                seq_scan: row.try_get("seq_scan").unwrap_or(0),
-                                seq_tup_read: row.try_get("seq_tup_read").unwrap_or(0),
-                                idx_scan: row.try_get("idx_scan").unwrap_or(0),
-                                idx_tup_fetch: row.try_get("idx_tup_fetch").unwrap_or(0),
-                                n_tup_ins: row.try_get("n_tup_ins").unwrap_or(0),
-                                n_tup_upd: row.try_get("n_tup_upd").unwrap_or(0),
-                                n_tup_del: row.try_get("n_tup_del").unwrap_or(0),
-                                n_tup_hot_upd: row.try_get("n_tup_hot_upd").unwrap_or(0),
-                                n_live_tup: row.try_get("n_live_tup").unwrap_or(0),
-                                n_dead_tup: row.try_get("n_dead_tup").unwrap_or(0),
-                                n_mod_since_analyze: row.try_get("n_mod_since_analyze").unwrap_or(0),
-                                last_vacuum_epoch: row.try_get("last_vacuum_epoch").unwrap_or(0),
-                                last_autovacuum_epoch: row.try_get("last_autovacuum_epoch").unwrap_or(0),
-                                last_analyze_epoch: row.try_get("last_analyze_epoch").unwrap_or(0),
-                                last_autoanalyze_epoch: row.try_get("last_autoanalyze_epoch").unwrap_or(0),
-                                vacuum_count: row.try_get("vacuum_count").unwrap_or(0),
-                                autovacuum_count: row.try_get("autovacuum_count").unwrap_or(0),
-                                analyze_count: row.try_get("analyze_count").unwrap_or(0),
-                                autoanalyze_count: row.try_get("autoanalyze_count").unwrap_or(0),
-                                index_size_bytes: row.try_get("index_size_bytes").unwrap_or(0),
-                                table_size_bytes: row.try_get("table_size_bytes").unwrap_or(0),
-                                last_autovacuum_seconds_ago: row
-                                    .try_get("last_autovacuum_seconds_ago")
-                                    .ok(),
-                                last_autoanalyze_seconds_ago: row
-                                    .try_get("last_autoanalyze_seconds_ago")
-                                    .ok(),
-                                never_autovacuumed: row.try_get("never_autovacuumed").unwrap_or(0),
-                                never_autoanalyzed: row.try_get("never_autoanalyzed").unwrap_or(0),
-                                autovacuum_threshold_ratio: row
-                                    .try_get("autovacuum_threshold_ratio")
-                                    .unwrap_or(0.0),
-                                autoanalyze_threshold_ratio: row
-                                    .try_get("autoanalyze_threshold_ratio")
-                                    .unwrap_or(0.0),
-                                heap_blks_read: row.try_get("heap_blks_read").unwrap_or(0),
-                                heap_blks_hit: row.try_get("heap_blks_hit").unwrap_or(0),
-                                idx_blks_read: row.try_get("idx_blks_read").unwrap_or(0),
-                                idx_blks_hit: row.try_get("idx_blks_hit").unwrap_or(0),
-                                toast_blks_read: row.try_get("toast_blks_read").unwrap_or(0),
-                                toast_blks_hit: row.try_get("toast_blks_hit").unwrap_or(0),
-                                tidx_blks_read: row.try_get("tidx_blks_read").unwrap_or(0),
-                                tidx_blks_hit: row.try_get("tidx_blks_hit").unwrap_or(0),
-                            });
+                                .map_err(Into::into),
+                            Err(e) => Err(e),
                         }
+                    };
 
-                        Ok::<Vec<UserTableSample>, anyhow::Error>(samples)
-                    })
-                    .await
-                    .map_err(|_| {
-                        anyhow!(
-                            "stat_user_tables timed out collecting metrics for database {datname_for_timeout} after {PER_DATABASE_COLLECTION_TIMEOUT:?}"
-                        )
-                    })?
+                    let rows = rows_res?;
+                    let mut samples = Vec::with_capacity(rows.len());
+
+                    for row in rows {
+                        samples.push(UserTableSample {
+                            datname: row
+                                .try_get::<Option<String>, _>("datname")?
+                                .unwrap_or_else(|| "[unknown]".to_string()),
+                            schemaname: row.try_get("schemaname")?,
+                            relname: row.try_get("relname")?,
+                            seq_scan: row.try_get("seq_scan").unwrap_or(0),
+                            seq_tup_read: row.try_get("seq_tup_read").unwrap_or(0),
+                            idx_scan: row.try_get("idx_scan").unwrap_or(0),
+                            idx_tup_fetch: row.try_get("idx_tup_fetch").unwrap_or(0),
+                            n_tup_ins: row.try_get("n_tup_ins").unwrap_or(0),
+                            n_tup_upd: row.try_get("n_tup_upd").unwrap_or(0),
+                            n_tup_del: row.try_get("n_tup_del").unwrap_or(0),
+                            n_tup_hot_upd: row.try_get("n_tup_hot_upd").unwrap_or(0),
+                            n_live_tup: row.try_get("n_live_tup").unwrap_or(0),
+                            n_dead_tup: row.try_get("n_dead_tup").unwrap_or(0),
+                            n_mod_since_analyze: row.try_get("n_mod_since_analyze").unwrap_or(0),
+                            last_vacuum_epoch: row.try_get("last_vacuum_epoch").unwrap_or(0),
+                            last_autovacuum_epoch: row
+                                .try_get("last_autovacuum_epoch")
+                                .unwrap_or(0),
+                            last_analyze_epoch: row.try_get("last_analyze_epoch").unwrap_or(0),
+                            last_autoanalyze_epoch: row
+                                .try_get("last_autoanalyze_epoch")
+                                .unwrap_or(0),
+                            vacuum_count: row.try_get("vacuum_count").unwrap_or(0),
+                            autovacuum_count: row.try_get("autovacuum_count").unwrap_or(0),
+                            analyze_count: row.try_get("analyze_count").unwrap_or(0),
+                            autoanalyze_count: row.try_get("autoanalyze_count").unwrap_or(0),
+                            index_size_bytes: row.try_get("index_size_bytes").unwrap_or(0),
+                            table_size_bytes: row.try_get("table_size_bytes").unwrap_or(0),
+                            last_autovacuum_seconds_ago: row
+                                .try_get("last_autovacuum_seconds_ago")
+                                .ok(),
+                            last_autoanalyze_seconds_ago: row
+                                .try_get("last_autoanalyze_seconds_ago")
+                                .ok(),
+                            never_autovacuumed: row.try_get("never_autovacuumed").unwrap_or(0),
+                            never_autoanalyzed: row.try_get("never_autoanalyzed").unwrap_or(0),
+                            autovacuum_threshold_ratio: row
+                                .try_get("autovacuum_threshold_ratio")
+                                .unwrap_or(0.0),
+                            autoanalyze_threshold_ratio: row
+                                .try_get("autoanalyze_threshold_ratio")
+                                .unwrap_or(0.0),
+                            heap_blks_read: row.try_get("heap_blks_read").unwrap_or(0),
+                            heap_blks_hit: row.try_get("heap_blks_hit").unwrap_or(0),
+                            idx_blks_read: row.try_get("idx_blks_read").unwrap_or(0),
+                            idx_blks_hit: row.try_get("idx_blks_hit").unwrap_or(0),
+                            toast_blks_read: row.try_get("toast_blks_read").unwrap_or(0),
+                            toast_blks_hit: row.try_get("toast_blks_hit").unwrap_or(0),
+                            tidx_blks_read: row.try_get("tidx_blks_read").unwrap_or(0),
+                            tidx_blks_hit: row.try_get("tidx_blks_hit").unwrap_or(0),
+                        });
+                    }
+
+                    Ok::<Vec<UserTableSample>, anyhow::Error>(samples)
                 });
             }
 
             let mut all_samples = Vec::new();
             let mut failures = Vec::new();
             let mut failed_db_count = 0;
-            while !tasks.is_empty() {
-                match tokio::time::timeout(TASK_JOIN_WAIT_TIMEOUT, tasks.join_next()).await {
-                    Ok(Some(Ok(Ok(samples)))) => {
+            while let Some(joined) = tasks.join_next().await {
+                match joined {
+                    Ok(Ok(samples)) => {
                         all_samples.extend(samples);
                     }
-                    Ok(Some(Ok(Err(e)))) => {
+                    Ok(Err(e)) => {
                         error!(error=?e, "stat_user_tables: task returned error");
                         failures.push(e.to_string());
                         failed_db_count += 1;
                     }
-                    Ok(Some(Err(e))) => {
+                    Err(e) => {
                         error!(error=?e, "stat_user_tables: task join error");
                         failures.push(e.to_string());
                         failed_db_count += 1;
-                    }
-                    Ok(None) => {
-                        break;
-                    }
-                    Err(_) => {
-                        let pending_tasks = tasks.len();
-                        tasks.abort_all();
-                        failures.push(format!(
-                            "timed out waiting for {pending_tasks} database collection task(s) after {TASK_JOIN_WAIT_TIMEOUT:?}"
-                        ));
-                        failed_db_count += pending_tasks;
-                        break;
                     }
                 }
             }
