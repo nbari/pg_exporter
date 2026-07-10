@@ -10,6 +10,7 @@ repository = "https://github.com/nbari/pg_exporter"
 keywords = ["postgresql", "prometheus", "metrics", "exporter", "observability"]
 categories = ["command-line-utilities", "network-programming", "database"]
 license = "BSD-3-Clause"
+exclude = ["bench-artifacts/"]
 
 [lints.rust]
 warnings = "deny"

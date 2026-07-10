@@ -40,6 +40,14 @@ For rootless Podman with `testcontainers`, export:
 export DOCKER_HOST="unix:///run/user/$UID/podman/podman.sock"
 ```
 
+Testcontainers-based tests (e.g. `tests/connection_budget.rs`) prefer spinning up
+their own disposable PostgreSQL container. When no container runtime socket is
+available (for example inside the compose devcontainer, which has no podman/docker
+but already runs a local `postgres` sidecar), they fall back to the server from
+`PG_EXPORTER_DSN` and clean up every object they create (role, databases, grants).
+With neither a runtime nor `PG_EXPORTER_DSN`, they skip — unless `CI=true` or
+`PG_EXPORTER_REQUIRE_TESTCONTAINERS=1`, which makes a missing runtime a failure.
+
 ### CI Testing
 
 The CI pipeline automatically:

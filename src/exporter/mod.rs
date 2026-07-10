@@ -1,6 +1,7 @@
 use crate::{
     cli::telemetry::shutdown_tracer,
     collectors::{
+        SHARED_POOL_MAX_CONNECTIONS,
         config::CollectorConfig,
         registry::CollectorRegistry,
         util::{
@@ -90,7 +91,7 @@ fn connect_pool(dsn: &SecretString) -> Result<sqlx::PgPool> {
 
     let pool = PgPoolOptions::new()
         .min_connections(0)
-        .max_connections(3)
+        .max_connections(SHARED_POOL_MAX_CONNECTIONS)
         .acquire_timeout(get_connect_timeout())
         .max_lifetime(Duration::from_mins(2))
         .test_before_acquire(false)

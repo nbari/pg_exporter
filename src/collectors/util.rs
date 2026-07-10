@@ -387,7 +387,7 @@ pub fn is_pg_version_at_least(min_version: i32) -> bool {
 }
 
 /// Set the max per-database collection concurrency. Call this once at startup from
-/// CLI/env. Values are clamped to at least 1 (a zero limit would deadlock collectors).
+/// CLI/env. Values are clamped to the supported range as a final defensive boundary.
 pub fn set_max_db_concurrency(value: usize) {
     let _ = MAX_DB_CONCURRENCY.set(sanitized_concurrency(value));
 }
@@ -417,12 +417,19 @@ pub fn set_scrape_timeouts(
     ));
 }
 
-/// Clamp a requested concurrency to a usable value: never zero (a zero-permit semaphore
-/// would deadlock every multi-database collector).
+/// Clamp a requested concurrency to the supported range. A zero-permit semaphore would
+/// deadlock every multi-database collector, while an arbitrarily large value could exhaust
+/// `PostgreSQL` connections if a non-CLI caller bypassed startup validation.
 #[inline]
 #[must_use]
 const fn sanitized_concurrency(value: usize) -> usize {
-    if value == 0 { 1 } else { value }
+    if value == 0 {
+        1
+    } else if value > super::MAX_DB_QUERY_CONCURRENCY_LIMIT {
+        super::MAX_DB_QUERY_CONCURRENCY_LIMIT
+    } else {
+        value
+    }
 }
 
 #[inline]
@@ -615,12 +622,13 @@ mod tests {
 
     #[test]
     fn test_sanitized_concurrency_never_zero() {
-        // Zero would create a zero-permit semaphore and deadlock the collectors.
+        // Zero would deadlock collectors, and huge values would defeat the safety budget.
         assert_eq!(sanitized_concurrency(0), 1);
         assert_eq!(sanitized_concurrency(1), 1);
         assert_eq!(sanitized_concurrency(5), 5);
-        assert_eq!(sanitized_concurrency(4096), 4096);
-        assert_eq!(sanitized_concurrency(usize::MAX), usize::MAX);
+        assert_eq!(sanitized_concurrency(16), 16);
+        assert_eq!(sanitized_concurrency(17), 16);
+        assert_eq!(sanitized_concurrency(usize::MAX), 16);
     }
 
     #[test]

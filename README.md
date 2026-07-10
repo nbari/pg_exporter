@@ -74,7 +74,74 @@ Run the exporter and use the socket directory:
 
 ### Security Best Practices
 
-Instead of using `trust` authentication (which allows connection without password), it is recommended to use `peer` authentication for local connections. This requires creating a system user named `postgres_exporter`.
+Run the exporter with a dedicated non-superuser PostgreSQL role. PostgreSQL does not enforce
+`CONNECTION LIMIT` for superusers, so `NOSUPERUSER` is required for the five-connection
+safeguard to work. The predefined `pg_monitor` role supplies the settings, statistics,
+locks, replication, SSL, and monitoring-function access used by the collectors without
+granting access to application table data.
+
+Create the database role:
+
+```sql
+CREATE ROLE postgres_exporter
+    LOGIN
+    INHERIT
+    NOSUPERUSER
+    NOCREATEDB
+    NOCREATEROLE
+    NOREPLICATION
+    NOBYPASSRLS
+    CONNECTION LIMIT 5;
+
+GRANT pg_monitor TO postgres_exporter;
+GRANT CONNECT ON DATABASE postgres TO postgres_exporter;
+```
+
+Grant `CONNECT` on every additional database queried by the multi-database `stat` and
+`index` collectors. Repeat this for databases created later, especially on clusters where
+`CONNECT` has been revoked from `PUBLIC`:
+
+```sql
+GRANT CONNECT ON DATABASE application_db TO postgres_exporter;
+```
+
+The exporter does not need `SUPERUSER`, `REPLICATION`, `BYPASSRLS`, `pg_read_all_data`,
+`pg_signal_backend`, server-file roles, or `SELECT` on application tables. `pg_monitor`
+includes `pg_read_all_settings`, `pg_read_all_stats`, and `pg_stat_scan_tables`; it can expose
+sensitive operational information such as other users' query text, so reserve the login for
+the exporter.
+
+On PostgreSQL versions that provide `pg_use_reserved_connections`, do not grant it to the
+exporter (and revoke it if necessary). A `NOSUPERUSER` role without that membership cannot
+consume `superuser_reserved_connections`:
+
+```sql
+REVOKE pg_use_reserved_connections FROM postgres_exporter;
+```
+
+Verify the effective role configuration:
+
+```sql
+SELECT
+    rolname,
+    rolsuper,
+    rolinherit,
+    rolcreatedb,
+    rolcreaterole,
+    rolreplication,
+    rolbypassrls,
+    rolconnlimit
+FROM pg_roles
+WHERE rolname = 'postgres_exporter';
+
+SELECT pg_has_role('postgres_exporter', 'pg_monitor', 'USAGE') AS has_pg_monitor;
+```
+
+Expected results include `rolsuper = false`, `rolinherit = true`, `rolconnlimit = 5`, and
+`has_pg_monitor = true`.
+
+For local socket authentication, prefer `peer` over `trust`. This requires a matching system
+user named `postgres_exporter`.
 
 1. Create the system user:
    ```bash
@@ -91,7 +158,9 @@ Instead of using `trust` authentication (which allows connection without passwor
    sudo -u postgres_exporter pg_exporter --dsn postgresql:///postgres?host=/var/run/postgresql&user=postgres_exporter
    ```
 
-This ensures that only the system user `postgres_exporter` can connect to the database as the `postgres_exporter` role, significantly improving security.
+This ensures that only the system user `postgres_exporter` can connect locally as the
+`postgres_exporter` database role. For TCP authentication, set a SCRAM password with
+`\password postgres_exporter` and require an appropriate password method in `pg_hba.conf`.
 
 
 You can also specify a custom port, for example `9187`:
@@ -226,12 +295,26 @@ On clusters with many databases, the multi-database collectors (`stat`, `index`)
 global non-default-database concurrency limit. Each database needs its own ephemeral
 connection, so this keeps peak exporter connections independent of the number of databases
 (important on connection-limited instances such as AWS RDS). The shared pool uses at most
-`3` connections and `--collectors.max-db-concurrency` defaults to `5`, so the default maximum
-active database connections used by one exporter process is `3 + 5 = 8`. If you set
-`--collectors.max-db-concurrency N`, the maximum is `3 + N` per exporter process. Multiple
-exporter replicas multiply that budget. You can also use `PG_EXPORTER_MAX_DB_CONCURRENCY`.
+`3` connections and `--collectors.max-db-concurrency` defaults to `2`, so the default maximum
+active database connections used by one exporter process is `3 + 2 = 5`. Before its first
+scrape the lazy shared pool uses zero connections. A single-database scrape uses up to three;
+a multi-database scrape uses up to five. Ephemeral non-default-database connections close
+after their query, while shared-pool connections can remain idle for up to their two-minute
+maximum lifetime.
 
-    pg_exporter --collector.stat --collectors.max-db-concurrency 10
+The concurrency option accepts values from `1` through `16`. Additional database tasks wait
+inside the exporter until one of the two default permits is released; the exporter does not
+open a third ephemeral connection. This differs from PostgreSQL's `CONNECTION LIMIT`: once a
+role is at its limit, PostgreSQL rejects another login immediately with SQLSTATE `53300`
+rather than waiting. PostgreSQL documents this role limit as approximate because concurrent
+login attempts can race, so retain sufficient `max_connections` headroom and do not treat it
+as a replacement for the exporter's own concurrency bound. Configure the role limit to at
+least `3 + N` when setting `--collectors.max-db-concurrency N`. Multiple exporter processes
+sharing one role also share its role limit and can reject each other's login attempts even
+though each process remains within its own budget. You can also use
+`PG_EXPORTER_MAX_DB_CONCURRENCY`.
+
+    pg_exporter --collector.stat --collectors.max-db-concurrency 4
 
 For local observability testing with Prometheus and Grafana, a practical flow is:
 

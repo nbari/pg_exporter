@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.15.1] - 2026-07-10
+
+### Changed
+- **Safer Default Connection Budget**: Reduced `--collectors.max-db-concurrency` / `PG_EXPORTER_MAX_DB_CONCURRENCY` from `5` to `2`, making the default per-process maximum the shared pool (`3`) plus two ephemeral per-database connections (`5` total). Configured concurrency is now restricted to `1..=16` to reject accidental connection waves at startup.
+- **Dedicated Role Guidance**: Documented a `NOSUPERUSER CONNECTION LIMIT 5` exporter role with `pg_monitor` and per-database `CONNECT` as the database-side backstop for the application connection budget, including reserved-superuser-slot, approximate role-limit enforcement, and multi-replica behavior.
+
+### Added
+- **Five-Connection Regression Coverage**: Added a real limited-role test that runs every collector with `pg_monitor` but no application-table access, plus role-limit, locked-table, concurrent-scrape, abandoned-client, and soak assertions to prevent the issue #23 connection-exhaustion path from returning.
+
+### Fixed
+- **Package Hygiene**: Excluded generated benchmark artifacts from the published crate.
+
 ## [0.15.0] - 2026-07-09
 
 ### Added

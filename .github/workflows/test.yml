@@ -222,4 +222,7 @@ jobs:
         env:
           PG_EXPORTER_DSN: postgresql://postgres:postgres@localhost:5432/postgres
           PG_EXPORTER_REQUIRE_TESTCONTAINERS: '1'
+          # Testcontainers-based tests (connection_budget) spin up their own
+          # PostgreSQL; pin it to the matrix version so they cover every major.
+          PG_EXPORTER_TEST_POSTGRES_TAG: ${{ matrix.postgres }}
         run: cargo test

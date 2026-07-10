@@ -498,6 +498,12 @@ fn find_container_runtime() -> Option<String> {
         .or_else(detect_podman_socket)
 }
 
+/// Whether a container runtime socket is available for testcontainers-based tests.
+#[must_use]
+pub fn container_runtime_available() -> bool {
+    find_container_runtime().is_some()
+}
+
 /// Whether a container runtime is required (CI or explicit opt-in) rather than optional.
 #[must_use]
 pub fn should_require_container_runtime() -> bool {

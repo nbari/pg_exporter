@@ -1,6 +1,8 @@
 use clap::{Arg, Command, value_parser};
 use std::num::{NonZeroU64, NonZeroUsize};
 
+use crate::collectors::MAX_DB_QUERY_CONCURRENCY_LIMIT;
+
 pub fn add_collector_option_args(cmd: Command) -> Command {
     cmd.arg(
         Arg::new("statements.top-n")
@@ -20,30 +22,7 @@ pub fn add_collector_option_args(cmd: Command) -> Command {
             .value_name("N")
             .value_parser(value_parser!(NonZeroUsize)),
     )
-    .arg(
-        Arg::new("collectors.max-db-concurrency")
-            .long("collectors.max-db-concurrency")
-            .help("Max non-default databases queried concurrently across all collectors")
-            .long_help(
-                "Maximum number of non-default databases queried concurrently across all \
-                 multi-database collectors (stat, index, vacuum name resolution).\n\n\
-                 A PostgreSQL connection is bound to one database, so these collectors open one \
-                 ephemeral connection per non-default database query. This caps how many run at \
-                 once globally, keeping peak exporter connections bounded to the shared pool (3) \
-                 plus this value, independent of the number of databases in the cluster (important \
-                 on instances with a low, shared max_connections such as AWS RDS).\n\n\
-                 Lower values are gentler on connection limits; higher values make scrapes faster on \
-                 clusters with many databases (at the cost of more concurrent connections).\n\n\
-                 Examples:\n\
-                   --collectors.max-db-concurrency 5\n\
-                   --collectors.max-db-concurrency 20\n\
-                   PG_EXPORTER_MAX_DB_CONCURRENCY=3",
-            )
-            .env("PG_EXPORTER_MAX_DB_CONCURRENCY")
-            .default_value(MAX_DB_CONCURRENCY_DEFAULT)
-            .value_name("N")
-            .value_parser(value_parser!(NonZeroUsize)),
-    )
+    .arg(max_db_concurrency_arg())
     .arg(connect_timeout_arg())
     .arg(
         Arg::new("scrape.lock-timeout-ms")
@@ -104,6 +83,32 @@ pub fn add_collector_option_args(cmd: Command) -> Command {
     )
 }
 
+fn max_db_concurrency_arg() -> Arg {
+    Arg::new("collectors.max-db-concurrency")
+        .long("collectors.max-db-concurrency")
+        .help("Max non-default databases queried concurrently across all collectors")
+        .long_help(
+            "Maximum number of non-default databases queried concurrently across all \
+             multi-database collectors (stat, index, vacuum name resolution).\n\n\
+             A PostgreSQL connection is bound to one database, so these collectors open one \
+             ephemeral connection per non-default database query. This caps how many run at \
+             once globally, keeping peak exporter connections bounded to the shared pool (3) \
+             plus this value, independent of the number of databases in the cluster (important \
+             on instances with a low, shared max_connections such as AWS RDS).\n\n\
+             Valid values are 1 through 16. Lower values are gentler on connection limits; \
+             higher values make scrapes faster on clusters with many databases at the cost of \
+             more concurrent connections.\n\n\
+             Examples:\n\
+               --collectors.max-db-concurrency 2\n\
+               --collectors.max-db-concurrency 8\n\
+               PG_EXPORTER_MAX_DB_CONCURRENCY=1",
+        )
+        .env("PG_EXPORTER_MAX_DB_CONCURRENCY")
+        .default_value(MAX_DB_CONCURRENCY_DEFAULT)
+        .value_name("N")
+        .value_parser(parse_max_db_concurrency)
+}
+
 fn connect_timeout_arg() -> Arg {
     Arg::new("scrape.connect-timeout-ms")
         .long("scrape.connect-timeout-ms")
@@ -126,11 +131,27 @@ fn connect_timeout_arg() -> Arg {
 
 /// String form of the default max per-database concurrency, kept in sync with
 /// [`crate::collectors::MAX_DB_QUERY_CONCURRENCY`] by `max_db_concurrency_default_matches_const`.
-const MAX_DB_CONCURRENCY_DEFAULT: &str = "5";
+const MAX_DB_CONCURRENCY_DEFAULT: &str = "2";
 const CONNECT_TIMEOUT_MS_DEFAULT: &str = "5000";
 const LOCK_TIMEOUT_MS_DEFAULT: &str = "2000";
 const STATEMENT_TIMEOUT_MS_DEFAULT: &str = "10000";
 const SCRAPE_TIMEOUT_MS_DEFAULT: &str = "15000";
+
+fn parse_max_db_concurrency(value: &str) -> Result<NonZeroUsize, String> {
+    let parsed = value.parse::<NonZeroUsize>().map_err(|_| {
+        format!(
+            "database concurrency must be an integer between 1 and {MAX_DB_QUERY_CONCURRENCY_LIMIT}"
+        )
+    })?;
+
+    if parsed.get() > MAX_DB_QUERY_CONCURRENCY_LIMIT {
+        return Err(format!(
+            "database concurrency must be between 1 and {MAX_DB_QUERY_CONCURRENCY_LIMIT}"
+        ));
+    }
+
+    Ok(parsed)
+}
 
 #[cfg(test)]
 mod tests {
@@ -206,7 +227,7 @@ mod tests {
                 matches
                     .get_one::<NonZeroUsize>("collectors.max-db-concurrency")
                     .map(|value| value.get()),
-                Some(5)
+                Some(2)
             );
         });
     }
@@ -435,7 +456,7 @@ mod tests {
         // must all be rejected at parse time so an invalid limit can never reach a collector.
         //
         // This also covers the env path: the CLI flag and `PG_EXPORTER_MAX_DB_CONCURRENCY`
-        // share the exact same `value_parser!(NonZeroUsize)`, so a value rejected here is
+        // share the exact same parser, so a value rejected here is
         // rejected identically when supplied via the environment. (We validate invalid values
         // through the CLI rather than the environment because this is a shared-process test
         // binary: many other tests call clap's `get_matches_from`, which exits the process on a
@@ -452,6 +473,8 @@ mod tests {
             "5x",
             "0x10",
             "1e3",
+            "17",
+            "50",
             "+",
             "  ",
             "99999999999999999999999999999999999999",
@@ -465,7 +488,7 @@ mod tests {
 
     #[test]
     fn max_db_concurrency_accepts_valid_boundaries() {
-        for (value, expected) in [("1", 1usize), ("5", 5), ("50", 50), ("4096", 4096)] {
+        for (value, expected) in [("1", 1usize), ("2", 2), ("8", 8), ("16", 16)] {
             let matches = commands::new().get_matches_from(vec![
                 "pg_exporter".to_string(),
                 format!("--collectors.max-db-concurrency={value}"),
@@ -482,7 +505,7 @@ mod tests {
 
     #[test]
     fn max_db_concurrency_accepts_valid_env_values() {
-        for (value, expected) in [("1", 1usize), ("7", 7), ("64", 64)] {
+        for (value, expected) in [("1", 1usize), ("2", 2), ("7", 7), ("16", 16)] {
             temp_env::with_var("PG_EXPORTER_MAX_DB_CONCURRENCY", Some(value), || {
                 let matches = commands::new().get_matches_from(vec!["pg_exporter"]);
                 assert_eq!(

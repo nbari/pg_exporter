@@ -17,11 +17,16 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::Duration;
+use tokio::sync::{Barrier, Mutex};
 use tokio::task::JoinSet;
+
+static CONNECTION_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
 /// Each call must return a **fresh** backend (no cache/reuse), and dropping it must close it.
 #[tokio::test]
 async fn open_db_connection_is_fresh_and_ephemeral() -> Result<()> {
+    let _serial_guard = CONNECTION_TEST_LOCK.lock().await;
+
     // Initialises the global base connect options used by `open_db_connection`.
     let admin = common::create_test_pool().await?;
     let test_db = common::IsolatedTestDatabase::new("ephemeral_conn").await?;
@@ -85,12 +90,14 @@ async fn open_db_connection_is_fresh_and_ephemeral() -> Result<()> {
 /// the observed peak jumps to the task count and this test fails.
 #[tokio::test]
 async fn per_database_connections_never_exceed_concurrency_limit() -> Result<()> {
+    let _serial_guard = CONNECTION_TEST_LOCK.lock().await;
+
     let admin = common::create_test_pool().await?;
     let test_db = common::IsolatedTestDatabase::new("conn_concurrency").await?;
     let dbname = test_db.database_name().to_string();
 
     let limit = get_max_db_concurrency();
-    assert!(limit >= 1, "concurrency limit must be at least 1");
+    assert_eq!(limit, 2, "regression test must exercise the safe default");
 
     // More tasks than permits so the semaphore — not the task count — is the binding
     // constraint. A removed semaphore would let all `task_count` connections open at once.
@@ -98,11 +105,13 @@ async fn per_database_connections_never_exceed_concurrency_limit() -> Result<()>
 
     let in_flight = Arc::new(AtomicUsize::new(0));
     let observed_peak = Arc::new(AtomicUsize::new(0));
+    let first_wave_barrier = Arc::new(Barrier::new(limit));
 
     let mut tasks = JoinSet::new();
     for _ in 0..task_count {
         let in_flight = Arc::clone(&in_flight);
         let observed_peak = Arc::clone(&observed_peak);
+        let first_wave_barrier = Arc::clone(&first_wave_barrier);
         let dbname = dbname.clone();
 
         tasks.spawn(async move {
@@ -117,8 +126,10 @@ async fn per_database_connections_never_exceed_concurrency_limit() -> Result<()>
             let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
             observed_peak.fetch_max(now, Ordering::SeqCst);
 
-            // Hold the connection open long enough that peers running concurrently overlap.
-            sqlx::query("SELECT pg_sleep(0.15)")
+            // Make the first permitted wave overlap deterministically even when the full
+            // database test suite is running under load.
+            first_wave_barrier.wait().await;
+            sqlx::query("SELECT pg_sleep(0.05)")
                 .execute(&mut conn)
                 .await?;
 

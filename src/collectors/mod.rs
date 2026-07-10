@@ -68,14 +68,27 @@ const fn all_databases_failed(num_dbs: usize, failed_db_count: usize) -> bool {
 /// simultaneously on every scrape — linear in the database count — which can exhaust
 /// `max_connections` on small or shared instances (for example AWS RDS). This global cap
 /// is shared by every collector, so the default exporter footprint is bounded to roughly
-/// the shared pool (`3`) plus this value (`5`) instead of multiplying per collector.
-pub(crate) const MAX_DB_QUERY_CONCURRENCY: usize = 5;
+/// the shared pool (`3`) plus this value (`2`) instead of multiplying per collector.
+pub(crate) const MAX_DB_QUERY_CONCURRENCY: usize = 2;
+
+/// Largest operator-configurable non-default-database query concurrency.
+///
+/// This is intentionally conservative: an exporter should not be able to create an
+/// arbitrarily large connection wave because of a mistyped CLI or environment value.
+pub(crate) const MAX_DB_QUERY_CONCURRENCY_LIMIT: usize = 16;
+
+/// Maximum number of connections retained by the shared default-database pool.
+pub(crate) const SHARED_POOL_MAX_CONNECTIONS: u32 = 3;
 
 // A zero-permit semaphore would deadlock every multi-database collector, so enforce a
 // non-zero limit at compile time.
 const _: () = assert!(
     MAX_DB_QUERY_CONCURRENCY > 0,
     "MAX_DB_QUERY_CONCURRENCY must be non-zero"
+);
+const _: () = assert!(
+    MAX_DB_QUERY_CONCURRENCY <= MAX_DB_QUERY_CONCURRENCY_LIMIT,
+    "default database concurrency must not exceed its configurable limit"
 );
 
 /// Default client-side timeout (milliseconds) for establishing a new `PostgreSQL` connection.
@@ -121,7 +134,21 @@ pub(crate) const DEFAULT_SCRAPE_TIMEOUT_MS: u64 = 15_000;
 
 #[cfg(test)]
 mod tests {
-    use super::all_databases_failed;
+    use super::{
+        MAX_DB_QUERY_CONCURRENCY, MAX_DB_QUERY_CONCURRENCY_LIMIT, SHARED_POOL_MAX_CONNECTIONS,
+        all_databases_failed,
+    };
+
+    #[test]
+    fn default_connection_budget_is_five() {
+        let shared_connections = usize::try_from(SHARED_POOL_MAX_CONNECTIONS).ok();
+        assert_eq!(
+            shared_connections.map(|shared| shared + MAX_DB_QUERY_CONCURRENCY),
+            Some(5)
+        );
+        assert_eq!(MAX_DB_QUERY_CONCURRENCY, 2);
+        assert_eq!(MAX_DB_QUERY_CONCURRENCY_LIMIT, 16);
+    }
 
     #[test]
     fn no_databases_never_fails() {

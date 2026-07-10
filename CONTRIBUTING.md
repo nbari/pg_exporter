@@ -113,7 +113,7 @@ connection-constrained clusters (e.g. AWS RDS), that fan-out follows a strict mo
   `pg_stat_replication`, `pg_stat_database`, `pg_stat_progress_*`). Those never need fan-out.
 - **Ephemeral per-database connections** (`util::open_db_connection`): opened per scrape query
   and **closed on drop** — never cached. Combined with the `--collectors.max-db-concurrency`
-  semaphore (default 5), the peak per-database connection count is bounded by *concurrency*,
+  semaphore (default 2), the peak per-database connection count is bounded by *concurrency*,
   not by the *number of databases* (so 100 or 10,000 databases both peak at ~concurrency).
 
 **Do not reintroduce a per-database pool cache.** Caching pins ~one persistent connection per

@@ -168,6 +168,7 @@ ExecStart=/usr/local/bin/pg_exporter \
     --collector.index \
     --collector.statements \
     --collector.exporter \
+    --collectors.max-db-concurrency 2 \
     --statements.top-n 25
 CFG
 
@@ -197,11 +198,13 @@ prepare_db() {
              if ! sudo -u postgres psql -d \"\${target_db}\" -Atqc \"SELECT 1 FROM pg_class WHERE relname = 'pgbench_accounts'\" | grep -q 1; then \
                  sudo -u postgres pgbench -i -s '${DB_SCALE}' \"\${target_db}\"; \
              fi; \
+             sudo -u postgres psql -v ON_ERROR_STOP=1 -d \"\${target_db}\" -c \
+                 \"CREATE TABLE IF NOT EXISTS pg_exporter_soak_lock_target (id bigint PRIMARY KEY);\" >/dev/null; \
          done"
 }
 
 write_remote_workload_script() {
-    local total_seconds baseline statements locks debt recovery mixed
+    local total_seconds baseline statements locks debt recovery mixed lock_hold
     total_seconds=$((HOURS * 3600))
     baseline=$((total_seconds * 2 / 24))
     statements=$((total_seconds * 4 / 24))
@@ -209,6 +212,7 @@ write_remote_workload_script() {
     debt=$((total_seconds * 6 / 24))
     recovery=$((total_seconds * 4 / 24))
     mixed=$((total_seconds * 4 / 24))
+    lock_hold=$((total_seconds + 900))
 
     log "Writing phased workload script on ${BENCH_DB_SSH}"
 
@@ -226,6 +230,13 @@ DUR_LOCKS=${locks}
 DUR_DEBT=${debt}
 DUR_RECOVERY=${recovery}
 DUR_MIXED=${mixed}
+LOCK_HOLD_SECONDS=${lock_hold}
+ACCESS_EXCLUSIVE_PID=""
+ACCESS_EXCLUSIVE_DB=""
+ACCESS_EXCLUSIVE_APP="pg_exporter_soak_table_lock_\${RUN_ID}"
+CONNECTION_MONITOR_PID=""
+CONNECTION_OUT="/tmp/pg_exporter_rust_soak_\${RUN_ID}_connections.csv"
+CONNECTION_BUDGET=5
 
 log() {
     printf '[%s] [soak:%s] %s\\n' "\$(date -u +%FT%TZ)" "\${RUN_ID}" "\$*"
@@ -322,6 +333,98 @@ run_lock_storm() {
     done
 }
 
+start_access_exclusive_lock() {
+    local duration="\$1"
+    local target_db
+    target_db="\${DB_NAME}"
+    if (( DB_COUNT > 1 )); then
+        target_db="\${DB_NAME}_1"
+    fi
+    ACCESS_EXCLUSIVE_DB="\${target_db}"
+
+    log "Opening session A on database=\${target_db}: BEGIN; LOCK TABLE pg_exporter_soak_lock_target IN ACCESS EXCLUSIVE MODE"
+    sudo -u postgres env PGAPPNAME="\${ACCESS_EXCLUSIVE_APP}" \
+        psql -v ON_ERROR_STOP=1 -d "\${target_db}" -c \
+        "BEGIN; LOCK TABLE pg_exporter_soak_lock_target IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(\${duration}); ROLLBACK;" \
+        >/dev/null &
+    ACCESS_EXCLUSIVE_PID=\$!
+
+    local acquired=false
+    for _ in \$(seq 1 100); do
+        if sudo -u postgres psql -d "\${target_db}" -Atqc \
+            "SELECT 1
+             FROM pg_locks l
+             JOIN pg_class c ON c.oid = l.relation
+             JOIN pg_stat_activity a ON a.pid = l.pid
+             WHERE c.relname = 'pg_exporter_soak_lock_target'
+               AND l.mode = 'AccessExclusiveLock'
+               AND l.granted
+               AND a.application_name = '\${ACCESS_EXCLUSIVE_APP}'
+             LIMIT 1" | grep -q 1; then
+            acquired=true
+            break
+        fi
+        if ! kill -0 "\${ACCESS_EXCLUSIVE_PID}" 2>/dev/null; then
+            wait "\${ACCESS_EXCLUSIVE_PID}"
+            return 1
+        fi
+        sleep 0.1
+    done
+
+    if [[ "\${acquired}" != true ]]; then
+        log "ERROR session A did not acquire ACCESS EXCLUSIVE within 10 seconds"
+        kill "\${ACCESS_EXCLUSIVE_PID}" 2>/dev/null || true
+        wait "\${ACCESS_EXCLUSIVE_PID}" || true
+        return 1
+    fi
+
+    log "Session A holds ACCESS EXCLUSIVE throughout the soak; exporter scrapes must remain bounded"
+}
+
+cleanup_access_exclusive_lock() {
+    if [[ -n "\${ACCESS_EXCLUSIVE_DB}" ]]; then
+        sudo -u postgres psql -d "\${ACCESS_EXCLUSIVE_DB}" -Atqc \
+            "SELECT pg_terminate_backend(pid)
+             FROM pg_stat_activity
+             WHERE application_name = '\${ACCESS_EXCLUSIVE_APP}'
+               AND pid <> pg_backend_pid()" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "\${ACCESS_EXCLUSIVE_PID}" ]]; then
+        kill "\${ACCESS_EXCLUSIVE_PID}" 2>/dev/null || true
+        wait "\${ACCESS_EXCLUSIVE_PID}" 2>/dev/null || true
+    fi
+}
+
+monitor_exporter_connections() {
+    echo "ts,exporter_connections,exporter_lock_waiters,query_error" > "\${CONNECTION_OUT}"
+    while true; do
+        local ts sample
+        ts="\$(date -u +%FT%TZ)"
+        if sample="\$(sudo -u postgres psql -d postgres -AtF, -v ON_ERROR_STOP=1 -c \
+            "SELECT count(*)::bigint,
+                    count(*) FILTER (WHERE wait_event_type = 'Lock')::bigint
+             FROM pg_stat_activity
+             WHERE application_name = 'pg_exporter'")"; then
+            echo "\${ts},\${sample},0" >> "\${CONNECTION_OUT}"
+        else
+            echo "\${ts},,,1" >> "\${CONNECTION_OUT}"
+        fi
+        sleep 30
+    done
+}
+
+stop_connection_monitor() {
+    if [[ -n "\${CONNECTION_MONITOR_PID}" ]]; then
+        kill "\${CONNECTION_MONITOR_PID}" 2>/dev/null || true
+        wait "\${CONNECTION_MONITOR_PID}" 2>/dev/null || true
+    fi
+}
+
+cleanup() {
+    stop_connection_monitor
+    cleanup_access_exclusive_lock
+}
+
 phase() {
     local name="\$1"
     local duration="\$2"
@@ -383,6 +486,11 @@ summary() {
 }
 
 main() {
+    trap cleanup EXIT
+    monitor_exporter_connections &
+    CONNECTION_MONITOR_PID=\$!
+    start_access_exclusive_lock "\${LOCK_HOLD_SECONDS}"
+
     log "Soak start db=\${DB_NAME} baseline=\${DUR_BASELINE}s statements=\${DUR_STATEMENTS}s locks=\${DUR_LOCKS}s debt=\${DUR_DEBT}s recovery=\${DUR_RECOVERY}s mixed=\${DUR_MIXED}s"
 
     phase baseline "\${DUR_BASELINE}" baseline_phase
@@ -393,6 +501,16 @@ main() {
     phase mixed_churn "\${DUR_MIXED}" mixed_phase
 
     summary
+    local connection_samples peak_connections monitor_errors
+    read -r connection_samples peak_connections monitor_errors < <(
+        awk -F, 'NR > 1 { samples++; if (\$4 != 0) errors++; if (\$2 + 0 > max) max=\$2 + 0 }
+                   END { print samples + 0, max + 0, errors + 0 }' "\${CONNECTION_OUT}"
+    )
+    log "SUMMARY exporter connection samples=\${connection_samples} peak=\${peak_connections} budget=\${CONNECTION_BUDGET} monitor_errors=\${monitor_errors}"
+    if (( connection_samples == 0 || peak_connections > CONNECTION_BUDGET || monitor_errors > 0 )); then
+        log "ERROR exporter connection-budget validation failed"
+        return 1
+    fi
     log "Soak finished"
 }
 
@@ -415,6 +533,7 @@ set -euo pipefail
 RUN_ID="${RUN_ID}"
 INSTANCE="10.246.1.90:9432"
 PROM="http://127.0.0.1:9090/api/v1/query"
+METRICS_URL="http://\${INSTANCE}/metrics"
 OUT="/tmp/pg_exporter_rust_soak_${RUN_ID}_prom.csv"
 STOP_AT=\$((\$(date +%s) + ${total_seconds}))
 
@@ -423,7 +542,7 @@ query_one() {
     curl -fsS "\${PROM}" --get --data-urlencode "query=\${expr}" | jq -r '.data.result[0].value[1] // ""'
 }
 
-echo "ts,exporter_up,pg_up,rss_bytes,cpu_percent,open_fds,scrape_duration_s,scrape_samples,dead_tup_max,locks_sum,long_query_age_s,autovacuum_ratio_max" > "\${OUT}"
+echo "ts,exporter_up,pg_up,rss_bytes,cpu_percent,open_fds,scrape_duration_s,scrape_samples,dead_tup_max,locks_sum,long_query_age_s,autovacuum_ratio_max,direct_http_status,direct_scrape_duration_s,direct_curl_rc" > "\${OUT}"
 
 while (( \$(date +%s) < STOP_AT )); do
     ts="\$(date -u +%FT%TZ)"
@@ -439,7 +558,20 @@ while (( \$(date +%s) < STOP_AT )); do
     long_query_age="\$(query_one "max(pg_stat_activity_oldest_query_age_seconds{job=\"pg_exporter_rust\",instance=\"\${INSTANCE}\"})")"
     autovacuum_ratio_max="\$(query_one "max(pg_stat_user_tables_autovacuum_threshold_ratio{job=\"pg_exporter_rust\",instance=\"\${INSTANCE}\"})")"
 
-    echo "\${ts},\${exporter_up},\${pg_up},\${rss_bytes},\${cpu_percent},\${open_fds},\${scrape_duration},\${scrape_samples},\${dead_tup_max},\${locks_sum},\${long_query_age},\${autovacuum_ratio_max}" >> "\${OUT}"
+    # Avoid probing on the same second as Prometheus's scheduled scrape.
+    sleep 3
+    direct_curl_rc=0
+    if direct_probe="\$(curl -sS -o /dev/null --connect-timeout 5 --max-time 20 \
+        -w '%{http_code},%{time_total}' "\${METRICS_URL}")"; then
+        IFS=, read -r direct_http_status direct_scrape_duration <<<"\${direct_probe}"
+    else
+        direct_curl_rc=\$?
+        IFS=, read -r direct_http_status direct_scrape_duration <<<"\${direct_probe:-000,20}"
+        printf '[%s] direct /metrics probe failed status=%s duration=%ss curl_rc=%s\\n' \
+            "\${ts}" "\${direct_http_status}" "\${direct_scrape_duration}" "\${direct_curl_rc}" >&2
+    fi
+
+    echo "\${ts},\${exporter_up},\${pg_up},\${rss_bytes},\${cpu_percent},\${open_fds},\${scrape_duration},\${scrape_samples},\${dead_tup_max},\${locks_sum},\${long_query_age},\${autovacuum_ratio_max},\${direct_http_status},\${direct_scrape_duration},\${direct_curl_rc}" >> "\${OUT}"
     sleep 60
 done
 EOF
@@ -448,7 +580,11 @@ EOF
 }
 
 start_remote_jobs() {
-    local workload_pid sampler_pid
+    local workload_pid sampler_pid lock_database
+    lock_database="${DB_NAME}"
+    if (( DB_COUNT > 1 )); then
+        lock_database="${DB_NAME}_1"
+    fi
     local db_script="/tmp/pg_exporter_rust_soak_${RUN_ID}.sh"
     local db_log="/tmp/pg_exporter_rust_soak_${RUN_ID}.log"
     local db_pid="/tmp/pg_exporter_rust_soak_${RUN_ID}.pid"
@@ -484,6 +620,7 @@ start_remote_jobs() {
 run_id=${RUN_ID}
 hours=${HOURS}
 db_name=${DB_NAME}
+db_count=${DB_COUNT}
 db_scale=${DB_SCALE}
 bench_rust_ssh=${BENCH_RUST_SSH}
 bench_db_ssh=${BENCH_DB_SSH}
@@ -494,6 +631,10 @@ db_pid_file=${db_pid}
 sampler_script=${sampler_script}
 sampler_log=${sampler_log}
 sampler_pid_file=${sampler_pidfile}
+lock_database=${lock_database}
+lock_application_name=pg_exporter_soak_table_lock_${RUN_ID}
+connection_sampler=/tmp/pg_exporter_rust_soak_${RUN_ID}_connections.csv
+connection_budget=5
 dashboard_url=http://10.246.1.93:3000/d/pg-exp-soak-rust/pg-exporter-rust-soak-24h?orgId=1&from=now-6h&to=now&timezone=browser&refresh=30s
 started_at_utc=$(date -u +%FT%TZ)
 META

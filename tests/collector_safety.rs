@@ -84,6 +84,24 @@ fn open_db_connection_has_bounded_connect_timeout() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn shared_pool_uses_the_connection_budget_constant() -> Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let exporter_path = root.join("src").join("exporter").join("mod.rs");
+    let source = std::fs::read_to_string(&exporter_path)?;
+
+    assert!(
+        source.contains(".max_connections(SHARED_POOL_MAX_CONNECTIONS)"),
+        "the shared pool must use SHARED_POOL_MAX_CONNECTIONS so the documented budget cannot drift"
+    );
+    assert!(
+        !source.contains(".max_connections(3)"),
+        "do not duplicate the shared pool size as a literal"
+    );
+
+    Ok(())
+}
+
 fn rust_files_under(root: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     let mut pending = vec![root.to_path_buf()];

@@ -193,6 +193,22 @@ fn test_binary_invalid_port() {
     );
 }
 
+#[test]
+fn test_binary_rejects_environment_database_concurrency_above_limit() {
+    let output = Command::new(get_binary_path())
+        .env("PG_EXPORTER_MAX_DB_CONCURRENCY", "17")
+        .args(["--dsn", "not-a-valid-dsn"])
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("database concurrency must be between 1 and 16"),
+        "unexpected error: {stderr}"
+    );
+}
+
 /// Test that the binary can start and stop gracefully
 #[tokio::test]
 async fn test_binary_starts_and_stops() -> Result<()> {
