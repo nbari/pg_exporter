@@ -97,6 +97,11 @@ GRANT pg_monitor TO postgres_exporter;
 GRANT CONNECT ON DATABASE postgres TO postgres_exporter;
 ```
 
+`CONNECTION LIMIT 5` matches the exporter's default connection budget of `3 + 2 = 5`. See
+[Connection budget for multi-database collectors](#connection-budget-for-multi-database-collectors)
+for how that number is derived and when to raise it (higher `--collectors.max-db-concurrency`,
+interactive sessions on the same role, or multiple exporter processes).
+
 Grant `CONNECT` on every additional database queried by the multi-database `stat` and
 `index` collectors. Repeat this for databases created later, especially on clusters where
 `CONNECT` has been revoked from `PUBLIC`:
@@ -291,30 +296,52 @@ to reduce `pg_stat_statements` cardinality and scrape cost:
 The `statements` collector defaults to `--statements.top-n 25` if not specified. You can also use
 `PG_EXPORTER_STATEMENTS_TOP_N`.
 
-On clusters with many databases, the multi-database collectors (`stat`, `index`) share a
-global non-default-database concurrency limit. Each database needs its own ephemeral
-connection, so this keeps peak exporter connections independent of the number of databases
-(important on connection-limited instances such as AWS RDS). The shared pool uses at most
-`3` connections and `--collectors.max-db-concurrency` defaults to `2`, so the default maximum
-active database connections used by one exporter process is `3 + 2 = 5`. Before its first
-scrape the lazy shared pool uses zero connections. A single-database scrape uses up to three;
-a multi-database scrape uses up to five. Ephemeral non-default-database connections close
-after their query, while shared-pool connections can remain idle for up to their two-minute
-maximum lifetime.
+### Connection budget for multi-database collectors
 
-The concurrency option accepts values from `1` through `16`. Additional database tasks wait
-inside the exporter until one of the two default permits is released; the exporter does not
-open a third ephemeral connection. This differs from PostgreSQL's `CONNECTION LIMIT`: once a
-role is at its limit, PostgreSQL rejects another login immediately with SQLSTATE `53300`
-rather than waiting. PostgreSQL documents this role limit as approximate because concurrent
-login attempts can race, so retain sufficient `max_connections` headroom and do not treat it
-as a replacement for the exporter's own concurrency bound. Configure the role limit to at
-least `3 + N` when setting `--collectors.max-db-concurrency N`. Multiple exporter processes
-sharing one role also share its role limit and can reject each other's login attempts even
-though each process remains within its own budget. You can also use
-`PG_EXPORTER_MAX_DB_CONCURRENCY`.
+Each exporter process opens at most:
+
+    peak connections = shared pool (3) + max-db-concurrency (N)   # default: 3 + 2 = 5
+
+* **Shared pool — fixed at `3`.** Used for the default database and cluster-wide views
+  (`pg_stat_activity`, `pg_locks`, replication, `pg_stat_database`, ...). It is lazy (zero
+  connections until the first scrape), and idle connections are dropped after a two-minute
+  maximum lifetime.
+* **`--collectors.max-db-concurrency` — `N`, default `2`.** The multi-database collectors
+  (`stat`, `index`) must open one connection *per non-default database* they query, because a
+  PostgreSQL connection is tied to a single database. `N` is a global cap on how many of those
+  run at the same time across all collectors. Each such connection is **ephemeral** — closed
+  as soon as its query finishes. When more databases need scanning than there are free slots,
+  the extra ones wait for a slot instead of opening more connections.
+
+Because `N` is a hard cap, the peak does **not** grow with the number of databases — 100 or
+10,000 databases both peak at `3 + N`. This is what keeps the exporter safe on
+connection-limited instances such as AWS RDS.
+
+| `max-db-concurrency` (`N`) | peak connections (`3 + N`) | suggested role `CONNECTION LIMIT` |
+| --- | --- | --- |
+| `1` | `4` | `5` |
+| **`2` (default)** | **`5`** | **`5`** (exact cap) or `8` (with headroom) |
+| `5` | `8` | `10` |
+
+`N` accepts values from `1` through `16`. Lower values are gentler on connection limits;
+higher values make scrapes faster on clusters with many databases at the cost of more
+concurrent connections. Set it with the flag or `PG_EXPORTER_MAX_DB_CONCURRENCY`:
 
     pg_exporter --collector.stat --collectors.max-db-concurrency 4
+
+**Sizing the role `CONNECTION LIMIT`.** PostgreSQL rejects any login over a role's limit
+immediately with SQLSTATE `53300` (it does not queue and waits for nothing). Set the limit to
+**at least `3 + N`**:
+
+* Use **exactly `3 + N`** (i.e. `5` with the default) to make the role limit a hard backstop
+  that can never exceed the exporter's own budget — this is what the
+  [role example](#security-best-practices) above does.
+* Add a few spare slots (e.g. **`8`**) if the same role is also used for interactive `psql`
+  sessions, or if several exporter processes share one role. Processes sharing a role share
+  its limit and can reject each other's logins even while each stays within its own budget.
+
+Either way, keep enough cluster-wide `max_connections` headroom; the role limit is a
+backstop, not a substitute for the exporter's own concurrency bound.
 
 For local observability testing with Prometheus and Grafana, a practical flow is:
 
