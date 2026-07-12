@@ -6,10 +6,21 @@ pub struct StatementsConfig {
     pub top_n: usize,
 }
 
+/// Default minimum `pg_sequences` used-ratio required for a sequence to be exported.
+pub const DEFAULT_SEQUENCES_MIN_RATIO: f64 = 0.5;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SequencesConfig {
+    /// Only sequences whose `last_value / max_value` ratio is at least this value are
+    /// exported, keeping cardinality bounded so a healthy database exports nothing.
+    pub min_ratio: f64,
+}
+
 #[derive(Clone, Debug)]
 pub struct CollectorConfig {
     pub enabled_collectors: HashSet<String>,
     pub statements: StatementsConfig,
+    pub sequences: SequencesConfig,
 }
 
 impl CollectorConfig {
@@ -21,7 +32,17 @@ impl CollectorConfig {
             statements: StatementsConfig {
                 top_n: statements_top_n,
             },
+            sequences: SequencesConfig {
+                min_ratio: DEFAULT_SEQUENCES_MIN_RATIO,
+            },
         }
+    }
+
+    /// Set the minimum `pg_sequences` used-ratio for the sequences collector.
+    #[must_use]
+    pub fn with_sequences_min_ratio(mut self, min_ratio: f64) -> Self {
+        self.sequences.min_ratio = min_ratio;
+        self
     }
 
     /// Enable collectors by name

@@ -201,6 +201,38 @@ async fn wait_for_connection_baseline(admin: &mut PgConnection) -> Result<()> {
     bail!("exporter connections did not return to the shared-pool baseline")
 }
 
+/// Poll `/metrics` until the exporter reports `200 OK`, within a bounded window.
+///
+/// After a scrape exceeds the scrape timeout the exporter intentionally keeps the
+/// scrape-gate permit held until the detached scrape task unwinds (see
+/// `collect_all_bytes`). During that window a fresh scrape observes
+/// `ScrapeError::Busy` and returns `503`. A real Prometheus simply scrapes again on
+/// the next interval, so the recovery assertion models that instead of demanding the
+/// gate be free on the very first immediate scrape (which races the permit release
+/// and made this test flaky). A genuine regression - a gate that never releases or a
+/// collector that never recovers - still fails the test via the deadline, with the
+/// last observed status and body attached for diagnosis.
+async fn wait_for_metrics_recovery(client: &reqwest::Client, metrics_url: &str) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut last_status = None;
+    let mut last_body = String::new();
+    while Instant::now() < deadline {
+        let response = client.get(metrics_url).send().await?;
+        let status = response.status();
+        if status == reqwest::StatusCode::OK {
+            return Ok(());
+        }
+        last_status = Some(status);
+        last_body = response.text().await.unwrap_or_default();
+        sleep(Duration::from_millis(50)).await;
+    }
+    bail!(
+        "exporter never recovered to 200 OK after the lock cleared \
+         (last status: {last_status:?}, body: {})",
+        last_body.trim()
+    )
+}
+
 async fn prepare_exporter_role_and_databases(
     admin: &mut PgConnection,
     admin_options: &PgConnectOptions,
@@ -473,8 +505,7 @@ async fn run_budget_scenario(
         connection.close().await?;
     }
 
-    let recovered = client.get(&metrics_url).send().await?;
-    assert_eq!(recovered.status(), reqwest::StatusCode::OK);
+    wait_for_metrics_recovery(&client, &metrics_url).await?;
 
     stop_monitor.store(true, Ordering::SeqCst);
     monitor

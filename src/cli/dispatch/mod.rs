@@ -175,7 +175,16 @@ pub fn get_collector_config(matches: &ArgMatches) -> Result<CollectorConfig> {
         })?
         .get();
 
-    Ok(CollectorConfig::new(statements_top_n).with_enabled(&enabled))
+    let sequences_min_ratio = matches
+        .get_one::<f64>("sequences.min-ratio")
+        .copied()
+        .ok_or_else(|| {
+            anyhow!("internal CLI error: missing resolved value for --sequences.min-ratio")
+        })?;
+
+    Ok(CollectorConfig::new(statements_top_n)
+        .with_sequences_min_ratio(sequences_min_ratio)
+        .with_enabled(&enabled))
 }
 
 #[cfg(test)]

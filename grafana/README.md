@@ -69,10 +69,19 @@ Monitor pg_exporter's own health and performance:
 - Track metric cardinality (prevent Cortex/Mimir rejections)
 - Validate exporter health
 
+### 🖥️ Instance Information & Settings
+Always-visible tiles at the top of the dashboard: server version/uptime and key durability & autovacuum settings (`Fsync`, `Sync Commit`, `Shared Buffers`, `Work Mem`, checkpoint/autovacuum thresholds, ...).
+
 ### 🚨 Critical Alerts - Connection Pool & Performance
 - **Connection Pool Utilization**: Gauge showing pool saturation (0-100%). Alert when >80%
 - **Idle in Transaction**: Dangerous connections holding locks/snapshots
 - **Connection Pool Status**: Max/Used/Available connections
+- **Active vs Idle Connections**: Live active/idle connection mix over time
+
+Data-integrity canary (a group after **Active vs Idle Connections** — a stacked status/last-failure column on the left, the failure trend on the right):
+- **Data Checksums** (`pg_settings_data_checksums`, state timeline): whether page-level checksum verification is enabled over time — green `ON` / orange `OFF`. Enabled by default only on PostgreSQL 18+; older clusters upgraded in place are commonly `OFF`, in which case the two panels beside it can never detect corruption and a `0` failure count proves nothing
+- **Checksum Failures Over Time** (PostgreSQL 12+, data checksums enabled): time series of checksum failures — any step up means on-disk corruption and warrants an immediate page
+- **Last Checksum Failure**: time since the most recent checksum failure (`No failures` when clean)
 
 ### 🔌 Connection Analysis & Idle Age
 - **Top Databases by Idle Connection State**: Surface which databases are accumulating the most idle sessions right now, including dangerous `idle in transaction` states
@@ -83,6 +92,9 @@ Monitor pg_exporter's own health and performance:
   - `5-15min` - Investigate
   - `15min-1h` - Likely leak
   - `>1h` - Definite leak!
+- **Session Establishment & Termination Rate** (PostgreSQL 14+): new/abandoned/fatal/killed sessions per second — a connection-churn and instability signal (spikes in abandoned/fatal precede app-side errors)
+- **Session vs Active Time Rate** (PostgreSQL 14+): share of session time actually spent executing queries; a large gap means mostly-idle connections
+- **Avg Session Duration** (PostgreSQL 14+): `session_time / sessions` per database — rising duration points to long-lived/idle connections or pooling problems
 
 ### ⏱️ Checkpoints
 Insight into the `checkpoint_timeout` / `max_wal_size` / storage tradeoff. Yellow dashed lines plot the live server settings so they track configuration changes automatically.
@@ -138,12 +150,25 @@ topk(10,
 - **Database Disk Reads**: I/O load per database
 - **Transaction Throughput**: INSERT/UPDATE/DELETE operations per second
 
+> Session-churn panels (establishment/termination, session vs active time, avg duration) live in the **Connection Analysis & Idle Age** row, and the checksum-failure canary lives in the **Critical Alerts** row.
+
 ### 🔒 Locks & Blocking
 - **Lock Count by Database & Mode**: Lock distribution across databases
 
 ### 🧹 Vacuum & Maintenance
 - **Vacuum Progress**: Real-time vacuum operation tracking
 - **Heap Blocks Vacuumed**: Vacuum work completed
+
+### 🚧 Vacuum Horizon Blockers & Progress
+**Enable with**: `--collector.vacuum`
+
+What pins the **xmin horizon** and blocks VACUUM from reclaiming dead tuples (and holds back wraparound protection), plus live maintenance progress:
+- **Xmin Horizon Age by Holder (XIDs)**: age of the oldest xmin held by `backend`, `prepared_xact`, or `replication_slot`
+- **Worst Xmin Horizon Holder (XIDs)**: the single worst offender, labeled by identity (application_name / gid / slot_name)
+- **Prepared Transactions**: count of orphaned prepared transactions (each pins the horizon until committed/rolled back)
+- **Oldest Prepared Xact Age (s)**: age of the oldest prepared transaction
+- **Active CREATE INDEX Progress** (PostgreSQL 12+): `pg_stat_progress_create_index` blocks done/total during long migrations
+- **Active ANALYZE Progress** (PostgreSQL 13+): `pg_stat_progress_analyze` sample-block progress
 
 ### 📦 WAL
 - **WAL Throughput**: Write-ahead log generation rate
@@ -155,6 +180,9 @@ topk(10,
 - **Replication Lag**: Replay delay on standby nodes
 - **Server Role**: Primary vs replica identification
 - **Max Replication Lag Bytes**: Maximum WAL byte lag across replicas
+- **Logical Slot Spill to Disk** (PostgreSQL 14+): bytes/s logical decoding spills to disk when `logical_decoding_work_mem` is too small
+- **Logical Slot Streamed to Subscriber** (PostgreSQL 14+): bytes/s streamed for in-progress transactions
+- **Logical Slot Spill / Stream Transactions**: spill/stream transaction rate from `pg_stat_replication_slots`
 
 ### 📊 Table Statistics
 - **Table DML Operations Rate**: Per-table INSERT/UPDATE/DELETE rates
@@ -162,6 +190,34 @@ topk(10,
 ### 💽 Database Size & Growth
 - **Database Size**: Current size per database
 - **Database Growth Rate**: Growth trend over time
+
+### ⚡ I/O by backend type
+**Enable with**: `--collector.stat_io` (PostgreSQL 16+)
+
+Cluster-wide `pg_stat_io` broken down by `backend_type`/`object`/`context` — the shared-buffer and storage-latency view a plain cache-hit ratio can't give you (especially useful on RDS/Aurora with no host access):
+- **Eviction Rate** / **Buffer Cache Hit Ratio** / **Read Throughput** / **Write Throughput**: KPI stats
+- **Buffer Evictions by Backend Type** / **by Context**: direct `shared_buffers`-pressure signal
+- **Cache Hit Ratio by Backend Type** / **Cache Hits vs Disk Reads**
+- **Read Throughput by Backend Type** / **Write & Extend Throughput by Backend Type**
+- **Average Read Latency** / **Average Write & Fsync Latency**: require `track_io_timing = on`
+- **Buffer Reuses by Context** / **Writebacks & Fsyncs** / **Current Eviction Rate by Backend Type / Context**
+
+### 🔢 Sequence Exhaustion
+**Enable with**: `--collector.sequences`
+
+Early warning before an `int4` primary-key sequence overflows. Only sequences at or above `--sequences.min-ratio` (default `0.5`) are exported, so healthy databases add no cardinality:
+- **Sequences by % Consumed**: consumed ratio over time
+- **Max Sequence % Consumed**: closest sequence to exhaustion
+- **Sequences ≥ 90% Consumed**: count needing urgent attention
+
+### 🧠 SLRU Cache
+**Enable with**: `--collector.slru` (PostgreSQL 13+)
+
+`pg_stat_slru` counters for PostgreSQL's small fixed-size caches (subtransactions, multixacts, CLOG, ...) — sustained `subtransaction`/`multixact` disk reads are the smoking gun for savepoint/subtransaction storms:
+- **SLRU Cache Hit Ratio by Cache**
+- **SLRU Disk Reads by Cache (rate)**
+- **SLRU Writes & Flushes (rate)**
+- **SLRU Truncates & Zeroed (rate)**
 
 ## Template Variables
 
@@ -183,11 +239,15 @@ Different sections require different collectors to be enabled:
 | Database Activity | `database`, `activity` | Partial |
 | Locks | `locks` | ❌ No |
 | Vacuum | `vacuum` | ✅ Yes |
+| Vacuum Horizon Blockers & Progress | `vacuum` | ✅ Yes |
 | Checkpoints | `default` | ✅ Yes |
 | WAL | `default` | ✅ Yes |
 | Replication | `default`, `replication` | Partial |
 | Table Statistics | `stat` | ❌ No |
 | Database Size | `database` | ❌ No |
+| I/O by backend type | `stat_io` | ❌ No (PostgreSQL 16+) |
+| Sequence Exhaustion | `sequences` | ❌ No |
+| SLRU Cache | `slru` | ❌ No (PostgreSQL 13+) |
 
 ### Enabling Collectors
 
@@ -203,6 +263,9 @@ pg_exporter \
     --collector.replication \
     --collector.index \
     --collector.statements \
+    --collector.stat_io \
+    --collector.sequences \
+    --collector.slru \
     --collector.exporter  # Optional: for self-monitoring
 ```
 
@@ -218,6 +281,9 @@ ExecStart=/usr/local/bin/pg_exporter \
     --collector.replication \
     --collector.index \
     --collector.statements \
+    --collector.stat_io \
+    --collector.sequences \
+    --collector.slru \
     --collector.exporter
 ```
 

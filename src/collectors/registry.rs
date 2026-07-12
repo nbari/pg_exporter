@@ -3,6 +3,7 @@ use crate::{
         Collector, CollectorType, all_factories,
         config::CollectorConfig,
         exporter::ScraperCollector,
+        sequences::SequencesCollector,
         statements::StatementsCollector,
         util::{get_pg_version, get_scrape_timeout, set_pg_version},
     },
@@ -32,6 +33,9 @@ fn build_collector(
     match name {
         "statements" => Some(CollectorType::StatementsCollector(
             StatementsCollector::with_top_n(config.statements.top_n),
+        )),
+        "sequences" => Some(CollectorType::SequencesCollector(
+            SequencesCollector::with_min_ratio(config.sequences.min_ratio),
         )),
         _ => factories.get(name).map(|factory| factory()),
     }

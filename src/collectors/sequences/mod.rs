@@ -8,85 +8,78 @@ use std::sync::Arc;
 use tracing::{debug, info_span, instrument, warn};
 use tracing_futures::Instrument as _;
 
-pub mod analyze_progress;
-use analyze_progress::AnalyzeProgressCollector;
+pub mod pg_sequences;
+pub use pg_sequences::PgSequencesCollector;
 
-pub mod blockers;
-use blockers::VacuumBlockersCollector;
-
-pub mod create_index_progress;
-use create_index_progress::CreateIndexProgressCollector;
-
-pub mod progress;
-use progress::VacuumProgressCollector;
-
-pub mod stats;
-use stats::VacuumStatsCollector;
-
-#[derive(Clone, Default)]
-pub struct VacuumCollector {
+/// Opt-in sequence exhaustion collector.
+///
+/// The thin umbrella fans out to sub-collectors that read `PostgreSQL` sequence
+/// metadata, currently `pg_sequences`, without carrying metric construction or
+/// database query details in this module.
+#[derive(Clone)]
+pub struct SequencesCollector {
     subs: Vec<Arc<dyn Collector + Send + Sync>>,
 }
 
-impl VacuumCollector {
+impl SequencesCollector {
     #[must_use]
     pub fn new() -> Self {
+        Self::with_min_ratio(0.5)
+    }
+
+    #[must_use]
+    pub fn with_min_ratio(min_ratio: f64) -> Self {
         Self {
-            subs: vec![
-                Arc::new(VacuumStatsCollector::new()),
-                Arc::new(VacuumProgressCollector::new()),
-                Arc::new(VacuumBlockersCollector::new()),
-                Arc::new(CreateIndexProgressCollector::new()),
-                Arc::new(AnalyzeProgressCollector::new()),
-            ],
+            subs: vec![Arc::new(PgSequencesCollector::with_min_ratio(min_ratio))],
         }
     }
 }
 
-impl Collector for VacuumCollector {
+impl Default for SequencesCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Collector for SequencesCollector {
     fn name(&self) -> &'static str {
-        "vacuum"
+        "sequences"
     }
 
     #[instrument(
         skip(self, registry),
         level = "info",
         err,
-        fields(collector = "vacuum")
+        fields(collector = "sequences")
     )]
     fn register_metrics(&self, registry: &Registry) -> Result<()> {
         for sub in &self.subs {
             let span = info_span!("collector.register_metrics", sub_collector = %sub.name());
-
             let res = sub.register_metrics(registry);
-
             match res {
-                Ok(()) => debug!(collector = sub.name(), "registered metrics"),
-
+                Ok(()) => {
+                    debug!(collector = sub.name(), "registered metrics");
+                }
                 Err(ref e) => {
                     warn!(collector = sub.name(), error = %e, "failed to register metrics");
                 }
             }
-
             res?;
-
             drop(span);
         }
         Ok(())
     }
 
-    #[instrument(
-        skip(self, pool),
-        level = "info",
-        err,
-        fields(collector = "vacuum", otel.kind = "internal")
-    )]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let mut tasks = FuturesUnordered::new();
 
             for sub in &self.subs {
-                let span = info_span!("collector.collect", sub_collector = %sub.name(), otel.kind = "internal");
+                let span = info_span!(
+                    "collector.collect",
+                    sub_collector = %sub.name(),
+                    otel.kind = "internal"
+                );
 
                 tasks.push(sub.collect(pool).instrument(span));
             }
@@ -100,7 +93,7 @@ impl Collector for VacuumCollector {
     }
 
     fn enabled_by_default(&self) -> bool {
-        true
+        false
     }
 }
 
@@ -109,14 +102,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_vacuum_collector_name() {
-        let collector = VacuumCollector::new();
-        assert_eq!(collector.name(), "vacuum");
+    fn test_sequences_collector_name() {
+        let collector = SequencesCollector::new();
+        assert_eq!(collector.name(), "sequences");
     }
 
     #[test]
-    fn test_vacuum_collector_enabled_by_default() {
-        let collector = VacuumCollector::new();
-        assert!(collector.enabled_by_default());
+    fn test_sequences_collector_not_enabled_by_default() {
+        let collector = SequencesCollector::new();
+        assert!(!collector.enabled_by_default());
     }
 }

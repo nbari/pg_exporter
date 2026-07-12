@@ -202,7 +202,27 @@ branch protection will enforce this.
 
 ## Common Patterns
 
-### Collector Structure
+### Collector Module Layout (mandatory)
+
+Each collector lives in its own directory `src/collectors/<name>/`. **`mod.rs` is the
+entry point / umbrella only** — it declares the sub-module(s) and holds a thin
+`<Name>Collector { subs: Vec<Arc<dyn Collector + Send + Sync>> }` that fans
+`register_metrics`/`collect` out to sub-collectors. **Never put metric definitions, SQL,
+or row parsing directly in `mod.rs`.** The actual implementation goes in a sibling file
+named after the source view (struct named after it):
+
+```
+src/collectors/stat_io/
+├── mod.rs          # umbrella StatIoCollector -> fans out to subs
+└── pg_stat_io.rs   # PgStatIoCollector: metrics, SQL, version handling
+```
+
+Follow the existing pairs: `statements/pg_statements.rs`, `stat/user_tables.rs`,
+`index/stats.rs`. This is enforced by `collector_mod_rs_is_a_thin_umbrella` in
+`tests/collector_safety.rs`; a `mod.rs` containing `IntGaugeVec::new`, `Opts::new`,
+`sqlx::query`, etc. fails the build.
+
+### Collector Structure (implementation file, e.g. `pg_stat_io.rs`)
 ```rust
 #[derive(Clone)]
 pub struct MyCollector {

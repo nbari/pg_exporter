@@ -317,7 +317,7 @@ t-deploy message="CI test": check-develop check-clean test
 
 # Watch for changes and run
 watch:
-  cargo watch -x 'run -- --collector.vacuum --collector.activity --collector.locks --collector.database --collector.stat --collector.replication --collector.index --collector.statements --collector.exporter --collector.tls -v'
+  cargo watch -x 'run -- --collector.vacuum --collector.activity --collector.locks --collector.database --collector.stat --collector.replication --collector.index --collector.statements --collector.exporter --collector.tls --collector.stat_io --collector.slru --collector.sequences -v'
 
 # get metrics curl
 curl:
@@ -382,6 +382,13 @@ top-queries:
     fi
     PGPASSWORD="${PGPASSWORD:-postgres}" psql -h "${pg_host}" -p "${pg_port}" -U postgres \
         -d "${PGDATABASE:-postgres}" -P pager=off -f scripts/top-queries.sql
+
+# Exercise every new 0.16.0 collector so its Grafana panels get real data.
+# Pass flags through to the script, e.g.:
+#   just exercise-collectors --duration 120 --scale 100 --io-timing --group-b
+# Clean up afterwards with: just exercise-collectors --cleanup
+exercise-collectors *args:
+    ./scripts/exercise-new-collectors.sh {{args}}
 
 # Run a live pgbench workload for local metrics testing
 workload duration="60" clients="5" scale="10" db="pgbench_test":

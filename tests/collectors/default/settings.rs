@@ -21,6 +21,7 @@ async fn test_settings_collector_returns_key_settings() -> Result<()> {
         "pg_settings_shared_buffers_bytes",
         "pg_settings_work_mem_bytes",
         "pg_settings_fsync",
+        "pg_settings_data_checksums",
         "pg_settings_autovacuum",
     ];
 
@@ -50,7 +51,10 @@ async fn test_settings_collector_returns_key_settings() -> Result<()> {
             );
         }
 
-        if setting_name == "pg_settings_fsync" || setting_name == "pg_settings_autovacuum" {
+        if setting_name == "pg_settings_fsync"
+            || setting_name == "pg_settings_autovacuum"
+            || setting_name == "pg_settings_data_checksums"
+        {
             // Boolean settings should be 0 or 1
             assert!(
                 value == 0 || value == 1,

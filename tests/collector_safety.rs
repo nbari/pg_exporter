@@ -102,6 +102,72 @@ fn shared_pool_uses_the_connection_budget_constant() -> Result<()> {
     Ok(())
 }
 
+/// Enforces the collector module layout: `src/collectors/<name>/mod.rs` must be
+/// a thin **entry point / umbrella** that wires up sub-collectors, not the place
+/// where metrics and SQL live. The real implementation belongs in a sibling file
+/// named after the source view (for example `stat_io/pg_stat_io.rs`,
+/// `statements/pg_statements.rs`, `stat/user_tables.rs`).
+///
+/// This catches the common mistake of dumping an entire collector into `mod.rs`.
+#[test]
+fn collector_mod_rs_is_a_thin_umbrella() -> Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let collector_root = root.join("src").join("collectors");
+
+    // Signals that a file contains collector *implementation* (metric definitions
+    // or SQL) rather than just wiring. None of these belong in an umbrella mod.rs.
+    let forbidden: [&str; 10] = [
+        "IntGaugeVec::new",
+        "GaugeVec::new",
+        "IntCounterVec::new",
+        "CounterVec::new",
+        "Opts::new(",
+        "registry.register(Box::new(",
+        ".with_label_values(",
+        "sqlx::query",
+        "fetch_all(",
+        "fetch_optional(",
+    ];
+
+    let mut failures = Vec::new();
+
+    for path in rust_files_under(&collector_root)? {
+        // Only per-collector directory entry points: src/collectors/<name>/mod.rs.
+        // Skip the top-level src/collectors/mod.rs (the registration hub).
+        let is_mod_rs = path.file_name().is_some_and(|name| name == "mod.rs");
+        let is_collector_dir_mod =
+            path.parent().and_then(Path::parent) == Some(collector_root.as_path());
+        if !is_mod_rs || !is_collector_dir_mod {
+            continue;
+        }
+
+        let source = std::fs::read_to_string(&path)?;
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or(source.as_str());
+        let relative = path.strip_prefix(root).unwrap_or(path.as_path());
+
+        for marker in forbidden {
+            if production_source.contains(marker) {
+                failures.push(format!(
+                    "{} contains `{marker}`: collector mod.rs must stay a thin umbrella. \
+                     Move metrics/SQL into a sibling file (e.g. `pg_stat_io.rs`) and have \
+                     mod.rs only declare the submodule and fan out to it \
+                     (see statements/pg_statements.rs)",
+                    relative.display()
+                ));
+            }
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!(failures.join("\n")))
+    }
+}
+
 fn rust_files_under(root: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     let mut pending = vec![root.to_path_buf()];

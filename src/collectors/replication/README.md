@@ -4,11 +4,12 @@ This collector tracks PostgreSQL replication metrics, compatible with [postgres_
 
 ## Overview
 
-The replication collector provides three sub-collectors:
+The replication collector provides four sub-collectors:
 
 1. **Replica Status** - Monitors standby/replica server metrics
 2. **pg_stat_replication** - Tracks replication slots from primary perspective
 3. **pg_replication_slots** - Monitors physical and logical replication slots
+4. **pg_stat_replication_slots** - Tracks logical replication slot spill and stream statistics (PostgreSQL 14+)
 
 ## Metrics
 
@@ -35,6 +36,19 @@ Labels: `slot_name`, `slot_type`, `database`
 
 - `pg_replication_slots_pg_wal_lsn_diff` - Replication slot lag in bytes
 - `pg_replication_slots_active` - Whether slot is active (1) or inactive (0)
+
+### pg_stat_replication_slots (PostgreSQL 14+)
+
+Labels: `slot_name`
+
+- `pg_stat_replication_slots_spill_txns_total` - Transactions spilled to disk while decoding logical changes
+- `pg_stat_replication_slots_spill_count_total` - Times logical decoding changes were spilled to disk
+- `pg_stat_replication_slots_spill_bytes_total` - Bytes spilled to disk while decoding logical changes
+- `pg_stat_replication_slots_stream_txns_total` - Transactions streamed to the decoding output plugin
+- `pg_stat_replication_slots_stream_count_total` - Times logical decoding changes were streamed to the output plugin
+- `pg_stat_replication_slots_stream_bytes_total` - Bytes streamed to the decoding output plugin
+- `pg_stat_replication_slots_total_txns_total` - Transactions decoded for logical replication
+- `pg_stat_replication_slots_total_bytes_total` - Bytes decoded for logical replication
 
 ## Usage
 
@@ -76,9 +90,16 @@ pg_replication_slots_active == 0
 pg_replication_slots_pg_wal_lsn_diff > 10737418240  # 10GB in bytes
 ```
 
+### Monitor logical decoding spill volume
+
+```promql
+rate(pg_stat_replication_slots_spill_bytes_total[5m]) > 1048576
+```
+
 ## PostgreSQL Version Compatibility
 
 - Requires PostgreSQL 10.0+
+- `pg_stat_replication_slots` metrics require PostgreSQL 14.0+ and are skipped with a one-time warning on older servers
 - Uses modern WAL functions (`pg_current_wal_lsn`, `pg_wal_lsn_diff`)
 - Works on both primary and standby servers
 - Gracefully handles absence of replicas or replication slots
@@ -90,3 +111,4 @@ pg_replication_slots_pg_wal_lsn_diff > 10737418240  # 10GB in bytes
 - Concurrent collection safe
 - Works whether server is primary or standby
 - No metrics exported when no replicas/slots exist (avoids cardinality issues)
+- `pg_stat_replication_slots` is cluster-wide and uses only the shared pool

@@ -355,7 +355,7 @@ async fn initialize_replication_probe(primary_pool: &PgPool) -> Result<()> {
 }
 
 async fn wait_for_marker_replicated(primary_pool: &PgPool, replica_pool: &PgPool) -> Result<()> {
-    let marker = Ulid::new().to_string();
+    let marker = Ulid::r#gen().to_string();
     sqlx::query("INSERT INTO pg_exporter_replication_probe(marker) VALUES ($1)")
         .bind(&marker)
         .execute(primary_pool)
@@ -696,7 +696,7 @@ async fn replication_lag_and_role_semantics_from_postgres_primary_replica_pair()
     }
 
     let require_runtime = common::should_require_container_runtime();
-    let suffix = Ulid::new().to_string().to_lowercase();
+    let suffix = Ulid::r#gen().to_string().to_lowercase();
     let network = format!("pg-exporter-repl-{suffix}");
     let primary_name = format!("pg-exporter-primary-{suffix}");
     let replica_name = format!("pg-exporter-replica-{suffix}");

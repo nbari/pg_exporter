@@ -14,6 +14,9 @@ use replica::ReplicaCollector;
 pub mod stat_replication;
 use stat_replication::StatReplicationCollector;
 
+pub mod stat_replication_slots;
+use stat_replication_slots::StatReplicationSlotsCollector;
+
 pub mod slots;
 use slots::ReplicationSlotsCollector;
 
@@ -29,6 +32,7 @@ impl ReplicationCollector {
             subs: vec![
                 Arc::new(ReplicaCollector::new()),
                 Arc::new(StatReplicationCollector::new()),
+                Arc::new(StatReplicationSlotsCollector::new()),
                 Arc::new(ReplicationSlotsCollector::new()),
             ],
         }

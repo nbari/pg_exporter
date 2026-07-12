@@ -65,6 +65,7 @@ impl SettingsCollector {
                 'autovacuum_analyze_threshold',
                 'autovacuum_vacuum_threshold',
                 'checkpoint_timeout',
+                'data_checksums',
                 'fsync',
                 'log_min_duration_statement',
                 'maintenance_work_mem',
@@ -172,6 +173,7 @@ impl Collector for SettingsCollector {
                 "pg_settings_checkpoint_timeout_seconds",
                 "PostgreSQL setting: checkpoint_timeout in seconds",
             ),
+            ("data_checksums", "pg_settings_data_checksums", "PostgreSQL setting: data_checksums"),
             ("fsync", "pg_settings_fsync", "PostgreSQL setting: fsync"),
             (
                 "log_min_duration_statement",

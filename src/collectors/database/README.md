@@ -26,6 +26,15 @@ Notes:
 - Exclusions are applied server-side in a single query (efficient).
 - The variable is read at startup; restart the exporter to apply changes.
 
+## Version-gated `pg_stat_database` metrics
+
+- `pg_stat_database_sessions_total` (`PostgreSQL` 14+): sessions established to the database.
+- `pg_stat_database_sessions_abandoned_total` (`PostgreSQL` 14+): sessions abandoned after client disconnects.
+- `pg_stat_database_sessions_fatal_total` (`PostgreSQL` 14+): sessions ended by fatal errors.
+- `pg_stat_database_sessions_killed_total` (`PostgreSQL` 14+): sessions ended by operator intervention.
+- `pg_stat_database_session_time_seconds_total` (`PostgreSQL` 14+): total session time from `session_time`, converted from milliseconds to seconds.
+- `pg_stat_database_checksum_failures_total` (`PostgreSQL` 12+): data page checksum failures reported by `checksum_failures`.
+- `pg_stat_database_checksum_last_failure_timestamp_seconds` (`PostgreSQL` 12+): last checksum failure time from `checksum_last_failure`, exported as epoch seconds or `0` when unset.
 
 ## PromQL examples
 

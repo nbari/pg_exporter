@@ -81,6 +81,29 @@ pub fn add_collector_option_args(cmd: Command) -> Command {
             .value_name("MS")
             .value_parser(value_parser!(NonZeroU64)),
     )
+    .arg(sequences_min_ratio_arg())
+}
+
+fn sequences_min_ratio_arg() -> Arg {
+    Arg::new("sequences.min-ratio")
+        .long("sequences.min-ratio")
+        .help("Minimum pg_sequences used-ratio a sequence must reach to be exported")
+        .long_help(
+            "Minimum pg_sequences used-ratio (last_value / max_value, 0.0-1.0) a sequence must \
+             reach before --collector.sequences exports it.\n\n\
+             This keeps cardinality bounded: a healthy database whose sequences are all far from \
+             their maximum exports nothing, and only sequences approaching exhaustion appear. \
+             Lower values surface more sequences earlier; higher values stay quiet until a \
+             sequence is closer to overflow.\n\n\
+             Examples:\n\
+               --sequences.min-ratio 0.5\n\
+               --sequences.min-ratio 0.75\n\
+               PG_EXPORTER_SEQUENCES_MIN_RATIO=0.9",
+        )
+        .env("PG_EXPORTER_SEQUENCES_MIN_RATIO")
+        .default_value(SEQUENCES_MIN_RATIO_DEFAULT)
+        .value_name("RATIO")
+        .value_parser(parse_sequences_min_ratio)
 }
 
 fn max_db_concurrency_arg() -> Arg {
@@ -136,6 +159,19 @@ const CONNECT_TIMEOUT_MS_DEFAULT: &str = "5000";
 const LOCK_TIMEOUT_MS_DEFAULT: &str = "2000";
 const STATEMENT_TIMEOUT_MS_DEFAULT: &str = "10000";
 const SCRAPE_TIMEOUT_MS_DEFAULT: &str = "15000";
+const SEQUENCES_MIN_RATIO_DEFAULT: &str = "0.5";
+
+fn parse_sequences_min_ratio(value: &str) -> Result<f64, String> {
+    let parsed = value
+        .parse::<f64>()
+        .map_err(|_| "sequences min-ratio must be a number between 0.0 and 1.0".to_string())?;
+
+    if !parsed.is_finite() || !(0.0..=1.0).contains(&parsed) {
+        return Err("sequences min-ratio must be between 0.0 and 1.0".to_string());
+    }
+
+    Ok(parsed)
+}
 
 fn parse_max_db_concurrency(value: &str) -> Result<NonZeroUsize, String> {
     let parsed = value.parse::<NonZeroUsize>().map_err(|_| {

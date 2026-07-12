@@ -1610,12 +1610,247 @@
       "type": "timeseries"
     },
     {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Whether data page checksums are enabled on this cluster (pg_settings_data_checksums: green = on, orange = off). Checksums let PostgreSQL detect silent on-disk corruption; they were only enabled by default starting in PostgreSQL 18, so many older clusters have them OFF. This matters for reading the two checksum panels: when checksums are OFF the corruption counter can never increment, so a '0 failures' reading is NOT proof of a healthy disk - it just means detection is disabled. Green here means the 'Checksum Failures' panels are actually meaningful. Enabling checksums on an existing cluster requires pg_checksums with the server stopped (or a dump/restore).",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 0,
+            "insertNulls": false,
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            }
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "OFF",
+                  "color": "orange",
+                  "index": 0
+                },
+                "1": {
+                  "text": "ON",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 38
+      },
+      "id": 780025,
+      "options": {
+        "mergeValues": true,
+        "showValue": "auto",
+        "alignValue": "center",
+        "rowHeight": 0.9,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "pg_settings_data_checksums{job=\"$job\", instance=\"$instance\"}",
+          "refId": "A",
+          "legendFormat": "data_checksums"
+        }
+      ],
+      "title": "Data Checksums",
+      "type": "state-timeline"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Total data-page checksum failures detected across the selected databases (pg_stat_database.checksums_failures). This is a hard corruption signal: any nonzero value (red) means PostgreSQL read a data page whose checksum did not match - i.e. silent storage corruption, a failing disk, or bad memory. It should be flat at 0 forever. If it rises: first confirm the 'Data Checksums' panel is green (otherwise the count is meaningless), then investigate hardware immediately, review server logs for the affected relation/block, and restore affected data from a known-good backup. Requires checksums enabled to ever fire (PG12+ for the counter).",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "pointSize": 6,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 8,
+        "y": 38
+      },
+      "id": 780006,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(pg_stat_database_checksum_failures_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
+          "refId": "A",
+          "legendFormat": "failures"
+        }
+      ],
+      "title": "Checksum Failures Over Time",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Time since the most recent checksum failure was recorded (pg_stat_database.checksums_last_failure). Shows 'No failures' in neutral text when there has never been one - the healthy state. A red value (any age) means corruption was detected at that time; a recent age is more urgent than an old one, but any occurrence warrants investigating the underlying storage/hardware and validating backups. Read together with 'Checksum Failures Over Time' (the count) and 'Data Checksums' (whether detection is even on).",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "unit": "s",
+          "noValue": "No failures"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 42
+      },
+      "id": 780024,
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "fields": "",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "time() - (pg_stat_database_checksum_last_failure_timestamp_seconds{job=\"$job\", instance=\"$instance\", datname=~\"$database\"} > 0)",
+          "refId": "A",
+          "legendFormat": "{{datname}}"
+        }
+      ],
+      "title": "Last Checksum Failure",
+      "type": "stat"
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 38
+        "y": 46
       },
       "id": 101,
       "title": "Connection Analysis & Idle Age",
@@ -1735,7 +1970,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 39
+        "y": 47
       },
       "id": 129,
       "options": {
@@ -1845,7 +2080,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 47
+        "y": 55
       },
       "id": 4,
       "options": {
@@ -1937,7 +2172,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 55
+        "y": 63
       },
       "id": 5,
       "options": {
@@ -2073,7 +2308,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 63
+        "y": 71
       },
       "id": 115,
       "options": {
@@ -2174,7 +2409,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 71
+        "y": 79
       },
       "id": 116,
       "options": {
@@ -2207,6 +2442,318 @@
       "type": "timeseries"
     },
     {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Per-second rate of session lifecycle events from pg_stat_database (PG14+): new sessions established vs. sessions that were abandoned (client disconnected unexpectedly), fatal (terminated by a server error), or killed (terminated by an operator/admin). A low, steady establishment rate with near-zero abandoned/fatal/killed is healthy. A spike in sessions_abandoned or sessions_fatal is an early warning of connection-handling problems - app instances crashing or being OOM-killed, network drops, or aggressive proxy/pooler timeouts - often visible here before errors surface app-side. Especially useful for ECS/Kubernetes deployments that cycle instances: watch for churn spikes during rollouts. Per datname.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 87
+      },
+      "id": 780004,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "rate(pg_stat_database_sessions_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m])",
+          "refId": "A",
+          "legendFormat": "established {{datname}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "rate(pg_stat_database_sessions_abandoned_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m])",
+          "refId": "B",
+          "legendFormat": "abandoned {{datname}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "rate(pg_stat_database_sessions_fatal_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m])",
+          "refId": "C",
+          "legendFormat": "fatal {{datname}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "rate(pg_stat_database_sessions_killed_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m])",
+          "refId": "D",
+          "legendFormat": "killed {{datname}}"
+        }
+      ],
+      "title": "Session Establishment & Termination Rate (PG14+)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "How the database's connection time is spent, from pg_stat_database (PG14+): total session_time accumulated per second vs. active_time (time actually executing queries) per second. The gap between them is time connections spend idle or idle-in-transaction. If session_time keeps climbing but active_time stays low, your connections are mostly sitting idle - a sign of an oversized or leaky connection pool, or long idle-in-transaction sessions (which also block VACUUM; see the Xmin Horizon panels). High active_time relative to session_time means connections are being used efficiently. Per datname.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 87
+      },
+      "id": 780005,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "rate(pg_stat_database_session_time_seconds_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m])",
+          "refId": "A",
+          "legendFormat": "session {{datname}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "rate(pg_stat_database_active_time_seconds_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m])",
+          "refId": "B",
+          "legendFormat": "active {{datname}}"
+        }
+      ],
+      "title": "Session vs Active Time Rate (PG14+)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Average lifetime of a database session (total session_time / number of sessions, PG14+). Interpretation depends on your architecture: a healthy pooled app holds long-lived connections, so large values mean good pool reuse. Conversely, if this suddenly drops toward zero while the establishment rate spikes (see 'Session Establishment & Termination Rate'), sessions are being created and torn down rapidly - connection churn from per-request connects, a misconfigured pool, or instances flapping during a deploy - which wastes backend startup cost and can exhaust max_connections. Per datname.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 87
+      },
+      "id": 780023,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "pg_stat_database_session_time_seconds_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"} / clamp_min(pg_stat_database_sessions_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}, 1)",
+          "refId": "A",
+          "legendFormat": "{{datname}}"
+        }
+      ],
+      "title": "Avg Session Duration (PG14+)",
+      "type": "timeseries"
+    },
+    {
       "collapsed": false,
       "datasource": {
         "type": "prometheus",
@@ -2216,7 +2763,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 79
+        "y": 95
       },
       "id": 2200,
       "title": "Checkpoints",
@@ -2317,7 +2864,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 80
+        "y": 96
       },
       "id": 2201,
       "options": {
@@ -2453,7 +3000,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 80
+        "y": 96
       },
       "id": 2202,
       "options": {
@@ -2589,7 +3136,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 88
+        "y": 104
       },
       "id": 2203,
       "options": {
@@ -2691,7 +3238,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 88
+        "y": 104
       },
       "id": 2204,
       "options": {
@@ -2738,7 +3285,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 96
+        "y": 112
       },
       "id": 111,
       "title": "WAL",
@@ -2773,7 +3320,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 97
+        "y": 113
       },
       "id": 2117,
       "options": {
@@ -2823,7 +3370,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 97
+        "y": 113
       },
       "id": 2118,
       "options": {
@@ -2886,7 +3433,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 105
+        "y": 121
       },
       "id": 2119,
       "options": {
@@ -2948,7 +3495,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 105
+        "y": 121
       },
       "id": 2121,
       "options": {
@@ -2980,7 +3527,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 113
+        "y": 129
       },
       "id": 105,
       "title": "Vacuum & Bloat Pressure (requires --collector.vacuum + --collector.stat)",
@@ -3046,7 +3593,7 @@
         "h": 6,
         "w": 12,
         "x": 0,
-        "y": 114
+        "y": 130
       },
       "id": 2129,
       "options": {
@@ -3137,7 +3684,7 @@
         "h": 6,
         "w": 12,
         "x": 12,
-        "y": 114
+        "y": 130
       },
       "id": 2130,
       "options": {
@@ -3228,7 +3775,7 @@
         "h": 6,
         "w": 12,
         "x": 0,
-        "y": 120
+        "y": 136
       },
       "id": 2135,
       "options": {
@@ -3319,7 +3866,7 @@
         "h": 6,
         "w": 12,
         "x": 12,
-        "y": 120
+        "y": 136
       },
       "id": 2131,
       "options": {
@@ -3410,7 +3957,7 @@
         "h": 6,
         "w": 12,
         "x": 0,
-        "y": 126
+        "y": 142
       },
       "id": 2132,
       "options": {
@@ -3479,7 +4026,7 @@
         "h": 4,
         "w": 12,
         "x": 0,
-        "y": 140
+        "y": 156
       },
       "id": 2136,
       "options": {
@@ -3547,7 +4094,7 @@
         "h": 4,
         "w": 12,
         "x": 12,
-        "y": 140
+        "y": 156
       },
       "id": 2137,
       "options": {
@@ -3637,7 +4184,7 @@
         "h": 6,
         "w": 12,
         "x": 12,
-        "y": 126
+        "y": 142
       },
       "id": 2133,
       "options": {
@@ -3728,7 +4275,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 132
+        "y": 148
       },
       "id": 2134,
       "options": {
@@ -3819,7 +4366,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 132
+        "y": 148
       },
       "id": 17,
       "options": {
@@ -3910,7 +4457,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 144
+        "y": 160
       },
       "id": 18,
       "options": {
@@ -3948,7 +4495,560 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 152
+        "y": 168
+      },
+      "id": 780007,
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Age, in transaction IDs (XIDs), of the oldest xmin snapshot each holder type is pinning: backend (a live session, often 'idle in transaction'), prepared_xact (an open two-phase transaction), replication_slot (a slot's xmin or catalog_xmin). Whichever line is highest is what currently stops VACUUM from reclaiming dead rows and holds back transaction-ID wraparound protection. Flat and low is healthy; a single line climbing steadily is the problem to chase - a long-lived transaction, an orphaned prepared xact, or a stale/lagging replication slot. Rule of thumb: start worrying as this approaches autovacuum_freeze_max_age (default 200,000,000), and note the cluster stops accepting writes near 2,000,000,000 to prevent wraparound. Use the 'Worst Xmin Horizon Holder' panel below to see exactly which session, gid, or slot to act on.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 1,
+            "w": 12,
+            "h": 8
+          },
+          "id": 780008,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_xmin_horizon_age_xids{job=\"$job\", instance=\"$instance\"}",
+              "refId": "A",
+              "legendFormat": "{{holder}}"
+            }
+          ],
+          "title": "Xmin Horizon Age by Holder (XIDs)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Count of open prepared (two-phase / 2PC) transactions left in PREPARE TRANSACTION state, waiting for COMMIT PREPARED or ROLLBACK PREPARED. Fewer is better: 0 (green) is the healthy normal for almost all systems, since 2PC is only used by specific distributed-transaction / XA setups. Each open prepared xact pins the xmin horizon and holds its locks indefinitely until resolved, so even one that lingers blocks vacuum and drives bloat and transaction-ID wraparound pressure. 1 or more (yellow) that persists for more than a few minutes usually means an application or transaction manager crashed mid-2PC and orphaned it; 5 or more (red) points at a systemic problem such as a broken transaction coordinator or a misconfigured app. If your workload does not use 2PC/XA at all, this should always be 0 and any nonzero value is suspicious. To fix: find the gid in the 'Worst Xmin Horizon Holder' table, and after confirming with the app owner run ROLLBACK PREPARED '<gid>' (or COMMIT PREPARED).",
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 1
+                  },
+                  {
+                    "color": "red",
+                    "value": 5
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 9,
+            "w": 12,
+            "h": 4
+          },
+          "id": 780009,
+          "options": {
+            "reduceOptions": {
+              "values": false,
+              "fields": "",
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "orientation": "auto",
+            "textMode": "value",
+            "colorMode": "value",
+            "graphMode": "none"
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_prepared_xacts_count{job=\"$job\", instance=\"$instance\"}",
+              "refId": "A"
+            }
+          ],
+          "title": "Prepared Transactions",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "How long the oldest open prepared (two-phase) transaction has been sitting unresolved, in seconds. It should normally be empty or 0 - a prepared xact is meant to be committed or rolled back within milliseconds. Green = none or very recent; yellow (over 5 minutes) = something forgot to finish a two-phase commit; red (over 1 hour) = an orphaned prepared xact is almost certainly pinning the xmin horizon and blocking VACUUM (cross-check 'Prepared Transactions' and 'Xmin Horizon Age by Holder'). The longer it runs, the more bloat and wraparound pressure it causes. Fix by resolving it: ROLLBACK PREPARED '<gid>' (or COMMIT PREPARED) after confirming with the app owner; the gid is shown in 'Worst Xmin Horizon Holder'.",
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 300
+                  },
+                  {
+                    "color": "red",
+                    "value": 3600
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 9,
+            "w": 12,
+            "h": 4
+          },
+          "id": 780010,
+          "options": {
+            "reduceOptions": {
+              "values": false,
+              "fields": "",
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "orientation": "auto",
+            "textMode": "value",
+            "colorMode": "value",
+            "graphMode": "none"
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_prepared_xacts_oldest_age_seconds{job=\"$job\", instance=\"$instance\"}",
+              "refId": "A"
+            }
+          ],
+          "title": "Oldest Prepared Xact Age (s)",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "The single worst offender per holder type, labelled with its identity so you know exactly what to act on: backend -> application_name (terminate with pg_terminate_backend(pid)), prepared_xact -> gid (resolve with ROLLBACK PREPARED '<gid>' or COMMIT PREPARED), replication_slot -> slot_name (drop with pg_drop_replication_slot or let the consumer catch up). The value is that holder's xmin age in XIDs - the higher it is, the more it is holding VACUUM back. Empty or low is healthy. When 'Xmin Horizon Age by Holder' above is climbing, this panel names the culprit: match the holder label to the matching action. Reset every scrape, so a resolved holder disappears immediately.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 1,
+            "w": 12,
+            "h": 8
+          },
+          "id": 780011,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_xmin_horizon_holder_age_xids{job=\"$job\", instance=\"$instance\"}",
+              "refId": "A",
+              "legendFormat": "{{holder}}: {{identity}}"
+            }
+          ],
+          "title": "Worst Xmin Horizon Holder (XIDs)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Live block-level progress of CREATE INDEX, CREATE INDEX CONCURRENTLY, and REINDEX operations (pg_stat_progress_create_index). Series appear only while a build is running and vanish when it finishes, so an empty panel is normal - it lights up during migrations or index maintenance. Use it to confirm a long index build is actually advancing (blocks_done rising toward blocks_total) rather than stuck waiting on a lock, and to estimate how long a big-table migration will take. If the value stalls, a CREATE INDEX CONCURRENTLY is likely blocked waiting for conflicting transactions to finish - the Locks and 'Xmin Horizon Age by Holder' panels show what is in the way. Bounded cardinality: one series per in-flight build.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 13,
+            "w": 12,
+            "h": 8
+          },
+          "id": 780012,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_stat_progress_create_index_blocks_done{job=\"$job\", instance=\"$instance\", database_name=~\"$database\"}",
+              "refId": "A",
+              "legendFormat": "blocks done {{datname}}.{{relid}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_stat_progress_create_index_blocks_total{job=\"$job\", instance=\"$instance\", database_name=~\"$database\"}",
+              "refId": "B",
+              "legendFormat": "blocks total {{datname}}.{{relid}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_stat_progress_create_index_tuples_done{job=\"$job\", instance=\"$instance\", database_name=~\"$database\"}",
+              "refId": "C",
+              "legendFormat": "tuples done {{datname}}.{{relid}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_stat_progress_create_index_tuples_total{job=\"$job\", instance=\"$instance\", database_name=~\"$database\"}",
+              "refId": "D",
+              "legendFormat": "tuples total {{datname}}.{{relid}}"
+            }
+          ],
+          "title": "Active CREATE INDEX Progress",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Live progress of ANALYZE sampling blocks scanned (pg_stat_progress_analyze). Series appear only while ANALYZE (manual or autovacuum-triggered) is running, so an empty panel is normal. Watch sample_blks_scanned rise toward the total to confirm statistics collection on a large table is progressing - stale planner statistics after a bulk load or migration cause bad query plans, and this shows the refresh happening. A long-stalled ANALYZE on a huge table can delay a deploy; if it is not advancing, check for heavy write contention or lock waits. Bounded cardinality: one series per in-flight ANALYZE.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 13,
+            "w": 12,
+            "h": 8
+          },
+          "id": 780013,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_stat_progress_analyze_sample_blks_scanned{job=\"$job\", instance=\"$instance\", database_name=~\"$database\"}",
+              "refId": "A",
+              "legendFormat": "scanned {{datname}}.{{relid}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_stat_progress_analyze_sample_blks_total{job=\"$job\", instance=\"$instance\", database_name=~\"$database\"}",
+              "refId": "B",
+              "legendFormat": "total {{datname}}.{{relid}}"
+            }
+          ],
+          "title": "Active ANALYZE Progress (sample blocks)",
+          "type": "timeseries"
+        }
+      ],
+      "title": "Vacuum Horizon Blockers & Progress (requires --collector.vacuum)",
+      "type": "row",
+      "description": "What is pinning the xmin horizon (backends, prepared transactions, replication slots) and live CREATE INDEX / ANALYZE progress."
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 169
       },
       "id": 102,
       "panels": [
@@ -4011,7 +5111,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 153
+            "y": 170
           },
           "id": 6,
           "options": {
@@ -4103,7 +5203,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 161
+            "y": 178
           },
           "id": 7,
           "options": {
@@ -4195,7 +5295,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 169
+            "y": 186
           },
           "id": 8,
           "options": {
@@ -4286,7 +5386,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 177
+            "y": 194
           },
           "id": 11,
           "options": {
@@ -4378,7 +5478,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 185
+            "y": 202
           },
           "id": 10,
           "options": {
@@ -4479,7 +5579,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 193
+            "y": 210
           },
           "id": 9,
           "options": {
@@ -4521,7 +5621,7 @@
             "h": 12,
             "w": 24,
             "x": 0,
-            "y": 201
+            "y": 218
           },
           "id": 10024,
           "options": {
@@ -4544,7 +5644,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 153
+        "y": 170
       },
       "id": 2122,
       "panels": [
@@ -4607,7 +5707,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 154
+            "y": 171
           },
           "id": 2123,
           "options": {
@@ -4699,7 +5799,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 162
+            "y": 179
           },
           "id": 2124,
           "options": {
@@ -4791,7 +5891,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 170
+            "y": 187
           },
           "id": 2125,
           "options": {
@@ -4882,7 +5982,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 178
+            "y": 195
           },
           "id": 2126,
           "options": {
@@ -4974,7 +6074,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 186
+            "y": 203
           },
           "id": 2127,
           "options": {
@@ -5075,7 +6175,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 194
+            "y": 211
           },
           "id": 2128,
           "options": {
@@ -5119,7 +6219,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 154
+        "y": 171
       },
       "id": 103,
       "panels": [
@@ -5219,7 +6319,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 155
+            "y": 172
           },
           "id": 25,
           "options": {
@@ -5320,7 +6420,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 163
+            "y": 180
           },
           "id": 12,
           "options": {
@@ -5412,7 +6512,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 163
+            "y": 180
           },
           "id": 13,
           "options": {
@@ -5513,7 +6613,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 171
+            "y": 188
           },
           "id": 14,
           "options": {
@@ -5605,7 +6705,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 171
+            "y": 188
           },
           "id": 15,
           "options": {
@@ -5715,7 +6815,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 179
+            "y": 196
           },
           "id": 113,
           "options": {
@@ -5819,7 +6919,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 179
+            "y": 196
           },
           "id": 114,
           "options": {
@@ -5919,7 +7019,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 187
+            "y": 204
           },
           "id": 2115,
           "options": {
@@ -6011,7 +7111,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 187
+            "y": 204
           },
           "id": 2116,
           "options": {
@@ -6103,7 +7203,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 187
+            "y": 204
           },
           "id": 117,
           "options": {
@@ -6165,7 +7265,7 @@
             "h": 4,
             "w": 8,
             "x": 0,
-            "y": 195
+            "y": 212
           },
           "id": 118,
           "options": {
@@ -6226,7 +7326,7 @@
             "h": 4,
             "w": 8,
             "x": 8,
-            "y": 195
+            "y": 212
           },
           "id": 119,
           "options": {
@@ -6287,7 +7387,7 @@
             "h": 4,
             "w": 8,
             "x": 16,
-            "y": 195
+            "y": 212
           },
           "id": 120,
           "options": {
@@ -6330,7 +7430,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 155
+        "y": 172
       },
       "id": 104,
       "panels": [
@@ -6393,7 +7493,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 156
+            "y": 173
           },
           "id": 16,
           "options": {
@@ -6483,7 +7583,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 164,
+            "y": 181,
             "w": 12,
             "h": 8
           },
@@ -6562,7 +7662,7 @@
           },
           "gridPos": {
             "x": 12,
-            "y": 164,
+            "y": 181,
             "w": 6,
             "h": 8
           },
@@ -6631,7 +7731,7 @@
           },
           "gridPos": {
             "x": 18,
-            "y": 164,
+            "y": 181,
             "w": 6,
             "h": 8
           },
@@ -6722,7 +7822,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 172,
+            "y": 189,
             "w": 24,
             "h": 8
           },
@@ -6768,7 +7868,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 156
+        "y": 173
       },
       "id": 106,
       "panels": [
@@ -6808,7 +7908,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 157
+            "y": 174
           },
           "id": 130,
           "options": {
@@ -6859,7 +7959,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 157
+            "y": 174
           },
           "id": 131,
           "options": {
@@ -6908,7 +8008,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 165
+            "y": 182
           },
           "id": 2120,
           "options": {
@@ -6929,6 +8029,295 @@
           ],
           "title": "Max Replication Lag Bytes",
           "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Rate at which logical decoding is spilling in-progress transaction data to disk (pg_stat_replication_slots.spill_bytes) because a transaction exceeded logical_decoding_work_mem before it could be streamed. 0 is ideal. Sustained spilling (yellow) means a subscriber is decoding large or long transactions and paying extra disk I/O and CPU - a common cause of logical replication lag. To reduce it: raise logical_decoding_work_mem, break up large transactions, or enable streaming of in-progress transactions (PG14+). Broken down per slot_name so you can see which subscription is responsible.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 1
+                  }
+                ]
+              },
+              "unit": "Bps"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 190
+          },
+          "id": 780001,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "rate(pg_stat_replication_slots_spill_bytes_total{job=\"$job\", instance=\"$instance\"}[5m])",
+              "refId": "A",
+              "legendFormat": "{{slot_name}}"
+            }
+          ],
+          "title": "Logical Slot Spill to Disk (bytes/s)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Rate at which logical decoding streamed in-progress (not-yet-committed) transaction data straight to the subscriber (pg_stat_replication_slots.stream_bytes), a PG14+ optimization that avoids spilling large transactions to disk. Seeing streaming instead of spilling (see 'Logical Slot Spill to Disk') is the healthier outcome for big transactions. This is informational: high values simply mean large transactions are being replicated efficiently rather than hitting disk. Per slot_name.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "Bps"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 190
+          },
+          "id": 780002,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "rate(pg_stat_replication_slots_stream_bytes_total{job=\"$job\", instance=\"$instance\"}[5m])",
+              "refId": "A",
+              "legendFormat": "{{slot_name}}"
+            }
+          ],
+          "title": "Logical Slot Streamed to Subscriber (bytes/s)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Rate of transactions that logical decoding had to spill to disk vs. stream to the subscriber (pg_stat_replication_slots.spill_txns / stream_txns). Rising spill_txns is the warning sign - each spilled transaction was too big for logical_decoding_work_mem and hit disk, slowing replication; stream_txns rising instead is the efficient PG14+ path. If spill dominates, raise logical_decoding_work_mem or reduce transaction size. Pairs with the bytes/s panels to the left. Per slot_name.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 198
+          },
+          "id": 780003,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "rate(pg_stat_replication_slots_spill_txns_total{job=\"$job\", instance=\"$instance\"}[5m])",
+              "refId": "A",
+              "legendFormat": "spill {{slot_name}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "rate(pg_stat_replication_slots_stream_txns_total{job=\"$job\", instance=\"$instance\"}[5m])",
+              "refId": "B",
+              "legendFormat": "stream {{slot_name}}"
+            }
+          ],
+          "title": "Logical Slot Spill / Stream Transactions (rate)",
+          "type": "timeseries"
         }
       ],
       "title": "Replication (requires --collector.replication)",
@@ -6941,7 +8330,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 157
+        "y": 174
       },
       "id": 107,
       "panels": [
@@ -7004,7 +8393,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 158
+            "y": 175
           },
           "id": 21,
           "options": {
@@ -7112,7 +8501,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 166,
+            "y": 183,
             "w": 12,
             "h": 8
           },
@@ -7204,7 +8593,7 @@
           },
           "gridPos": {
             "x": 12,
-            "y": 166,
+            "y": 183,
             "w": 12,
             "h": 8
           },
@@ -7296,7 +8685,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 174,
+            "y": 191,
             "w": 24,
             "h": 8
           },
@@ -7344,7 +8733,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 182
+            "y": 199
           },
           "targets": [
             {
@@ -7393,7 +8782,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 182
+            "y": 199
           },
           "targets": [
             {
@@ -7445,7 +8834,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 158
+        "y": 175
       },
       "id": 108,
       "panels": [
@@ -7508,7 +8897,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 159
+            "y": 176
           },
           "id": 22,
           "options": {
@@ -7599,7 +8988,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 159
+            "y": 176
           },
           "id": 23,
           "options": {
@@ -7643,7 +9032,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 159
+        "y": 176
       },
       "id": 110,
       "panels": [
@@ -7706,7 +9095,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 160
+            "y": 177
           },
           "id": 2138,
           "options": {
@@ -7798,7 +9187,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 160
+            "y": 177
           },
           "id": 112,
           "options": {
@@ -7843,7 +9232,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 168
+            "y": 185
           },
           "targets": [
             {
@@ -7892,7 +9281,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 168
+            "y": 185
           },
           "targets": [
             {
@@ -7944,7 +9333,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 160
+        "y": 177
       },
       "id": 1000,
       "panels": [
@@ -7996,7 +9385,7 @@
             "h": 2,
             "w": 6,
             "x": 0,
-            "y": 161
+            "y": 178
           },
           "id": 1001,
           "options": {
@@ -8070,7 +9459,7 @@
             "h": 2,
             "w": 6,
             "x": 6,
-            "y": 161
+            "y": 178
           },
           "id": 1002,
           "options": {
@@ -8133,7 +9522,7 @@
             "h": 2,
             "w": 6,
             "x": 12,
-            "y": 161
+            "y": 178
           },
           "id": 1003,
           "options": {
@@ -8183,7 +9572,7 @@
             "h": 2,
             "w": 6,
             "x": 18,
-            "y": 161
+            "y": 178
           },
           "id": 1004,
           "options": {
@@ -8266,7 +9655,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 163
+            "y": 180
           },
           "id": 1005,
           "options": {
@@ -8351,7 +9740,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 163
+            "y": 180
           },
           "id": 1006,
           "options": {
@@ -8446,7 +9835,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 171
+            "y": 188
           },
           "id": 1007,
           "options": {
@@ -8533,7 +9922,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 171
+            "y": 188
           },
           "id": 1008,
           "options": {
@@ -8580,7 +9969,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 161
+        "y": 178
       },
       "id": 2320,
       "panels": [
@@ -8641,7 +10030,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 162,
+            "y": 179,
             "w": 18,
             "h": 8
           },
@@ -8711,7 +10100,7 @@
           },
           "gridPos": {
             "x": 18,
-            "y": 162,
+            "y": 179,
             "w": 6,
             "h": 8
           },
@@ -8755,7 +10144,1975 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 162
+        "y": 179
+      },
+      "id": 2400,
+      "title": "I/O by backend type \u2014 requires --collector.stat_io",
+      "type": "row",
+      "description": "Cluster-wide backend I/O from pg_stat_io (PostgreSQL 16+), broken down by backend_type, object and context. Surfaces shared_buffers pressure (evictions), cache effectiveness (hits vs reads) and storage latency (read/write/fsync time) directly from inside PostgreSQL \u2014 no host access needed, so it works on managed services (RDS/Aurora). REQUIRES --collector.stat_io; latency panels also require track_io_timing = on.",
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Cluster-wide rate of buffer evictions (pg_stat_io.evictions): pages pushed out of shared_buffers to make room for new reads. This is the most direct signal of shared_buffers pressure. Low/green is healthy; climbing into yellow/orange/red means the working set no longer fits in shared_buffers and PostgreSQL is churning the cache - expect more disk reads, a lower cache hit ratio, and higher query latency. If sustained high: consider increasing shared_buffers, or find what is scanning large amounts of data (sequential scans, big reporting queries). Especially valuable on managed services (RDS/Aurora) where you cannot see host-level I/O. Requires --collector.stat_io (PG16+).",
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 100
+                  },
+                  {
+                    "color": "orange",
+                    "value": 1000
+                  },
+                  {
+                    "color": "red",
+                    "value": 10000
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              },
+              "unit": "ops"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 0,
+            "y": 180
+          },
+          "id": 2401,
+          "options": {
+            "reduceOptions": {
+              "values": false,
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": ""
+            },
+            "orientation": "auto",
+            "textMode": "value",
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto"
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum(rate(pg_stat_io_evictions_total{job=\"$job\", instance=\"$instance\"}[5m]))",
+              "legendFormat": "Eviction Rate",
+              "refId": "A"
+            }
+          ],
+          "title": "Eviction Rate",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Fraction of block requests served from shared_buffers instead of disk (hits / (hits + reads)), derived from pg_stat_io. Green (over 99%) is the goal for OLTP workloads. Dropping into yellow/red means queries go to disk (or the OS page cache) far more often, usually because shared_buffers is too small for the working set or a large scan is evicting hot pages (see 'Eviction Rate'). A persistent low ratio correlates directly with higher latency. Note: reads counted here may still be served by the OS cache, so this is PostgreSQL's buffer-cache view, not necessarily physical disk. PG16+.",
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 0.9
+                  },
+                  {
+                    "color": "green",
+                    "value": 0.99
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              },
+              "unit": "percentunit"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 6,
+            "y": 180
+          },
+          "id": 2402,
+          "options": {
+            "reduceOptions": {
+              "values": false,
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": ""
+            },
+            "orientation": "auto",
+            "textMode": "value",
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto"
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum(rate(pg_stat_io_hits_total{job=\"$job\", instance=\"$instance\"}[5m])) / clamp_min(sum(rate(pg_stat_io_hits_total{job=\"$job\", instance=\"$instance\"}[5m])) + sum(rate(pg_stat_io_reads_total{job=\"$job\", instance=\"$instance\"}[5m])), 1)",
+              "legendFormat": "Buffer Cache Hit Ratio",
+              "refId": "A"
+            }
+          ],
+          "title": "Buffer Cache Hit Ratio",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Cluster-wide bytes/sec read by PostgreSQL (pg_stat_io read_bytes) across all backend types and contexts. Use it to size real read demand and to correlate latency spikes with read bursts (e.g. a big analytical query or a cache-cold period after restart). High sustained reads alongside a falling cache hit ratio and rising evictions indicate memory pressure rather than just a busy-but-cached workload. Great for managed databases with no host access. PG16+.",
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "green"
+              },
+              "unit": "Bps"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 12,
+            "y": 180
+          },
+          "id": 2403,
+          "options": {
+            "reduceOptions": {
+              "values": false,
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": ""
+            },
+            "orientation": "auto",
+            "textMode": "value",
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto"
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum(rate(pg_stat_io_read_bytes_total{job=\"$job\", instance=\"$instance\"}[5m]))",
+              "legendFormat": "Read Throughput",
+              "refId": "A"
+            }
+          ],
+          "title": "Read Throughput",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Cluster-wide bytes/sec written by PostgreSQL (pg_stat_io write_bytes) across backend types - checkpointer, background writer, and regular backends. Sustained high writes from 'client backend' (rather than checkpointer/bgwriter) can mean backends are forced to flush dirty buffers themselves under pressure, which hurts query latency; ideally most writes come from the checkpointer and background writer. Correlate with 'Write & Extend Throughput by Backend Type' to see who is writing. PG16+.",
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "green"
+              },
+              "unit": "Bps"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 18,
+            "y": 180
+          },
+          "id": 2404,
+          "options": {
+            "reduceOptions": {
+              "values": false,
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": ""
+            },
+            "orientation": "auto",
+            "textMode": "value",
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto"
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum(rate(pg_stat_io_write_bytes_total{job=\"$job\", instance=\"$instance\"}[5m]))",
+              "legendFormat": "Write Throughput",
+              "refId": "A"
+            }
+          ],
+          "title": "Write Throughput",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Buffer eviction rate broken down by backend_type (client backend, autovacuum, background writer, checkpointer, etc.). Tells you WHO is causing shared_buffers churn. Evictions dominated by 'client backend' are the concerning case - regular queries are fighting over the cache and evicting each other's pages. Heavy autovacuum evictions usually indicate large vacuum/analyze passes. Use with the aggregate 'Eviction Rate' KPI to attribute cache pressure to a workload. PG16+.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "ops"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 184
+          },
+          "id": 2405,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "mean"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum(rate(pg_stat_io_evictions_total{job=\"$job\", instance=\"$instance\"}[5m])) by (backend_type)",
+              "legendFormat": "{{backend_type}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Buffer Evictions by Backend Type",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Buffer eviction rate broken down by IO context: 'normal' (regular shared_buffers activity), 'bulkread' (large sequential scans using a ring buffer), 'bulkwrite' (COPY / CREATE TABLE AS), and 'vacuum'. High evictions in the 'normal' context signal a genuine shared_buffers shortage; high 'bulkread'/'bulkwrite' evictions are expected during big scans or bulk loads and are less alarming because they use small ring buffers by design. This split helps you decide whether to tune shared_buffers or just accept a transient bulk operation. PG16+.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "ops"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 184
+          },
+          "id": 2406,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "mean"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum(rate(pg_stat_io_evictions_total{job=\"$job\", instance=\"$instance\"}[5m])) by (context)",
+              "legendFormat": "{{context}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Buffer Evictions by Context",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Buffer cache hit ratio split by backend_type. Lets you see whether a specific class of work is cache-starved - for example a low ratio for 'client backend' points at user queries missing cache, while a low ratio for 'autovacuum worker' just reflects vacuum scanning cold pages (normal). Focus on the client-backend line for user-facing latency. Compare against the aggregate 'Buffer Cache Hit Ratio' KPI. PG16+.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "percentunit"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 192
+          },
+          "id": 2407,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "mean"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum(rate(pg_stat_io_hits_total{job=\"$job\", instance=\"$instance\"}[5m])) by (backend_type) / clamp_min(sum(rate(pg_stat_io_hits_total{job=\"$job\", instance=\"$instance\"}[5m])) by (backend_type) + sum(rate(pg_stat_io_reads_total{job=\"$job\", instance=\"$instance\"}[5m])) by (backend_type), 1)",
+              "legendFormat": "{{backend_type}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Cache Hit Ratio by Backend Type",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Absolute rates of buffer cache hits vs. disk reads (pg_stat_io hits and reads), side by side. Unlike the ratio panels, this shows magnitude: a 98% hit ratio can still mean a lot of disk reads if total volume is huge. A rising 'reads' line is what drives I/O load and latency. Spikes here that line up with query slowdowns confirm the issue is cache misses / physical I/O rather than CPU or locking. PG16+.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "ops"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 192
+          },
+          "id": 2408,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "mean"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum(rate(pg_stat_io_hits_total{job=\"$job\", instance=\"$instance\"}[5m]))",
+              "legendFormat": "hits (cache)",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum(rate(pg_stat_io_reads_total{job=\"$job\", instance=\"$instance\"}[5m]))",
+              "legendFormat": "reads (disk)",
+              "refId": "B"
+            }
+          ],
+          "title": "Cache Hits vs Disk Reads",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Read bytes/sec split by backend_type. Attributes read I/O to its source: 'client backend' (user queries), 'autovacuum worker' (vacuum/analyze), background writer / checkpointer, or parallel workers. A read-heavy autovacuum is expected and usually fine; sustained heavy reads from client backends indicate the working set does not fit in cache. Use this to decide whether high 'Read Throughput' is user load or maintenance. PG16+.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "Bps"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 200
+          },
+          "id": 2409,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "mean"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum(rate(pg_stat_io_read_bytes_total{job=\"$job\", instance=\"$instance\"}[5m])) by (backend_type)",
+              "legendFormat": "{{backend_type}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Read Throughput by Backend Type",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Write and relation-extend bytes/sec by backend_type. 'extend' is space added to grow tables/indexes (inserts, bulk loads). Ideally most plain writes come from checkpointer / background writer; large write volume from 'client backend' means backends are flushing dirty pages under pressure, which slows queries - a hint to tune checkpoint settings or shared_buffers. Heavy 'extend' by client backends is normal during ingestion / bulk load. PG16+.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "Bps"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 200
+          },
+          "id": 2410,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "mean"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum(rate(pg_stat_io_write_bytes_total{job=\"$job\", instance=\"$instance\"}[5m])) by (backend_type)",
+              "legendFormat": "{{backend_type}} - write",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum(rate(pg_stat_io_extend_bytes_total{job=\"$job\", instance=\"$instance\"}[5m])) by (backend_type)",
+              "legendFormat": "{{backend_type}} - extend",
+              "refId": "B"
+            }
+          ],
+          "title": "Write & Extend Throughput by Backend Type",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Average time per read operation by backend_type (read_time / reads). This is storage read latency measured from inside PostgreSQL - invaluable on managed services where you have no host iostat. Requires track_io_timing = on (otherwise this is empty/zero). Rising latency, especially for 'client backend', directly explains slow queries and usually points at the storage layer (saturated disk/EBS, noisy neighbor, throttled IOPS). Compare backend types to separate user-facing slowness from maintenance I/O. PG16+.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 208
+          },
+          "id": 2411,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "mean"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum(rate(pg_stat_io_read_time_seconds_total{job=\"$job\", instance=\"$instance\"}[5m])) by (backend_type) / clamp_min(sum(rate(pg_stat_io_reads_total{job=\"$job\", instance=\"$instance\"}[5m])) by (backend_type), 1)",
+              "legendFormat": "{{backend_type}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Average Read Latency by Backend Type",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Average time per write and per fsync operation (write_time / writes, fsync_time / fsyncs). fsync latency is a sensitive indicator of storage durability cost - if it climbs, checkpoints and commits slow down and latency spikes cluster-wide. Requires track_io_timing = on. High fsync latency often means the underlying storage is saturated or its write cache is disabled/flushing; high write latency points at general disk pressure. Especially useful on RDS/Aurora with no host access. PG16+.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 208
+          },
+          "id": 2412,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "mean"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum(rate(pg_stat_io_write_time_seconds_total{job=\"$job\", instance=\"$instance\"}[5m])) / clamp_min(sum(rate(pg_stat_io_writes_total{job=\"$job\", instance=\"$instance\"}[5m])), 1)",
+              "legendFormat": "avg write",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum(rate(pg_stat_io_fsync_time_seconds_total{job=\"$job\", instance=\"$instance\"}[5m])) / clamp_min(sum(rate(pg_stat_io_fsyncs_total{job=\"$job\", instance=\"$instance\"}[5m])), 1)",
+              "legendFormat": "avg fsync",
+              "refId": "B"
+            }
+          ],
+          "title": "Average Write & Fsync Latency",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Rate of buffer 'reuses' by IO context (pg_stat_io.reuses). Reuses happen when an operation using a ring buffer (large sequential scans = 'bulkread', COPY = 'bulkwrite', 'vacuum') recycles a buffer within its private ring instead of evicting from the main pool - this is by design and PROTECTS shared_buffers from being blown out by one big scan. So high reuses during bulk operations are a good sign (the ring buffer is doing its job), not a problem. Mainly informational context for the eviction panels. PG16+.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "ops"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 216
+          },
+          "id": 2413,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "mean"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum(rate(pg_stat_io_reuses_total{job=\"$job\", instance=\"$instance\"}[5m])) by (context)",
+              "legendFormat": "{{context}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Buffer Reuses by Context",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Rate of writebacks and fsyncs by backend_type (pg_stat_io.writebacks / fsyncs). Writebacks are hints to the OS to flush dirty pages to disk; fsyncs force durability. These are normal checkpoint / background-writer activity. A surge in fsyncs from 'client backend' suggests backends are doing their own durability work under pressure (often paired with high write throughput and latency). Use alongside 'Average Write & Fsync Latency' to judge whether the storage is keeping up. PG16+.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "ops"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 216
+          },
+          "id": 2414,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "mean"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum(rate(pg_stat_io_writebacks_total{job=\"$job\", instance=\"$instance\"}[5m])) by (backend_type)",
+              "legendFormat": "{{backend_type}} - writebacks",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum(rate(pg_stat_io_fsyncs_total{job=\"$job\", instance=\"$instance\"}[5m])) by (backend_type)",
+              "legendFormat": "{{backend_type}} - fsyncs",
+              "refId": "B"
+            }
+          ],
+          "title": "Writebacks & Fsyncs",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "A right-now snapshot (bar gauge) of eviction rate broken down by both backend_type and context together, so you can instantly spot the single biggest source of shared_buffers churn - for example 'client backend / normal' glowing red means user queries are thrashing the cache and you should look at shared_buffers or a heavy scan, whereas 'autovacuum worker / vacuum' is expected background work. Green is quiet; yellow/orange/red mark escalating pressure. The most actionable at-a-glance view of the eviction time series above. PG16+.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "min": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 100
+                  },
+                  {
+                    "color": "orange",
+                    "value": 1000
+                  },
+                  {
+                    "color": "red",
+                    "value": 10000
+                  }
+                ]
+              },
+              "unit": "ops"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 224
+          },
+          "id": 2415,
+          "options": {
+            "displayMode": "gradient",
+            "minVizWidth": 0,
+            "minVizHeight": 10,
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "values": false,
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": ""
+            },
+            "showUnfilled": true,
+            "text": {
+              "valueSize": 14
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum(rate(pg_stat_io_evictions_total{job=\"$job\", instance=\"$instance\"}[5m])) by (backend_type, context)",
+              "legendFormat": "{{backend_type}} / {{context}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Current Eviction Rate by Backend Type / Context",
+          "type": "bargauge"
+        }
+      ]
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 180
+      },
+      "id": 780014,
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "The top 20 sequences by how much of their range they have consumed (last_value / max_value), across all monitored databases. Only sequences at or above --sequences.min-ratio (default 0.5) are exported, so a healthy young database shows nothing here - that is good. Each series is one sequence: green (under 70%) = fine, yellow (70-90%) = plan a migration, red (90% or more) = act now, the backing column is close to overflowing and INSERTs will start failing cluster-wide with 'nextval: reached maximum value of sequence'. The usual fix for an int4 (max about 2.1 billion) or int2 sequence is to migrate the owning column to bigint. Use the schemaname/sequencename/datname labels to find exactly which one to fix.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 0.7
+                  },
+                  {
+                    "color": "red",
+                    "value": 0.9
+                  }
+                ]
+              },
+              "unit": "percentunit"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 18,
+            "x": 0,
+            "y": 1
+          },
+          "id": 780015,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "topk(20, pg_sequence_used_ratio{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
+              "refId": "A",
+              "legendFormat": "{{datname}}.{{schemaname}}.{{sequencename}}"
+            }
+          ],
+          "title": "Sequences by % Consumed",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "The single fullest sequence in the cluster, as a fraction of its maximum value (last_value / max_value). At 100% the next INSERT that calls nextval() on it fails with 'nextval: reached maximum value of sequence' and writes to that table stop. Green (< 70%) = healthy; yellow (70-90%) = start planning; red (>= 90%) = migrate the backing column to a wider type (e.g. int4 -> bigint) now. Only sequences at or above --sequences.min-ratio (default 0.5) are exported, so an empty or low panel means nothing is near exhaustion, which is good.",
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 0.7
+                  },
+                  {
+                    "color": "red",
+                    "value": 0.9
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              },
+              "unit": "percentunit"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 18,
+            "y": 1
+          },
+          "id": 780016,
+          "options": {
+            "reduceOptions": {
+              "values": false,
+              "fields": "",
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "orientation": "auto",
+            "textMode": "value",
+            "colorMode": "value",
+            "graphMode": "none"
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "max(pg_sequence_used_ratio{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
+              "refId": "A"
+            }
+          ],
+          "title": "Max Sequence % Consumed",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "How many sequences have already consumed >= 90% of their range. Each one is close to hard-failing every INSERT that calls nextval() on it (cluster-wide 'reached maximum value of sequence' errors). 0 (green) = nothing critical; >= 1 (red) = act now: find the sequence in the 'Sequences by % Consumed' table to the left and either widen its column (int4 -> bigint) or, if it is safe to do so, reset it. This is the actionable companion to 'Max Sequence % Consumed'.",
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 18,
+            "y": 5
+          },
+          "id": 780017,
+          "options": {
+            "reduceOptions": {
+              "values": false,
+              "fields": "",
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "orientation": "auto",
+            "textMode": "value",
+            "colorMode": "value",
+            "graphMode": "none"
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "count(pg_sequence_used_ratio{job=\"$job\", instance=\"$instance\", datname=~\"$database\"} >= 0.9) or vector(0)",
+              "refId": "A"
+            }
+          ],
+          "title": "Sequences \u2265 90% Consumed",
+          "type": "stat"
+        }
+      ],
+      "title": "Sequence Exhaustion (requires --collector.sequences)",
+      "type": "row",
+      "description": "Sequences approaching their maximum value. Only sequences at or above --sequences.min-ratio are exported."
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 181
+      },
+      "id": 780018,
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "In-memory hit ratio for each SLRU cache (subtransaction, multixact, commit-log/CLOG, etc.) from pg_stat_slru. These are small fixed-size caches that track transaction bookkeeping. Green (over 99%) is normal. A ratio dropping into yellow/red - especially for the 'subtrans' or 'multixact' caches - means PostgreSQL is repeatedly reading SLRU pages from disk, the classic signature of a subtransaction/savepoint storm (deeply nested SAVEPOINTs, ORMs, or SELECT ... FOR UPDATE with many savepoints) or heavy multixact row-locking. That causes sudden cluster-wide slowdowns that are near-impossible to diagnose without this panel. If it drops, check 'SLRU Disk Reads by Cache' to see which cache, and reduce savepoint/subtransaction usage.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 0.9
+                  },
+                  {
+                    "color": "green",
+                    "value": 0.99
+                  }
+                ]
+              },
+              "unit": "percentunit"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 1
+          },
+          "id": 780019,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "rate(pg_stat_slru_blks_hit_total{job=\"$job\", instance=\"$instance\"}[5m]) / clamp_min(rate(pg_stat_slru_blks_hit_total{job=\"$job\", instance=\"$instance\"}[5m]) + rate(pg_stat_slru_blks_read_total{job=\"$job\", instance=\"$instance\"}[5m]), 1)",
+              "refId": "A",
+              "legendFormat": "{{name}}"
+            }
+          ],
+          "title": "SLRU Cache Hit Ratio by Cache",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Rate of SLRU pages read from disk per cache (pg_stat_slru.blks_read). 0 or near-0 is healthy - it means the SLRU bookkeeping caches are serving from memory. A sustained spike on the 'subtrans' cache is the smoking gun for a subtransaction/savepoint storm; a spike on 'multixact' points to heavy shared row locking (many sessions locking the same rows via FOR SHARE / FOR UPDATE plus savepoints). Either can stall the whole cluster while every backend waits on SLRU I/O. Correlate the spiking cache name here with application behavior (nested transactions, ORM savepoints) and the 'SLRU Cache Hit Ratio' panel.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 1
+          },
+          "id": 780020,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "rate(pg_stat_slru_blks_read_total{job=\"$job\", instance=\"$instance\"}[5m])",
+              "refId": "A",
+              "legendFormat": "{{name}}"
+            }
+          ],
+          "title": "SLRU Disk Reads by Cache (rate)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Rate of SLRU buffer writes and flushes per cache (pg_stat_slru.blks_written / flushes). This is normal background activity as transaction and multixact state is persisted. Watch for large sustained increases that track with 'SLRU Disk Reads' - together they indicate SLRU pressure (subtransaction or multixact churn) rather than a quiet, memory-resident workload. Mostly a supporting signal; the hit-ratio and disk-read panels are the primary alerts.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 9
+          },
+          "id": 780021,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "rate(pg_stat_slru_blks_written_total{job=\"$job\", instance=\"$instance\"}[5m])",
+              "refId": "A",
+              "legendFormat": "written {{name}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "rate(pg_stat_slru_flushes_total{job=\"$job\", instance=\"$instance\"}[5m])",
+              "refId": "B",
+              "legendFormat": "flushes {{name}}"
+            }
+          ],
+          "title": "SLRU Writes & Flushes (rate)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Rate of SLRU segment truncations and newly zeroed pages per cache (pg_stat_slru.truncates / blks_zeroed). Truncates happen as old transaction state ages out (e.g. after VACUUM advances horizons); blks_zeroed counts fresh SLRU pages being initialized as transaction IDs / multixacts are consumed. Steady low values are normal. A rising blks_zeroed rate on 'multixact' or 'subtrans' signals rapid consumption of those ID spaces - another angle on subtransaction/multixact storms. Supporting detail for the hit-ratio and disk-read panels.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 9
+          },
+          "id": 780022,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "rate(pg_stat_slru_truncates_total{job=\"$job\", instance=\"$instance\"}[5m])",
+              "refId": "A",
+              "legendFormat": "truncates {{name}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "rate(pg_stat_slru_blks_zeroed_total{job=\"$job\", instance=\"$instance\"}[5m])",
+              "refId": "B",
+              "legendFormat": "zeroed {{name}}"
+            }
+          ],
+          "title": "SLRU Truncates & Zeroed (rate)",
+          "type": "timeseries"
+        }
+      ],
+      "title": "SLRU Cache (requires --collector.slru)",
+      "type": "row",
+      "description": "PostgreSQL SLRU cache efficiency per cache area (PG >= 13)."
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 182
       },
       "id": 200,
       "panels": [
@@ -8839,7 +12196,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 163
+            "y": 183
           },
           "id": 201,
           "options": {
@@ -8945,7 +12302,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 163
+            "y": 183
           },
           "id": 202,
           "options": {
@@ -9055,7 +12412,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 163
+            "y": 183
           },
           "id": 2004,
           "options": {
@@ -9140,7 +12497,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 171
+            "y": 191
           },
           "id": 2003,
           "options": {
@@ -9236,7 +12593,7 @@
             "h": 12,
             "w": 12,
             "x": 12,
-            "y": 171
+            "y": 191
           },
           "id": 204,
           "options": {
@@ -9313,7 +12670,7 @@
             "h": 4,
             "w": 12,
             "x": 0,
-            "y": 183
+            "y": 203
           },
           "id": 1011,
           "options": {
@@ -9385,7 +12742,7 @@
             "h": 4,
             "w": 8,
             "x": 0,
-            "y": 187
+            "y": 207
           },
           "id": 203,
           "options": {
@@ -9445,7 +12802,7 @@
             "h": 4,
             "w": 8,
             "x": 8,
-            "y": 187
+            "y": 207
           },
           "id": 2001,
           "options": {
@@ -9504,7 +12861,7 @@
             "h": 4,
             "w": 8,
             "x": 16,
-            "y": 187
+            "y": 207
           },
           "id": 2002,
           "options": {

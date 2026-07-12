@@ -29,7 +29,14 @@ use tracing_futures::Instrument as _;
 /// - `pg_stat_database_blk_read_time`             {datid,datname} (ms)
 /// - `pg_stat_database_blk_write_time`            {datid,datname} (ms)
 /// - `pg_stat_database_stats_reset`               {datid,datname} (epoch seconds)
-/// - `pg_stat_database_active_time_seconds_total` {datid,datname} (only PG >= 14; seconds)
+/// - `pg_stat_database_active_time_seconds_total` {datid,datname} (only `PostgreSQL` >= 14; seconds)
+/// - `pg_stat_database_sessions_total`            {datid,datname} (only `PostgreSQL` >= 14)
+/// - `pg_stat_database_sessions_abandoned_total`  {datid,datname} (only `PostgreSQL` >= 14)
+/// - `pg_stat_database_sessions_fatal_total`      {datid,datname} (only `PostgreSQL` >= 14)
+/// - `pg_stat_database_sessions_killed_total`     {datid,datname} (only `PostgreSQL` >= 14)
+/// - `pg_stat_database_session_time_seconds_total` {datid,datname} (only `PostgreSQL` >= 14; seconds)
+/// - `pg_stat_database_checksum_failures_total`   {datid,datname} (only `PostgreSQL` >= 12)
+/// - `pg_stat_database_checksum_last_failure_timestamp_seconds` {datid,datname} (only `PostgreSQL` >= 12)
 ///
 /// **NEW - Cache Hit Ratio Metrics (Critical for Performance):**
 /// - `pg_stat_database_blks_hit_ratio` {datid,datname} - Buffer cache hit ratio (0.0-1.0)
@@ -81,7 +88,7 @@ use tracing_futures::Instrument as _;
 ///        tablename,
 ///        heap_blks_read,
 ///        heap_blks_hit,
-///        CASE 
+///        CASE
 ///            WHEN heap_blks_hit + heap_blks_read = 0 THEN NULL
 ///            ELSE heap_blks_hit::float / (heap_blks_hit + heap_blks_read)
 ///        END AS hit_ratio
@@ -146,6 +153,14 @@ pub struct DatabaseStatCollector {
     stats_reset: GaugeVec,
 
     active_time_seconds_total: GaugeVec, // PG >= 14
+    sessions_total: GaugeVec,            // PG >= 14
+    sessions_abandoned_total: GaugeVec,  // PG >= 14
+    sessions_fatal_total: GaugeVec,      // PG >= 14
+    sessions_killed_total: GaugeVec,     // PG >= 14
+    session_time_seconds_total: GaugeVec, // PG >= 14
+
+    checksum_failures_total: GaugeVec,                 // PG >= 12
+    checksum_last_failure_timestamp_seconds: GaugeVec, // PG >= 12
 
     // Cache hit ratio metric (NEW - critical performance indicator)
     // Measures buffer cache efficiency: blks_hit / (blks_hit + blks_read)
@@ -168,93 +183,95 @@ impl DatabaseStatCollector {
     #[must_use]
     #[allow(clippy::expect_used)]
     pub fn new() -> Self {
-        let numbackends = db_gauge(
-            "pg_stat_database_numbackends",
-            "Number of backends currently connected to this database.",
-        );
-        let xact_commit = db_gauge(
-            "pg_stat_database_xact_commit",
-            "Number of transactions committed.",
-        );
-        let xact_rollback = db_gauge(
-            "pg_stat_database_xact_rollback",
-            "Number of transactions rolled back.",
-        );
-        let blks_read =
-            db_gauge("pg_stat_database_blks_read", "Number of disk blocks read.");
-        let blks_hit = db_gauge(
-            "pg_stat_database_blks_hit",
-            "Number of buffer cache hits (PostgreSQL buffer cache).",
-        );
-        let tup_returned =
-            db_gauge("pg_stat_database_tup_returned", "Rows returned by queries.");
-        let tup_fetched =
-            db_gauge("pg_stat_database_tup_fetched", "Rows fetched by queries.");
-        let tup_inserted =
-            db_gauge("pg_stat_database_tup_inserted", "Rows inserted by queries.");
-        let tup_updated =
-            db_gauge("pg_stat_database_tup_updated", "Rows updated by queries.");
-        let tup_deleted =
-            db_gauge("pg_stat_database_tup_deleted", "Rows deleted by queries.");
-        let conflicts = db_gauge(
-            "pg_stat_database_conflicts",
-            "Queries canceled due to conflicts with recovery.",
-        );
-        let temp_files = db_gauge(
-            "pg_stat_database_temp_files",
-            "Number of temporary files created by queries.",
-        );
-        let temp_bytes = db_gauge(
-            "pg_stat_database_temp_bytes",
-            "Total data written to temporary files by queries.",
-        );
-        let deadlocks = db_gauge(
-            "pg_stat_database_deadlocks",
-            "Number of deadlocks detected in this database.",
-        );
-        let blk_read_time = db_gauge(
-            "pg_stat_database_blk_read_time",
-            "Time spent reading data file blocks (milliseconds).",
-        );
-        let blk_write_time = db_gauge(
-            "pg_stat_database_blk_write_time",
-            "Time spent writing data file blocks (milliseconds).",
-        );
-        let stats_reset = db_gauge(
-            "pg_stat_database_stats_reset",
-            "Time at which these statistics were last reset (epoch seconds).",
-        );
-        let active_time_seconds_total = db_gauge(
-            "pg_stat_database_active_time_seconds_total",
-            "Time spent executing SQL statements (seconds, PG >= 14).",
-        );
-        let blks_hit_ratio = db_gauge(
-            "pg_stat_database_blks_hit_ratio",
-            "Buffer cache hit ratio (0.0-1.0). Alert when < 0.90 (90%). \
-             Formula: blks_hit / (blks_hit + blks_read). \
-             >99% = excellent, 95-98% = good, 90-94% = warning, <90% = critical memory pressure.",
-        );
-
         Self {
-            numbackends,
-            xact_commit,
-            xact_rollback,
-            blks_read,
-            blks_hit,
-            tup_returned,
-            tup_fetched,
-            tup_inserted,
-            tup_updated,
-            tup_deleted,
-            conflicts,
-            temp_files,
-            temp_bytes,
-            deadlocks,
-            blk_read_time,
-            blk_write_time,
-            stats_reset,
-            active_time_seconds_total,
-            blks_hit_ratio,
+            numbackends: db_gauge(
+                "pg_stat_database_numbackends",
+                "Number of backends currently connected to this database.",
+            ),
+            xact_commit: db_gauge(
+                "pg_stat_database_xact_commit",
+                "Number of transactions committed.",
+            ),
+            xact_rollback: db_gauge(
+                "pg_stat_database_xact_rollback",
+                "Number of transactions rolled back.",
+            ),
+            blks_read: db_gauge("pg_stat_database_blks_read", "Number of disk blocks read."),
+            blks_hit: db_gauge(
+                "pg_stat_database_blks_hit",
+                "Number of buffer cache hits (PostgreSQL buffer cache).",
+            ),
+            tup_returned: db_gauge("pg_stat_database_tup_returned", "Rows returned by queries."),
+            tup_fetched: db_gauge("pg_stat_database_tup_fetched", "Rows fetched by queries."),
+            tup_inserted: db_gauge("pg_stat_database_tup_inserted", "Rows inserted by queries."),
+            tup_updated: db_gauge("pg_stat_database_tup_updated", "Rows updated by queries."),
+            tup_deleted: db_gauge("pg_stat_database_tup_deleted", "Rows deleted by queries."),
+            conflicts: db_gauge(
+                "pg_stat_database_conflicts",
+                "Queries canceled due to conflicts with recovery.",
+            ),
+            temp_files: db_gauge(
+                "pg_stat_database_temp_files",
+                "Number of temporary files created by queries.",
+            ),
+            temp_bytes: db_gauge(
+                "pg_stat_database_temp_bytes",
+                "Total data written to temporary files by queries.",
+            ),
+            deadlocks: db_gauge(
+                "pg_stat_database_deadlocks",
+                "Number of deadlocks detected in this database.",
+            ),
+            blk_read_time: db_gauge(
+                "pg_stat_database_blk_read_time",
+                "Time spent reading data file blocks (milliseconds).",
+            ),
+            blk_write_time: db_gauge(
+                "pg_stat_database_blk_write_time",
+                "Time spent writing data file blocks (milliseconds).",
+            ),
+            stats_reset: db_gauge(
+                "pg_stat_database_stats_reset",
+                "Time at which these statistics were last reset (epoch seconds).",
+            ),
+            active_time_seconds_total: db_gauge(
+                "pg_stat_database_active_time_seconds_total",
+                "Time spent executing SQL statements (seconds, PG >= 14).",
+            ),
+            sessions_total: db_gauge(
+                "pg_stat_database_sessions_total",
+                "Number of sessions established to this database (PG >= 14).",
+            ),
+            sessions_abandoned_total: db_gauge(
+                "pg_stat_database_sessions_abandoned_total",
+                "Number of sessions abandoned because connection to the client was lost (PG >= 14).",
+            ),
+            sessions_fatal_total: db_gauge(
+                "pg_stat_database_sessions_fatal_total",
+                "Number of sessions ended by fatal errors (PG >= 14).",
+            ),
+            sessions_killed_total: db_gauge(
+                "pg_stat_database_sessions_killed_total",
+                "Number of sessions ended by operator intervention (PG >= 14).",
+            ),
+            session_time_seconds_total: db_gauge(
+                "pg_stat_database_session_time_seconds_total",
+                "Time spent by database sessions (seconds, PG >= 14).",
+            ),
+            checksum_failures_total: db_gauge(
+                "pg_stat_database_checksum_failures_total",
+                "Number of data page checksum failures detected in this database (PG >= 12).",
+            ),
+            checksum_last_failure_timestamp_seconds: db_gauge(
+                "pg_stat_database_checksum_last_failure_timestamp_seconds",
+                "Time of the last data page checksum failure in this database (epoch seconds, PG >= 12).",
+            ),
+            blks_hit_ratio: db_gauge(
+                "pg_stat_database_blks_hit_ratio",
+                "Buffer cache hit ratio (0.0-1.0). Alert when < 0.90 (90%). \
+                 Formula: blks_hit / (blks_hit + blks_read). \
+                 >99% = excellent, 95-98% = good, 90-94% = warning, <90% = critical memory pressure.",
+            ),
         }
     }
 }
@@ -291,6 +308,15 @@ impl Collector for DatabaseStatCollector {
         registry.register(Box::new(self.blk_write_time.clone()))?;
         registry.register(Box::new(self.stats_reset.clone()))?;
         registry.register(Box::new(self.active_time_seconds_total.clone()))?;
+        registry.register(Box::new(self.sessions_total.clone()))?;
+        registry.register(Box::new(self.sessions_abandoned_total.clone()))?;
+        registry.register(Box::new(self.sessions_fatal_total.clone()))?;
+        registry.register(Box::new(self.sessions_killed_total.clone()))?;
+        registry.register(Box::new(self.session_time_seconds_total.clone()))?;
+        registry.register(Box::new(self.checksum_failures_total.clone()))?;
+        registry.register(Box::new(
+            self.checksum_last_failure_timestamp_seconds.clone(),
+        ))?;
         registry.register(Box::new(self.blks_hit_ratio.clone()))?;
         Ok(())
     }
@@ -303,6 +329,15 @@ impl Collector for DatabaseStatCollector {
     )]
     fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            // Version check for fields added to `pg_stat_database` in newer `PostgreSQL`.
+            let vrow = sqlx::query(r"SELECT current_setting('server_version_num')::int AS v")
+                .fetch_one(pool)
+                .await?;
+            let version_num: i32 = vrow.try_get("v")?;
+            let has_active_time = version_num >= 140_000;
+            let has_sessions = version_num >= 140_000;
+            let has_checksums = version_num >= 120_000;
+
             // 0) Reset all metrics to clear stale data (e.g. dropped databases)
             self.numbackends.reset();
             self.xact_commit.reset();
@@ -321,15 +356,21 @@ impl Collector for DatabaseStatCollector {
             self.blk_read_time.reset();
             self.blk_write_time.reset();
             self.stats_reset.reset();
-            self.active_time_seconds_total.reset();
+            if has_active_time {
+                self.active_time_seconds_total.reset();
+            }
+            if has_sessions {
+                self.sessions_total.reset();
+                self.sessions_abandoned_total.reset();
+                self.sessions_fatal_total.reset();
+                self.sessions_killed_total.reset();
+                self.session_time_seconds_total.reset();
+            }
+            if has_checksums {
+                self.checksum_failures_total.reset();
+                self.checksum_last_failure_timestamp_seconds.reset();
+            }
             self.blks_hit_ratio.reset();
-
-            // Version check for active_time (PG >= 14)
-            let vrow = sqlx::query(r"SELECT current_setting('server_version_num')::int AS v")
-                .fetch_one(pool)
-                .await?;
-            let version_num: i32 = vrow.try_get("v")?;
-            let has_active_time = version_num >= 140_000;
 
             // Columns per postgres_exporter
             let mut cols: Vec<String> = vec![
@@ -359,6 +400,23 @@ impl Collector for DatabaseStatCollector {
                 cols.push(format!(
                     "(active_time / {MS_TO_SEC})::double precision AS active_time_seconds"
                 ));
+            }
+            if has_sessions {
+                cols.push("sessions::bigint AS sessions".to_string());
+                cols.push("sessions_abandoned::bigint AS sessions_abandoned".to_string());
+                cols.push("sessions_fatal::bigint AS sessions_fatal".to_string());
+                cols.push("sessions_killed::bigint AS sessions_killed".to_string());
+                cols.push(format!(
+                    "(session_time::double precision / {MS_TO_SEC})::double precision AS session_time_seconds"
+                ));
+            }
+            if has_checksums {
+                cols.push("checksum_failures::bigint AS checksum_failures".to_string());
+                cols.push(
+                    "COALESCE(EXTRACT(EPOCH FROM checksum_last_failure), 0)::double precision \
+                     AS checksum_last_failure_timestamp_seconds"
+                        .to_string(),
+                );
             }
 
             // Apply exclusions server-side. If the list is empty, this is a no-op.
@@ -457,7 +515,7 @@ impl Collector for DatabaseStatCollector {
                 let blks_read = i64_to_f64(row.try_get::<i64, _>("blks_read").unwrap_or(0));
                 let blks_hit = i64_to_f64(row.try_get::<i64, _>("blks_hit").unwrap_or(0));
                 let total_blks = blks_hit + blks_read;
-                
+
                 let hit_ratio = if total_blks > 0.0 {
                     blks_hit / total_blks
                 } else {
@@ -483,6 +541,48 @@ impl Collector for DatabaseStatCollector {
                     self.active_time_seconds_total
                         .with_label_values(&labels)
                         .set(row.try_get::<f64, _>("active_time_seconds").unwrap_or(0.0));
+                }
+                if has_sessions {
+                    self.sessions_total
+                        .with_label_values(&labels)
+                        .set(i64_to_f64(
+                            row.try_get::<i64, _>("sessions").ok().unwrap_or(0),
+                        ));
+                    self.sessions_abandoned_total
+                        .with_label_values(&labels)
+                        .set(i64_to_f64(
+                            row.try_get::<i64, _>("sessions_abandoned")
+                                .ok()
+                                .unwrap_or(0),
+                        ));
+                    self.sessions_fatal_total
+                        .with_label_values(&labels)
+                        .set(i64_to_f64(
+                            row.try_get::<i64, _>("sessions_fatal").ok().unwrap_or(0),
+                        ));
+                    self.sessions_killed_total
+                        .with_label_values(&labels)
+                        .set(i64_to_f64(
+                            row.try_get::<i64, _>("sessions_killed").ok().unwrap_or(0),
+                        ));
+                    self.session_time_seconds_total
+                        .with_label_values(&labels)
+                        .set(row.try_get::<f64, _>("session_time_seconds").unwrap_or(0.0));
+                }
+                if has_checksums {
+                    self.checksum_failures_total
+                        .with_label_values(&labels)
+                        .set(i64_to_f64(
+                            row.try_get::<i64, _>("checksum_failures")
+                                .ok()
+                                .unwrap_or(0),
+                        ));
+                    self.checksum_last_failure_timestamp_seconds
+                        .with_label_values(&labels)
+                        .set(
+                            row.try_get::<f64, _>("checksum_last_failure_timestamp_seconds")
+                                .unwrap_or(0.0),
+                        );
                 }
 
                 debug!(%datid, %datname, "updated pg_stat_database metrics");

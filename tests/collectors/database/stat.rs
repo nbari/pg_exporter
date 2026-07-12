@@ -4,7 +4,79 @@ use pg_exporter::collectors::{
     Collector,
     database::{DatabaseCollector, stats::DatabaseStatCollector},
 };
-use prometheus::Registry;
+use prometheus::{Registry, proto::MetricFamily};
+use sqlx::{PgPool, Row};
+
+const PG14_DATABASE_SESSION_METRICS: [&str; 5] = [
+    "pg_stat_database_sessions_total",
+    "pg_stat_database_sessions_abandoned_total",
+    "pg_stat_database_sessions_fatal_total",
+    "pg_stat_database_sessions_killed_total",
+    "pg_stat_database_session_time_seconds_total",
+];
+
+const PG12_DATABASE_CHECKSUM_METRICS: [&str; 2] = [
+    "pg_stat_database_checksum_failures_total",
+    "pg_stat_database_checksum_last_failure_timestamp_seconds",
+];
+
+async fn server_version_num(pool: &PgPool) -> Result<i32> {
+    let row = sqlx::query("SELECT current_setting('server_version_num')::int AS v")
+        .fetch_one(pool)
+        .await?;
+    Ok(row.try_get::<i32, _>("v")?)
+}
+
+fn find_metric_family<'a>(
+    families: &'a [MetricFamily],
+    metric_name: &str,
+) -> Result<&'a MetricFamily> {
+    families
+        .iter()
+        .find(|family| family.name() == metric_name)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Metric {metric_name} should exist. Found: {:?}",
+                families
+                    .iter()
+                    .map(prometheus::proto::MetricFamily::name)
+                    .collect::<Vec<_>>()
+            )
+        })
+}
+
+fn assert_database_series_are_populated(family: &MetricFamily) {
+    assert!(
+        !family.get_metric().is_empty(),
+        "{} should have at least one database series",
+        family.name()
+    );
+
+    for metric in family.get_metric() {
+        let label_names: Vec<&str> = metric
+            .get_label()
+            .iter()
+            .map(prometheus::proto::LabelPair::name)
+            .collect();
+        assert!(
+            label_names.contains(&"datid"),
+            "{} should have the datid label",
+            family.name()
+        );
+        assert!(
+            label_names.contains(&"datname"),
+            "{} should have the datname label",
+            family.name()
+        );
+
+        let value = metric.get_gauge().value();
+        assert!(
+            value.is_finite() && value >= 0.0,
+            "{} should be finite and non-negative, got {value}",
+            family.name()
+        );
+    }
+}
 
 #[tokio::test]
 async fn test_database_stats_registers_without_error() -> Result<()> {
@@ -50,15 +122,21 @@ async fn test_database_stats_has_all_metrics_after_collection() -> Result<()> {
     ];
 
     for name in expected {
-        assert!(
-            families.iter().any(|m| m.name() == name),
-            "Metric {} should exist. Found: {:?}",
-            name,
-            families
-                .iter()
-                .map(prometheus::proto::MetricFamily::name)
-                .collect::<Vec<_>>()
-        );
+        find_metric_family(&families, name)?;
+    }
+
+    let version_num = server_version_num(&pool).await?;
+    if version_num >= 140_000 {
+        for name in PG14_DATABASE_SESSION_METRICS {
+            let family = find_metric_family(&families, name)?;
+            assert_database_series_are_populated(family);
+        }
+    }
+    if version_num >= 120_000 {
+        for name in PG12_DATABASE_CHECKSUM_METRICS {
+            let family = find_metric_family(&families, name)?;
+            assert_database_series_are_populated(family);
+        }
     }
 
     // Active time metric (present on PG >= 14)
@@ -75,6 +153,118 @@ async fn test_database_stats_has_all_metrics_after_collection() -> Result<()> {
             "active_time_seconds_total should have values when present"
         );
     }
+
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_database_stats_session_metrics_populate_on_pg14plus() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+    if server_version_num(&pool).await? < 140_000 {
+        pool.close().await;
+        return Ok(());
+    }
+
+    let collector = DatabaseStatCollector::new();
+    let registry = Registry::new();
+
+    collector.register_metrics(&registry)?;
+    collector.collect(&pool).await?;
+
+    let families = registry.gather();
+    for metric_name in PG14_DATABASE_SESSION_METRICS {
+        let family = find_metric_family(&families, metric_name)?;
+        assert_database_series_are_populated(family);
+    }
+
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_database_stats_checksum_metrics_populate_on_pg12plus() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+    if server_version_num(&pool).await? < 120_000 {
+        pool.close().await;
+        return Ok(());
+    }
+
+    let collector = DatabaseStatCollector::new();
+    let registry = Registry::new();
+
+    collector.register_metrics(&registry)?;
+    collector.collect(&pool).await?;
+
+    let families = registry.gather();
+    for metric_name in PG12_DATABASE_CHECKSUM_METRICS {
+        let family = find_metric_family(&families, metric_name)?;
+        assert_database_series_are_populated(family);
+    }
+
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_database_stats_null_checksum_last_failure_exports_zero() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+    if server_version_num(&pool).await? < 120_000 {
+        pool.close().await;
+        return Ok(());
+    }
+
+    let maybe_row = sqlx::query(
+        "SELECT datid::text AS datid, COALESCE(datname, '[unknown]') AS datname
+         FROM pg_stat_database
+         WHERE datname = current_database()
+           AND checksum_last_failure IS NULL
+         LIMIT 1",
+    )
+    .fetch_optional(&pool)
+    .await?;
+
+    let Some(row) = maybe_row else {
+        pool.close().await;
+        return Ok(());
+    };
+    let datid = row.try_get::<String, _>("datid")?;
+    let datname = row.try_get::<String, _>("datname")?;
+
+    let collector = DatabaseStatCollector::new();
+    let registry = Registry::new();
+
+    collector.register_metrics(&registry)?;
+    collector.collect(&pool).await?;
+
+    let families = registry.gather();
+    let family = find_metric_family(
+        &families,
+        "pg_stat_database_checksum_last_failure_timestamp_seconds",
+    )?;
+    let maybe_metric = family.get_metric().iter().find(|metric| {
+        let labels: Vec<_> = metric
+            .get_label()
+            .iter()
+            .map(|label| (label.name(), label.value()))
+            .collect();
+        labels
+            .iter()
+            .any(|(name, value)| *name == "datid" && *value == datid.as_str())
+            && labels
+                .iter()
+                .any(|(name, value)| *name == "datname" && *value == datname.as_str())
+    });
+
+    let Some(metric) = maybe_metric else {
+        anyhow::bail!(
+            "checksum last failure timestamp metric missing for database {datname} ({datid})"
+        );
+    };
+    assert!(
+        (metric.get_gauge().value() - 0.0).abs() < f64::EPSILON,
+        "NULL checksum_last_failure should export as 0"
+    );
 
     pool.close().await;
     Ok(())

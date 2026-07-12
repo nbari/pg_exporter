@@ -88,6 +88,26 @@ New or modified collectors should include:
 4. Type compatibility coverage
 5. Realistic workload coverage where applicable
 
+### Module layout (mandatory)
+
+Every collector is a **directory** under `src/collectors/<name>/`. `mod.rs` is only
+the **entry point / umbrella**: it declares the sub-module(s), holds the
+`<Name>Collector` that stores `subs: Vec<Arc<dyn Collector + Send + Sync>>`, and fans
+`register_metrics`/`collect` out to them. **Do not put metric definitions, SQL, or row
+parsing in `mod.rs`.** The real implementation lives in a sibling file named after the
+source view, whose struct is named after it:
+
+- `stat_io/mod.rs` (umbrella `StatIoCollector`) + `stat_io/pg_stat_io.rs` (`PgStatIoCollector`)
+- `statements/mod.rs` + `statements/pg_statements.rs` (`PgStatementsCollector`)
+- `stat/mod.rs` + `stat/user_tables.rs` (`StatUserTablesCollector`)
+- `index/mod.rs` + `index/stats.rs` + `index/unused.rs`
+
+This is enforced by `collector_mod_rs_is_a_thin_umbrella` in
+[tests/collector_safety.rs](tests/collector_safety.rs): a collector `mod.rs` that contains
+metric constructors (`IntGaugeVec::new`, `Opts::new`, `registry.register(Box::new(`,
+`.with_label_values(`, ...) or SQL (`sqlx::query`, `fetch_all(`, ...) fails the build.
+Add the implementation to the sibling file instead.
+
 If you modify files under `src/collectors/`:
 
 - Expect the pre-commit hook to check that local PostgreSQL is reachable on `localhost`.

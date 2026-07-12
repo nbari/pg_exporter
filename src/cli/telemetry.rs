@@ -122,7 +122,7 @@ fn init_tracer() -> Result<Tracer> {
     let exporter = builder.build()?;
 
     // Generate or take service.instance.id
-    let instance_id = var("OTEL_SERVICE_INSTANCE_ID").unwrap_or_else(|_| Ulid::new().to_string());
+    let instance_id = var("OTEL_SERVICE_INSTANCE_ID").unwrap_or_else(|_| Ulid::r#gen().to_string());
 
     let trace_provider = SdkTracerProvider::builder()
         .with_batch_exporter(exporter)
