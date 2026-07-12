@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.2] - 2026-07-12
+
+### Changed
+- **Query ID Observability** ([#24](https://github.com/nbari/pg_exporter/issues/24)): Updated all `pg_stat_statements` Grafana dashboard panels to expose the `queryid` label in the legend alongside the truncated query string. Added a dedicated instructional panel detailing the exact SQL `JOIN` required to resolve a `queryid` to its full, untruncated SQL text on the database cluster.
+
 ## [0.15.1] - 2026-07-10
 
 ### Changed

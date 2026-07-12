@@ -4037,7 +4037,7 @@
                 "uid": "${DS_PROMETHEUS}"
               },
               "expr": "topk(10, postgres_pg_stat_statements_total_exec_time_seconds{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
-              "legendFormat": "{{datname}} | {{query_short}}",
+              "legendFormat": "{{datname}} | {{query_short}} | {{queryid}}",
               "refId": "A"
             }
           ],
@@ -4129,7 +4129,7 @@
                 "uid": "${DS_PROMETHEUS}"
               },
               "expr": "topk(10, postgres_pg_stat_statements_mean_exec_time_seconds{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
-              "legendFormat": "{{datname}} | {{query_short}}",
+              "legendFormat": "{{datname}} | {{query_short}} | {{queryid}}",
               "refId": "A"
             }
           ],
@@ -4220,7 +4220,7 @@
                 "uid": "${DS_PROMETHEUS}"
               },
               "expr": "topk(10, rate(postgres_pg_stat_statements_calls_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m]))",
-              "legendFormat": "{{datname}} | {{query_short}}",
+              "legendFormat": "{{datname}} | {{query_short}} | {{queryid}}",
               "refId": "A"
             }
           ],
@@ -4312,7 +4312,7 @@
                 "uid": "${DS_PROMETHEUS}"
               },
               "expr": "topk(10, postgres_pg_stat_statements_wal_bytes_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
-              "legendFormat": "{{datname}} | {{query_short}}",
+              "legendFormat": "{{datname}} | {{query_short}} | {{queryid}}",
               "refId": "A"
             }
           ],
@@ -4404,7 +4404,7 @@
                 "uid": "${DS_PROMETHEUS}"
               },
               "expr": "topk(10, postgres_pg_stat_statements_temp_blks_written_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
-              "legendFormat": "{{datname}} | {{query_short}} - temp writes",
+              "legendFormat": "{{datname}} | {{query_short}} | {{queryid}} - temp writes",
               "refId": "A"
             },
             {
@@ -4413,7 +4413,7 @@
                 "uid": "${DS_PROMETHEUS}"
               },
               "expr": "topk(10, postgres_pg_stat_statements_temp_blks_read_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
-              "legendFormat": "{{datname}} | {{query_short}} - temp reads",
+              "legendFormat": "{{datname}} | {{query_short}} | {{queryid}} - temp reads",
               "refId": "B"
             }
           ],
@@ -4505,12 +4505,33 @@
                 "uid": "${DS_PROMETHEUS}"
               },
               "expr": "postgres_pg_stat_statements_cache_hit_ratio{job=\"$job\", instance=\"$instance\", datname=~\"$database\"} < 0.9",
-              "legendFormat": "{{datname}} | {{query_short}}",
+              "legendFormat": "{{datname}} | {{query_short}} | {{queryid}}",
               "refId": "A"
             }
           ],
           "title": "Queries with Low Cache Hit Ratio (<90%)",
           "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "grafana"
+          },
+          "gridPos": {
+            "h": 12,
+            "w": 24,
+            "x": 0,
+            "y": 201
+          },
+          "id": 10024,
+          "options": {
+            "content": "### How to use the `queryid`\nWhen you notice a query consuming high resources (CPU, time, or disk), the legend will show its truncated form followed by its `queryid`, for example:\n`postgres | SELECT * FROM users WHERE... | 1234567890`\n\nYou can use that `queryid` (`1234567890`) to retrieve the full, un-truncated query text directly from your database.\n\n**Instructions:**\n1. Copy the `queryid` from the legend of the problematic query.\n2. Connect to your PostgreSQL cluster using `psql`, pgAdmin, DBeaver, or your preferred SQL client.\n3. Run the following query, replacing `<queryid from the legend>` with your copied ID:\n\n```sql\nSELECT \n    d.datname AS database, \n    s.calls, \n    round(s.mean_exec_time/1000) AS mean_s, \n    round(s.max_exec_time/60000) AS max_min, \n    s.query \nFROM pg_stat_statements s \nJOIN pg_database d ON d.oid = s.dbid \nWHERE s.queryid = <queryid from the legend>;\n```\n\n> **Note:** This works from any database on the cluster because the `dbid` join resolves the correct database name. The `queryid` is stable for a statement's shape but may change across PostgreSQL major version upgrades.\n",
+            "mode": "markdown"
+          },
+          "pluginVersion": "10.4.2",
+          "transparent": true,
+          "title": "How to Look Up Full Queries",
+          "type": "text"
         }
       ],
       "title": "Query Performance (requires --collector.statements)",
@@ -4612,7 +4633,7 @@
                 "uid": "${DS_PROMETHEUS}"
               },
               "expr": "topk(10, clamp_min(delta(postgres_pg_stat_statements_total_exec_time_seconds{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m]), 0))",
-              "legendFormat": "{{datname}} | {{query_short}}",
+              "legendFormat": "{{datname}} | {{query_short}} | {{queryid}}",
               "refId": "A"
             }
           ],
@@ -4704,7 +4725,7 @@
                 "uid": "${DS_PROMETHEUS}"
               },
               "expr": "topk(10, clamp_min(delta(postgres_pg_stat_statements_total_exec_time_seconds{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m]), 0) / clamp_min(delta(postgres_pg_stat_statements_calls_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m]), 1))",
-              "legendFormat": "{{datname}} | {{query_short}}",
+              "legendFormat": "{{datname}} | {{query_short}} | {{queryid}}",
               "refId": "A"
             }
           ],
@@ -4795,7 +4816,7 @@
                 "uid": "${DS_PROMETHEUS}"
               },
               "expr": "topk(10, rate(postgres_pg_stat_statements_calls_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m]))",
-              "legendFormat": "{{datname}} | {{query_short}}",
+              "legendFormat": "{{datname}} | {{query_short}} | {{queryid}}",
               "refId": "A"
             }
           ],
@@ -4887,7 +4908,7 @@
                 "uid": "${DS_PROMETHEUS}"
               },
               "expr": "topk(10, clamp_min(delta(postgres_pg_stat_statements_wal_bytes_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m]), 0))",
-              "legendFormat": "{{datname}} | {{query_short}}",
+              "legendFormat": "{{datname}} | {{query_short}} | {{queryid}}",
               "refId": "A"
             }
           ],
@@ -4979,7 +5000,7 @@
                 "uid": "${DS_PROMETHEUS}"
               },
               "expr": "topk(10, clamp_min(delta(postgres_pg_stat_statements_temp_blks_written_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m]), 0))",
-              "legendFormat": "{{datname}} | {{query_short}} - temp writes",
+              "legendFormat": "{{datname}} | {{query_short}} | {{queryid}} - temp writes",
               "refId": "A"
             },
             {
@@ -4988,7 +5009,7 @@
                 "uid": "${DS_PROMETHEUS}"
               },
               "expr": "topk(10, clamp_min(delta(postgres_pg_stat_statements_temp_blks_read_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[5m]), 0))",
-              "legendFormat": "{{datname}} | {{query_short}} - temp reads",
+              "legendFormat": "{{datname}} | {{query_short}} | {{queryid}} - temp reads",
               "refId": "B"
             }
           ],
@@ -5080,7 +5101,7 @@
                 "uid": "${DS_PROMETHEUS}"
               },
               "expr": "postgres_pg_stat_statements_cache_hit_ratio{job=\"$job\", instance=\"$instance\", datname=~\"$database\"} < 0.9",
-              "legendFormat": "{{datname}} | {{query_short}}",
+              "legendFormat": "{{datname}} | {{query_short}} | {{queryid}}",
               "refId": "A"
             }
           ],
