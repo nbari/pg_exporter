@@ -30,7 +30,7 @@ use tower::ServiceBuilder;
 use tower_http::{
     request_id::PropagateRequestIdLayer, set_header::SetRequestHeaderLayer, trace::TraceLayer,
 };
-use tracing::{Span, error, info, info_span};
+use tracing::{Span, error, info, info_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use ulid::Ulid;
 
@@ -62,6 +62,7 @@ pub async fn new(
 
     set_base_connect_options_from_dsn(&dsn).context("Failed to parse base DSN options")?;
     let enabled_collectors = collector_config.enabled_collectors_in_order();
+    warn_if_system_collector_remote(&dsn, &enabled_collectors);
     let registry = CollectorRegistry::new(&collector_config);
 
     let app = build_router(pool.clone(), registry);
@@ -176,6 +177,40 @@ fn print_startup(bind_addr: &str, collectors: &[String], excluded: &[String]) {
 
     if !excluded.is_empty() {
         println!("\nExcluded databases:\n{}", format_list(excluded));
+    }
+}
+
+/// Returns `true` when `host` is a loopback address or a Unix-domain socket
+/// path, i.e. the database is on the same machine as the exporter.
+fn is_local_db_host(host: &str) -> bool {
+    host.is_empty()
+        || host.starts_with('/')
+        || host.eq_ignore_ascii_case("localhost")
+        || host == "::1"
+        || host.starts_with("127.")
+}
+
+/// Warns when `--collector.system` is enabled but the DSN points at a remote
+/// host. The host CPU/memory metrics describe the exporter's machine, so on a
+/// managed service (RDS/Aurora) or any non-co-located setup they do not reflect
+/// the database server and are misleading.
+fn warn_if_system_collector_remote(dsn: &SecretString, enabled_collectors: &[String]) {
+    if !enabled_collectors.iter().any(|c| c == "system") {
+        return;
+    }
+
+    let Ok(opts) = PgConnectOptions::from_str(dsn.expose_secret()) else {
+        return;
+    };
+
+    if !is_local_db_host(opts.get_host()) {
+        warn!(
+            host = opts.get_host(),
+            "--collector.system reports host CPU/memory for the exporter's own \
+             machine, but the DSN points at a remote database host; enable it \
+             only when the exporter is co-located with PostgreSQL (not on managed \
+             services such as RDS/Aurora)"
+        );
     }
 }
 
@@ -319,6 +354,52 @@ mod tests {
         let items: Vec<String> = vec![];
         let result = format_list(&items);
         assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_is_local_db_host() {
+        for host in [
+            "localhost",
+            "LOCALHOST",
+            "127.0.0.1",
+            "127.5.6.7",
+            "::1",
+            "",
+            "/tmp",
+            "/var/run/postgresql",
+        ] {
+            assert!(is_local_db_host(host), "expected {host:?} to be local");
+        }
+        for host in [
+            "db.example.com",
+            "10.0.0.5",
+            "192.168.1.10",
+            "my-rds.abc123.us-east-1.rds.amazonaws.com",
+            "::2",
+        ] {
+            assert!(!is_local_db_host(host), "expected {host:?} to be remote");
+        }
+    }
+
+    #[test]
+    fn test_warn_if_system_collector_remote_is_noop_when_disabled() {
+        let dsn = SecretString::from("postgresql://user@db.example.com:5432/postgres".to_owned());
+        // No "system" collector -> must not panic and simply return.
+        warn_if_system_collector_remote(&dsn, &["default".to_owned(), "vacuum".to_owned()]);
+    }
+
+    #[test]
+    fn test_warn_if_system_collector_remote_handles_local_and_remote() {
+        let system = vec!["system".to_owned()];
+        // Both branches must be panic-free regardless of host locality.
+        warn_if_system_collector_remote(
+            &SecretString::from("postgresql://user@localhost:5432/postgres".to_owned()),
+            &system,
+        );
+        warn_if_system_collector_remote(
+            &SecretString::from("postgresql://user@db.example.com:5432/postgres".to_owned()),
+            &system,
+        );
     }
 
     #[test]

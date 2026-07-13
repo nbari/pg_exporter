@@ -18,5 +18,6 @@ pub mod slru;
 pub mod stat;
 pub mod stat_io;
 pub mod statements;
+pub mod system;
 pub mod tls;
 pub mod vacuum;

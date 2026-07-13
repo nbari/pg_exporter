@@ -317,7 +317,7 @@ t-deploy message="CI test": check-develop check-clean test
 
 # Watch for changes and run
 watch:
-  cargo watch -x 'run -- --collector.vacuum --collector.activity --collector.locks --collector.database --collector.stat --collector.replication --collector.index --collector.statements --collector.exporter --collector.tls --collector.stat_io --collector.slru --collector.sequences -v'
+  cargo watch -x 'run -- --collector.vacuum --collector.activity --collector.locks --collector.database --collector.stat --collector.replication --collector.index --collector.statements --collector.exporter --collector.tls --collector.stat_io --collector.slru --collector.sequences --collector.system -v'
 
 # get metrics curl
 curl:

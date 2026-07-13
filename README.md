@@ -285,6 +285,7 @@ The following collectors are available:
 * `--collector.statements` [statements](src/collectors/statements/README.md) - Query performance metrics from `pg_stat_statements` (see [detailed guide](src/collectors/statements/README.md))
 * `--collector.tls` [tls](src/collectors/tls/mod.rs) - SSL/TLS certificate monitoring and connection encryption stats (PostgreSQL 14+)
 * `--collector.exporter` [exporter](src/collectors/exporter/mod.rs) - Exporter self-monitoring (process metrics, scrape performance, cardinality tracking)
+* `--collector.system` [system](src/collectors/system/README.md) - **Host** CPU and memory for the machine running the exporter (Linux/FreeBSD): node_exporter-style **per-core** `pg_system_cpu_seconds_total{cpu,mode}` counters, `pg_system_load1/5/15`, and `pg_system_memory_*`/`pg_system_swap_*` byte gauges, plus a `postgres*` process-group aggregate (`pg_system_process_group_cpu_seconds_total`, `pg_system_process_group_memory_bytes` — PSS on Linux, RSS on FreeBSD — and `pg_system_process_group_count`, all labeled `group="postgres"`) that answers "is PostgreSQL itself eating the box, or a noisy neighbour?". Reads only the OS (`/proc/stat`, sysctls, `sysinfo`) — **no** database queries or connections. CPU cardinality is bounded per host (modes × cores) and does not scale with database count. Enable only when the exporter is **co-located** with PostgreSQL; do **not** enable it for managed services like RDS/Aurora (the numbers would describe the exporter's host, not the DB server).
 
 You can enable `--collector.<name>` or disable `--no-collector.<name>` For example,
 to disable the `vacuum` collector:
@@ -301,6 +302,14 @@ The `statements` collector defaults to `--statements.top-n 25` if not specified.
 
 The `sequences` collector defaults to `--sequences.min-ratio 0.5` (export only sequences whose
 `last_value / max_value` is at least this ratio). You can also use `PG_EXPORTER_SEQUENCES_MIN_RATIO`.
+
+The `system` collector emits node_exporter-style per-core CPU counters
+(`pg_system_cpu_seconds_total{cpu,mode}`); aggregate host utilization is derived in PromQL
+(`sum without(cpu) ...`), so there is no flag to configure. Its cardinality is bounded per host
+(modes × cores) and does not grow with the number of databases. It also aggregates the host CPU
+and memory of all `postgres*` processes into a fixed `group="postgres"` series (no per-PID label);
+on Linux the memory figure is PSS (`shared_buffers` counted once across backends) when the exporter
+runs as `postgres`/root, otherwise it falls back to RSS.
 
 ### Connection budget for multi-database collectors
 

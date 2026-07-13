@@ -200,6 +200,7 @@ register_collectors! {
     replication => ReplicationCollector,
     index => IndexCollector,
     sequences => SequencesCollector,
+    system => SystemCollector,
     statements => StatementsCollector,
     exporter => ExporterCollector,
     tls => TlsCollector,

@@ -12114,6 +12114,818 @@
         "x": 0,
         "y": 182
       },
+      "id": 780030,
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Per-mode host CPU utilization as a fraction of total capacity, aggregated across all cores from the per-core counter pg_system_cpu_seconds_total{cpu,mode} (Linux /proc/stat, FreeBSD kern.cp_times) via sum without(cpu), then divided by pg_system_cpu_cores so a fully busy box reads 1.0 (100%). idle is excluded so the stack shows real utilization (0-100%, 100% = every core saturated) instead of always filling to 100%. Modes stack: user/system are normal work, sustained high iowait points at storage pressure, high steal means a noisy neighbour on the hypervisor is taking CPU away from this VM. The raw series keep a per-core 'cpu' label, so you can also drill into a single hot core that an aggregate would hide. Requires --collector.system and only makes sense when the exporter is co-located with PostgreSQL (not RDS/Aurora).",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "normal"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "percentunit",
+              "min": 0,
+              "max": 1
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 183
+          },
+          "id": 780031,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum without(cpu) (rate(pg_system_cpu_seconds_total{job=\"$job\", instance=\"$instance\", mode!=\"idle\"}[5m])) / on(job, instance) group_left() pg_system_cpu_cores{job=\"$job\", instance=\"$instance\"}",
+              "refId": "A",
+              "legendFormat": "{{mode}}"
+            }
+          ],
+          "title": "CPU Utilization by Mode",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Total host CPU busy fraction (all non-idle modes) normalized by pg_system_cpu_cores, so 1.0 = every core fully saturated regardless of core count (1 vCPU or 32). This is the single 'how hot is the box' signal. Sustained values near 1.0 mean the machine is CPU-bound and PostgreSQL is competing for cycles. Requires --collector.system on a co-located host.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 0.7
+                  },
+                  {
+                    "color": "red",
+                    "value": 0.9
+                  }
+                ]
+              },
+              "unit": "percentunit",
+              "min": 0,
+              "max": 1
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 183
+          },
+          "id": 780032,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum by (job, instance) (rate(pg_system_cpu_seconds_total{job=\"$job\", instance=\"$instance\", mode!=\"idle\"}[5m])) / on(job, instance) group_left() pg_system_cpu_cores{job=\"$job\", instance=\"$instance\"}",
+              "refId": "A",
+              "legendFormat": "busy"
+            }
+          ],
+          "title": "CPU Busy (normalized across cores)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "1/5/15-minute host load average (pg_system_load1/5/15, Linux). Compare against pg_system_cpu_cores: a load persistently above the core count means the run queue is backing up (CPU and/or I/O saturation). Reported as 0 on platforms where the OS does not expose load average.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 191
+          },
+          "id": 780033,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_system_load1{job=\"$job\", instance=\"$instance\"}",
+              "refId": "A",
+              "legendFormat": "1m"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_system_load5{job=\"$job\", instance=\"$instance\"}",
+              "refId": "B",
+              "legendFormat": "5m"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_system_load15{job=\"$job\", instance=\"$instance\"}",
+              "refId": "C",
+              "legendFormat": "15m"
+            }
+          ],
+          "title": "Load Average",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Host memory and swap in bytes (pg_system_memory_*, pg_system_swap_*). Compute memory pressure as (total - available) / total, which is accurate on Linux. Note: on FreeBSD/Windows sysinfo reports available == free, so 'mem available' understates reclaimable cache there. Rising 'swap used' on a database host is a red flag \u2014 PostgreSQL working set is being paged out. Requires --collector.system on a co-located host.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "bytes"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "mem total"
+                },
+                "properties": [
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "fill": "dash",
+                      "dash": [
+                        10,
+                        10
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 1
+                  },
+                  {
+                    "id": "custom.fillOpacity",
+                    "value": 0
+                  },
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "text"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "mem used"
+                },
+                "properties": [
+                  {
+                    "id": "custom.fillOpacity",
+                    "value": 12
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "swap used"
+                },
+                "properties": [
+                  {
+                    "id": "custom.fillOpacity",
+                    "value": 12
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 191
+          },
+          "id": 780034,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_system_memory_total_bytes{job=\"$job\", instance=\"$instance\"}",
+              "refId": "A",
+              "legendFormat": "mem total"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_system_memory_available_bytes{job=\"$job\", instance=\"$instance\"}",
+              "refId": "B",
+              "legendFormat": "mem available"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_system_memory_used_bytes{job=\"$job\", instance=\"$instance\"}",
+              "refId": "C",
+              "legendFormat": "mem used"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_system_swap_used_bytes{job=\"$job\", instance=\"$instance\"}",
+              "refId": "D",
+              "legendFormat": "swap used"
+            }
+          ],
+          "title": "Memory & Swap Usage",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Per-core CPU utilization (busy fraction, all non-idle modes) for every logical CPU, straight from the per-core pg_system_cpu_seconds_total counter. One line per core (cpu 0, cpu 1, ...), each 0-100% where 1.0 means that single core is fully saturated. Use this to spot an unbalanced load - e.g. one pinned single-threaded backend maxing a core while the aggregate looks calm. Requires --collector.system on a co-located host.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "percentunit",
+              "min": 0,
+              "max": 1
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 199
+          },
+          "id": 780035,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum without(mode) (rate(pg_system_cpu_seconds_total{job=\"$job\", instance=\"$instance\", mode!=\"idle\"}[5m]))",
+              "refId": "A",
+              "legendFormat": "cpu {{cpu}}"
+            }
+          ],
+          "title": "Per-CPU Utilization",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "CPU consumed by the whole postgres* process group on the host, as CPU-cores (rate of pg_system_process_group_cpu_seconds_total). A value of 1.0 means the group is keeping one logical core fully busy on average; divide by pg_system_cpu_cores for the busy fraction of the box. Answers \"is PostgreSQL itself eating the machine, or a noisy neighbour?\". Requires --collector.system on a co-located host (not RDS/Aurora).",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short",
+              "min": 0
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 207
+          },
+          "id": 780037,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "sum(rate(pg_system_process_group_cpu_seconds_total{group=\"postgres\", job=\"$job\", instance=\"$instance\"}[$__rate_interval]))",
+              "refId": "A",
+              "legendFormat": "postgres (cores)"
+            }
+          ],
+          "title": "PostgreSQL Process Group CPU",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Resident memory of the whole postgres* process group (pg_system_process_group_memory_bytes). On Linux this is PSS (proportional set size) from /proc/<pid>/smaps_rollup, so PostgreSQL's shared_buffers is counted once across all backends rather than multiplied per connection - PSS requires the exporter to run as the postgres user or root, otherwise it falls back to RSS (which over-counts shared memory). On FreeBSD this is summed RSS. The right axis shows the live postgres* process count. Requires --collector.system on a co-located host (not RDS/Aurora).",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "bytes",
+              "min": 0
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "B"
+                },
+                "properties": [
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "right"
+                  },
+                  {
+                    "id": "unit",
+                    "value": "short"
+                  },
+                  {
+                    "id": "custom.fillOpacity",
+                    "value": 0
+                  },
+                  {
+                    "id": "custom.drawStyle",
+                    "value": "line"
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 207
+          },
+          "id": 780038,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_system_process_group_memory_bytes{group=\"postgres\", job=\"$job\", instance=\"$instance\"}",
+              "refId": "A",
+              "legendFormat": "postgres memory (PSS/RSS)"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_system_process_group_count{group=\"postgres\", job=\"$job\", instance=\"$instance\"}",
+              "refId": "B",
+              "legendFormat": "postgres process count"
+            }
+          ],
+          "title": "PostgreSQL Process Group Memory",
+          "type": "timeseries"
+        }
+      ],
+      "title": "Host CPU / Memory (requires --collector.system, co-located only \u2014 not RDS/Aurora)",
+      "type": "row",
+      "description": "Host-level CPU and memory for the machine running pg_exporter, from --collector.system (Linux/FreeBSD). Reads only the OS (/proc/stat, sysctls, sysinfo) and never queries PostgreSQL. Only meaningful when the exporter is co-located with the database server; on managed services (RDS/Aurora) these numbers describe the exporter's host, not the DB."
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 183
+      },
       "id": 200,
       "panels": [
         {
@@ -12121,7 +12933,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "description": "CPU usage of pg_exporter process.\n\n**Per-Core %** (Left Y-Axis, solid line):\n- Actual CPU usage (matches ps, top, pidstat)\n- Can exceed 100% on multi-core systems\n- Example: 124% = using 1.24 cores worth of CPU\n\n**Normalized %** (Right Y-Axis, dashed line):\n- Per-core average (cpu_percent / cpu_cores)\n- Always 0-100% range\n- Shows average CPU load per core\n- Example: 124% / 24 cores = 5.17% per-core\n\n**Typical values (per-core %):**\n- Idle: 1-5%\n- Light load: 5-15%\n- Moderate: 15-30%\n- Heavy: 30-50%\n\n**Note:** First reading after startup will be 0% (sysinfo needs 2 refreshes for accuracy).",
+          "description": "CPU usage of the pg_exporter process, shown two ways.\n\n**CPU % of one core** (left axis, solid) = pg_exporter_process_cpu_percent:\n- Raw process CPU, exactly as ps/top/pidstat report it (100% = one full core).\n- Can exceed 100% on multi-core hosts. Example: 124% = 1.24 cores of CPU in total.\n- This is NOT the load of a single physical core; it is the whole process across all its threads.\n\n**% of whole host** (right axis, dashed) = cpu_percent / pg_exporter_process_cpu_cores:\n- The exporter's share of the entire machine, always 0-100% regardless of core count.\n- Example: 124% on a 24-core host = 124 / 24 = 5.17% of the box.\n\n**Typical \"CPU % of one core\" values:** idle 1-5%, light 5-15%, moderate 15-30%, heavy 30-50%.\n\n**Note:** the first reading after startup is 0% (sysinfo needs two refreshes for an accurate delta).",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -12223,7 +13035,7 @@
                 "uid": "${DS_PROMETHEUS}"
               },
               "expr": "pg_exporter_process_cpu_percent{job=\"$job\", instance=\"$instance\"}",
-              "legendFormat": "Per-Core % (can exceed 100%)",
+              "legendFormat": "CPU % of one core (can exceed 100%)",
               "refId": "A"
             },
             {
@@ -12232,7 +13044,7 @@
                 "uid": "${DS_PROMETHEUS}"
               },
               "expr": "pg_exporter_process_cpu_percent{job=\"$job\", instance=\"$instance\"} / pg_exporter_process_cpu_cores{job=\"$job\", instance=\"$instance\"}",
-              "legendFormat": "Normalized % (per-core average)",
+              "legendFormat": "% of whole host (normalized)",
               "refId": "B"
             }
           ],
