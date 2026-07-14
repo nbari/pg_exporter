@@ -107,6 +107,11 @@ async fn test_system_cpu_seconds_is_per_core() -> Result<()> {
             if fam.name() != "pg_system_cpu_seconds_total" {
                 continue;
             }
+            assert_eq!(
+                fam.get_field_type(),
+                prometheus::proto::MetricType::COUNTER,
+                "CPU seconds must be exposed as a counter"
+            );
             for metric in fam.get_metric() {
                 let labels = metric.get_label();
                 saw_cpu_label |= labels.iter().any(|l| l.name() == "cpu");

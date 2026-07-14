@@ -16,8 +16,7 @@
 //! or per-mode busy fraction normalized across all cores:
 //!
 //! ```promql
-//! sum without(cpu)(rate(pg_system_cpu_seconds_total{mode!="idle"}[5m]))
-//!   / on() group_left() pg_system_cpu_cores
+//! avg without(cpu)(rate(pg_system_cpu_seconds_total{mode!="idle"}[5m]))
 //! ```
 //!
 //! The counters are read directly from the OS because `sysinfo` only exposes an
@@ -40,11 +39,11 @@
 use crate::collectors::Collector;
 use anyhow::Result;
 use futures::future::BoxFuture;
-use prometheus::{Gauge, GaugeVec, IntGauge, Opts, Registry};
+use prometheus::{CounterVec, Gauge, IntGauge, Opts, Registry};
 use sqlx::PgPool;
-use std::num::NonZeroUsize;
+use std::collections::{HashMap, HashSet};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use sysinfo::System;
@@ -80,6 +79,10 @@ const LINUX_MODES: [&str; 8] = [
 
 #[cfg(target_os = "freebsd")]
 const FREEBSD_MODES: [&str; 5] = ["user", "nice", "system", "interrupt", "idle"];
+
+/// An idle decrease of this size indicates CPU hotplug/reset rather than the
+/// small accounting regressions that `/proc/stat` may occasionally report.
+const IDLE_RESET_THRESHOLD_SECONDS: f64 = 3.0;
 
 /// Returns the clock-tick frequency (`_SC_CLK_TCK`, jiffies per second) used to
 /// scale `/proc/stat` counters, defaulting to the near-universal 100 Hz.
@@ -276,7 +279,7 @@ fn read_cpu_times() -> Result<Vec<CoreTimes>> {
 
 /// Exposes host CPU counters, core counts, and load average.
 ///
-/// **Counter (`Gauge`, cumulative seconds):**
+/// **Counter (cumulative seconds):**
 /// - `pg_system_cpu_seconds_total{cpu,mode}` — one series per logical core,
 ///   mirroring `node_exporter`'s `node_cpu_seconds_total`
 ///
@@ -286,12 +289,15 @@ fn read_cpu_times() -> Result<Vec<CoreTimes>> {
 /// - `pg_system_load1`, `pg_system_load5`, `pg_system_load15`
 #[derive(Clone)]
 pub struct CpuCollector {
-    cpu_seconds: GaugeVec,
+    cpu_seconds: CounterVec,
     cpu_cores: IntGauge,
     cpu_cores_physical: IntGauge,
     load1: Gauge,
     load5: Gauge,
     load15: Gauge,
+    /// Last raw OS values by CPU and mode. Exported counters advance only by
+    /// positive deltas so kernel accounting regressions cannot create spikes.
+    raw_cpu_seconds: Arc<Mutex<HashMap<String, HashMap<&'static str, f64>>>>,
     /// Ensures the "CPU counters unsupported on this platform" warning is logged
     /// at most once per process instead of on every scrape.
     unsupported_warned: Arc<AtomicBool>,
@@ -308,7 +314,7 @@ impl CpuCollector {
     #[allow(clippy::expect_used)]
     pub fn new() -> Self {
         Self {
-            cpu_seconds: GaugeVec::new(
+            cpu_seconds: CounterVec::new(
                 Opts::new(
                     "pg_system_cpu_seconds_total",
                     "Cumulative host CPU time in seconds per logical core, by mode",
@@ -341,16 +347,17 @@ impl CpuCollector {
                 "Host load average over the last 15 minutes",
             ))
             .expect("pg_system_load15"),
+            raw_cpu_seconds: Arc::new(Mutex::new(HashMap::new())),
             unsupported_warned: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    fn update_cores(&self) {
-        let logical = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
+    fn update_cores(&self, logical: usize) {
         let physical = System::physical_core_count().unwrap_or(logical);
-        self.cpu_cores.set(i64::try_from(logical).unwrap_or(0));
+        self.cpu_cores
+            .set(i64::try_from(logical).unwrap_or(i64::MAX));
         self.cpu_cores_physical
-            .set(i64::try_from(physical).unwrap_or(0));
+            .set(i64::try_from(physical).unwrap_or(i64::MAX));
     }
 
     fn update_load(&self) {
@@ -360,22 +367,98 @@ impl CpuCollector {
         self.load15.set(load.fifteen);
     }
 
+    fn apply_cpu_times(&self, times: &[CoreTimes]) {
+        self.update_cores(times.len());
+
+        let mut previous = match self.raw_cpu_seconds.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!("system CPU mutex was poisoned, recovering");
+                poisoned.into_inner()
+            }
+        };
+
+        let live_cpus: HashSet<&str> = times.iter().map(|entry| entry.cpu.as_str()).collect();
+        let offline_cpus: Vec<String> = previous
+            .keys()
+            .filter(|cpu| !live_cpus.contains(cpu.as_str()))
+            .cloned()
+            .collect();
+
+        for cpu in offline_cpus {
+            if let Some(modes) = previous.remove(cpu.as_str()) {
+                for mode in modes.keys() {
+                    if let Err(error) = self
+                        .cpu_seconds
+                        .remove_label_values(&[cpu.as_str(), *mode])
+                    {
+                        warn!(cpu, mode, %error, "failed to remove offline CPU series");
+                    }
+                }
+            }
+        }
+
+        for entry in times {
+            let previous_modes = previous.entry(entry.cpu.clone()).or_default();
+            let reset = entry.modes.iter().any(|&(mode, seconds)| {
+                mode == "idle"
+                    && previous_modes.get(mode).is_some_and(|previous_idle| {
+                        *previous_idle - seconds >= IDLE_RESET_THRESHOLD_SECONDS
+                    })
+            });
+
+            if reset {
+                debug!(cpu = %entry.cpu, "host CPU counters reset after hotplug");
+            }
+
+            for &(mode, seconds) in &entry.modes {
+                let previous_value = previous_modes.get(mode).copied();
+
+                if reset {
+                    previous_modes.insert(mode, seconds);
+                    continue;
+                }
+
+                match previous_value {
+                    None => {
+                        self.cpu_seconds
+                            .with_label_values(&[entry.cpu.as_str(), mode])
+                            .inc_by(seconds);
+                        previous_modes.insert(mode, seconds);
+                    }
+                    Some(value) if seconds >= value => {
+                        let delta = seconds - value;
+                        if delta > 0.0 {
+                            self.cpu_seconds
+                                .with_label_values(&[entry.cpu.as_str(), mode])
+                                .inc_by(delta);
+                        }
+                        previous_modes.insert(mode, seconds);
+                    }
+                    Some(value) => {
+                        debug!(
+                            cpu = %entry.cpu,
+                            mode,
+                            previous = value,
+                            current = seconds,
+                            "ignored backwards host CPU counter"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     fn update_cpu_seconds(&self) {
         match read_cpu_times() {
             Ok(times) if !times.is_empty() => {
-                self.cpu_seconds.reset();
-
-                for entry in &times {
-                    for &(mode, seconds) in &entry.modes {
-                        self.cpu_seconds
-                            .with_label_values(&[entry.cpu.as_str(), mode])
-                            .set(seconds);
-                    }
-                }
-
+                self.apply_cpu_times(&times);
                 debug!(cores = times.len(), "updated host CPU counters");
             }
             Ok(_) => {
+                let logical = std::thread::available_parallelism()
+                    .map_or(1, std::num::NonZeroUsize::get);
+                self.update_cores(logical);
                 if !self.unsupported_warned.swap(true, Ordering::Relaxed) {
                     warn!(
                         "collector.system CPU counters are not supported on this platform; \
@@ -391,7 +474,6 @@ impl CpuCollector {
 
     fn collect_stats(&self) {
         self.update_load();
-        self.update_cores();
         self.update_cpu_seconds();
     }
 }
@@ -435,6 +517,13 @@ impl Collector for CpuCollector {
 mod tests {
     use super::*;
 
+    fn core_times(cpu: &str, user: f64, idle: f64) -> CoreTimes {
+        CoreTimes {
+            cpu: cpu.to_owned(),
+            modes: vec![("user", user), ("idle", idle)],
+        }
+    }
+
     #[test]
     fn collector_name_is_system_cpu() {
         assert_eq!(CpuCollector::new().name(), "system.cpu");
@@ -449,6 +538,115 @@ mod tests {
     fn register_metrics_succeeds() {
         let registry = Registry::new();
         assert!(CpuCollector::new().register_metrics(&registry).is_ok());
+    }
+
+    #[test]
+    fn cpu_seconds_has_counter_metadata() {
+        let collector = CpuCollector::new();
+        let registry = Registry::new();
+        assert!(collector.register_metrics(&registry).is_ok());
+        collector.apply_cpu_times(&[core_times("0", 10.0, 90.0)]);
+
+        let family = registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "pg_system_cpu_seconds_total");
+        assert!(
+            family.is_some_and(|family| {
+                family.get_field_type() == prometheus::proto::MetricType::COUNTER
+            }),
+            "CPU seconds must be exposed as a counter"
+        );
+    }
+
+    #[test]
+    fn cpu_counters_ignore_small_backwards_readings() {
+        let collector = CpuCollector::new();
+        collector.apply_cpu_times(&[core_times("0", 10.0, 90.0)]);
+        collector.apply_cpu_times(&[core_times("0", 9.5, 89.5)]);
+
+        assert!(
+            (collector
+                .cpu_seconds
+                .with_label_values(&["0", "user"])
+                .get()
+                - 10.0)
+                .abs()
+                < f64::EPSILON
+        );
+
+        collector.apply_cpu_times(&[core_times("0", 11.0, 91.0)]);
+        assert!(
+            (collector
+                .cpu_seconds
+                .with_label_values(&["0", "user"])
+                .get()
+                - 11.0)
+                .abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn cpu_counters_rebaseline_after_hotplug_reset() {
+        let collector = CpuCollector::new();
+        collector.apply_cpu_times(&[core_times("0", 10.0, 90.0)]);
+        collector.apply_cpu_times(&[core_times("0", 1.0, 1.0)]);
+
+        assert!(
+            (collector
+                .cpu_seconds
+                .with_label_values(&["0", "user"])
+                .get()
+                - 10.0)
+                .abs()
+                < f64::EPSILON
+        );
+
+        collector.apply_cpu_times(&[core_times("0", 2.0, 2.0)]);
+        assert!(
+            (collector
+                .cpu_seconds
+                .with_label_values(&["0", "user"])
+                .get()
+                - 11.0)
+                .abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn logical_core_count_comes_from_cpu_sample() {
+        let collector = CpuCollector::new();
+        collector.apply_cpu_times(&[
+            core_times("0", 10.0, 90.0),
+            core_times("1", 20.0, 80.0),
+        ]);
+
+        assert_eq!(collector.cpu_cores.get(), 2);
+    }
+
+    #[test]
+    fn offline_cpu_series_are_removed() {
+        let collector = CpuCollector::new();
+        let registry = Registry::new();
+        assert!(collector.register_metrics(&registry).is_ok());
+        collector.apply_cpu_times(&[
+            core_times("0", 10.0, 90.0),
+            core_times("1", 20.0, 80.0),
+        ]);
+        collector.apply_cpu_times(&[core_times("0", 11.0, 91.0)]);
+
+        let has_cpu_one = registry.gather().iter().any(|family| {
+            family.name() == "pg_system_cpu_seconds_total"
+                && family.get_metric().iter().any(|metric| {
+                    metric
+                        .get_label()
+                        .iter()
+                        .any(|label| label.name() == "cpu" && label.value() == "1")
+                })
+        });
+        assert!(!has_cpu_one, "offline CPU series must be removed");
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]

@@ -31,12 +31,15 @@ a startup warning to that effect.
 CPU time is exposed as node_exporter-style cumulative **per-core** counters in
 **seconds** (one series per logical core and mode), mirroring
 `node_cpu_seconds_total`. Aggregate host utilization is derived in `PromQL`, so
-there is no separate aggregate metric and no flag to configure.
+there is no separate aggregate metric and no flag to configure. The exporter
+advances each counter only by positive OS deltas, ignoring small backwards
+accounting corrections and re-baselining after CPU hotplug/reset.
 
 - `pg_system_cpu_seconds_total{cpu,mode}` — per-core CPU seconds.
   Linux modes: `user`, `nice`, `system`, `idle`, `iowait`, `irq`, `softirq`,
   `steal`. FreeBSD modes: `user`, `nice`, `system`, `interrupt`, `idle`.
-- `pg_system_cpu_cores` — logical cores (as counted in `/proc/stat` / `kern.cp_times`).
+- `pg_system_cpu_cores` — logical cores in the same `/proc/stat` /
+  `kern.cp_times` sample as the counters.
 - `pg_system_cpu_cores_physical` — physical cores, when the OS reports it.
 - `pg_system_load1`, `pg_system_load5`, `pg_system_load15` — 1/5/15-minute load
   average (Linux; `0` where the OS does not provide it).
@@ -93,7 +96,7 @@ cardinality stays constant regardless of how many backends exist.
 - **Host-wide busy fraction**:
   `1 - avg without(cpu)(rate(pg_system_cpu_seconds_total{mode="idle"}[5m]))`.
 - **Per-mode busy, normalized across all cores**:
-  `sum without(cpu)(rate(pg_system_cpu_seconds_total{mode!="idle"}[5m])) / on() group_left() pg_system_cpu_cores`.
+  `avg without(cpu)(rate(pg_system_cpu_seconds_total{mode!="idle"}[5m]))`.
   Sustained high `iowait` points at storage pressure; high `steal` points at a
   noisy neighbor on the hypervisor.
 - **Single hot core** (drill into per-core detail):

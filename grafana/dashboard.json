@@ -12121,7 +12121,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "description": "Per-mode host CPU utilization as a fraction of total capacity, aggregated across all cores from the per-core counter pg_system_cpu_seconds_total{cpu,mode} (Linux /proc/stat, FreeBSD kern.cp_times) via sum without(cpu), then divided by pg_system_cpu_cores so a fully busy box reads 1.0 (100%). idle is excluded so the stack shows real utilization (0-100%, 100% = every core saturated) instead of always filling to 100%. Modes stack: user/system are normal work, sustained high iowait points at storage pressure, high steal means a noisy neighbour on the hypervisor is taking CPU away from this VM. The raw series keep a per-core 'cpu' label, so you can also drill into a single hot core that an aggregate would hide. Requires --collector.system and only makes sense when the exporter is co-located with PostgreSQL (not RDS/Aurora).",
+          "description": "Per-mode host non-idle CPU accounting as a fraction of total capacity, averaged directly across the per-core pg_system_cpu_seconds_total{cpu,mode} series (Linux /proc/stat, FreeBSD kern.cp_times). idle is excluded so the stack exposes useful non-idle modes instead of always filling to 100%. user/nice/system/irq/softirq represent executed CPU; iowait is time associated with outstanding I/O and steal is capacity taken by the hypervisor. Both remain visible as pressure diagnostics. The raw series keep the cpu label for per-core drill-down. Requires --collector.system on a host co-located with PostgreSQL (not RDS/Aurora).",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -12202,7 +12202,7 @@
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "sum without(cpu) (rate(pg_system_cpu_seconds_total{job=\"$job\", instance=\"$instance\", mode!=\"idle\"}[5m])) / on(job, instance) group_left() pg_system_cpu_cores{job=\"$job\", instance=\"$instance\"}",
+              "expr": "avg without(cpu) (rate(pg_system_cpu_seconds_total{job=\"$job\", instance=\"$instance\", mode!=\"idle\"}[$__rate_interval]))",
               "refId": "A",
               "legendFormat": "{{mode}}"
             }
@@ -12215,7 +12215,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "description": "Total host CPU busy fraction (all non-idle modes) normalized by pg_system_cpu_cores, so 1.0 = every core fully saturated regardless of core count (1 vCPU or 32). This is the single 'how hot is the box' signal. Sustained values near 1.0 mean the machine is CPU-bound and PostgreSQL is competing for cycles. Requires --collector.system on a co-located host.",
+          "description": "Total host non-idle fraction, calculated by summing the per-mode rates averaged across exactly the CPU series being charted. A value near 1.0 means the logical CPUs spent almost all accounted time in non-idle modes, regardless of core count. Use CPU Utilization by Mode to distinguish executed work from iowait or hypervisor steal; a high value alone does not prove the machine is CPU-bound. Requires --collector.system on a co-located host.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -12304,7 +12304,7 @@
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "sum by (job, instance) (rate(pg_system_cpu_seconds_total{job=\"$job\", instance=\"$instance\", mode!=\"idle\"}[5m])) / on(job, instance) group_left() pg_system_cpu_cores{job=\"$job\", instance=\"$instance\"}",
+              "expr": "sum without(mode) (avg without(cpu) (rate(pg_system_cpu_seconds_total{job=\"$job\", instance=\"$instance\", mode!=\"idle\"}[$__rate_interval])))",
               "refId": "A",
               "legendFormat": "busy"
             }
@@ -12604,7 +12604,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "description": "Per-core CPU utilization (busy fraction, all non-idle modes) for every logical CPU, straight from the per-core pg_system_cpu_seconds_total counter. One line per core (cpu 0, cpu 1, ...), each 0-100% where 1.0 means that single core is fully saturated. Use this to spot an unbalanced load - e.g. one pinned single-threaded backend maxing a core while the aggregate looks calm. Requires --collector.system on a co-located host.",
+          "description": "Per-core non-idle fraction for every logical CPU, calculated by summing that CPU's non-idle mode rates from pg_system_cpu_seconds_total. One line per core (cpu 0, cpu 1, ...), each 0-100%; a value near 1.0 means almost all accounted time was non-idle during the interval. Use CPU Utilization by Mode to distinguish executed work from iowait or steal. This panel reveals a hot or pinned core that the host aggregate can hide. Requires --collector.system on a co-located host.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -12685,7 +12685,7 @@
                 "type": "prometheus",
                 "uid": "${DS_PROMETHEUS}"
               },
-              "expr": "sum without(mode) (rate(pg_system_cpu_seconds_total{job=\"$job\", instance=\"$instance\", mode!=\"idle\"}[5m]))",
+              "expr": "sum without(mode) (rate(pg_system_cpu_seconds_total{job=\"$job\", instance=\"$instance\", mode!=\"idle\"}[$__rate_interval]))",
               "refId": "A",
               "legendFormat": "cpu {{cpu}}"
             }
