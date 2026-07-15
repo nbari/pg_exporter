@@ -2774,7 +2774,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Average write+sync work time per checkpoint (pg_stat_checkpointer write_time+sync_time divided by checkpoints completed). It must stay below checkpoint_timeout (yellow) \u2014 if it reaches the timeout the checkpointer cannot finish before the next checkpoint is due and is falling behind (storage bottleneck). Note: because checkpoint_completion_target defaults to 0.9, Postgres paces a timed checkpoint's writes over ~90% of the interval, so on a busy system it is normal for this to sit near ~0.9 x checkpoint_timeout; the red flag is crossing the timeout, not merely being high. This also excludes the log 'total=' value's interpretation. Requires PostgreSQL 17+.",
+      "description": "Average write+sync work time per checkpoint (pg_stat_checkpointer write_time+sync_time divided by checkpoints completed). It must stay below checkpoint_timeout (yellow) — if it reaches the timeout the checkpointer cannot finish before the next checkpoint is due and is falling behind (storage bottleneck). Note: because checkpoint_completion_target defaults to 0.9, Postgres paces a timed checkpoint's writes over ~90% of the interval, so on a busy system it is normal for this to sit near ~0.9 x checkpoint_timeout; the red flag is crossing the timeout, not merely being high. This also excludes the log 'total=' value's interpretation. Requires PostgreSQL 17+.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3046,7 +3046,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "WAL bytes generated since the last checkpoint's redo point (pg_wal_bytes_since_last_checkpoint). This is also the amount of WAL replayed on crash recovery (RTO proxy). IMPORTANT: a WAL-driven (requested) checkpoint does NOT fire at max_wal_size (yellow) \u2014 Postgres triggers it at roughly max_wal_size / (2 + checkpoint_completion_target) (e.g. ~1/3 of max_wal_size) to leave room to spread checkpoint writes, so the peak plateaus well below the yellow line by design. Use it both ways: (1) INCREASE max_wal_size if the peak repeatedly plateaus around that ~1/3 point and the 'Checkpoints by Trigger' panel shows 'requested' dominating \u2014 checkpoints are WAL-driven, so a larger max_wal_size spaces them out (fewer checkpoints, fewer full-page images). Raising checkpoint_timeout alone will not help in that case. (2) DECREASE max_wal_size if the peak stays far below even that trigger and checkpoints are already 'timed' \u2014 it is oversized; shrink it to reclaim pg_wal disk and cap recovery volume, leaving margin above the observed peak. Caveat: a larger max_wal_size also means longer crash recovery (RTO). Works on all supported PostgreSQL versions.",
+      "description": "WAL bytes generated since the last checkpoint's redo point (pg_wal_bytes_since_last_checkpoint). This is also the amount of WAL replayed on crash recovery (RTO proxy). IMPORTANT: a WAL-driven (requested) checkpoint does NOT fire at max_wal_size (yellow) — Postgres triggers it at roughly max_wal_size / (2 + checkpoint_completion_target) (e.g. ~1/3 of max_wal_size) to leave room to spread checkpoint writes, so the peak plateaus well below the yellow line by design. Use it both ways: (1) INCREASE max_wal_size if the peak repeatedly plateaus around that ~1/3 point and the 'Checkpoints by Trigger' panel shows 'requested' dominating — checkpoints are WAL-driven, so a larger max_wal_size spaces them out (fewer checkpoints, fewer full-page images). Raising checkpoint_timeout alone will not help in that case. (2) DECREASE max_wal_size if the peak stays far below even that trigger and checkpoints are already 'timed' — it is oversized; shrink it to reclaim pg_wal disk and cap recovery volume, leaving margin above the observed peak. Caveat: a larger max_wal_size also means longer crash recovery (RTO). Works on all supported PostgreSQL versions.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -10508,9 +10508,9 @@
         "y": 179
       },
       "id": 2400,
-      "title": "I/O by backend type \u2014 requires --collector.stat_io",
+      "title": "I/O by backend type — requires --collector.stat_io",
       "type": "row",
-      "description": "Cluster-wide backend I/O from pg_stat_io (PostgreSQL 16+), broken down by backend_type, object and context. Surfaces shared_buffers pressure (evictions), cache effectiveness (hits vs reads) and storage latency (read/write/fsync time) directly from inside PostgreSQL \u2014 no host access needed, so it works on managed services (RDS/Aurora). REQUIRES --collector.stat_io; latency panels also require track_io_timing = on.",
+      "description": "Cluster-wide backend I/O from pg_stat_io (PostgreSQL 16+), broken down by backend_type, object and context. Surfaces shared_buffers pressure (evictions), cache effectiveness (hits vs reads) and storage latency (read/write/fsync time) directly from inside PostgreSQL — no host access needed, so it works on managed services (RDS/Aurora). REQUIRES --collector.stat_io; latency panels also require track_io_timing = on.",
       "panels": [
         {
           "datasource": {
@@ -12050,7 +12050,7 @@
               "refId": "A"
             }
           ],
-          "title": "Sequences \u2265 90% Consumed",
+          "title": "Sequences ≥ 90% Consumed",
           "type": "stat"
         }
       ],
@@ -12788,7 +12788,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "description": "Host memory and swap in bytes (pg_system_memory_*, pg_system_swap_*). Compute memory pressure as (total - available) / total, which is accurate on Linux. Note: on FreeBSD/Windows sysinfo reports available == free, so 'mem available' understates reclaimable cache there. Rising 'swap used' on a database host is a red flag \u2014 PostgreSQL working set is being paged out. Requires --collector.system on a co-located host.",
+          "description": "Host memory and swap in bytes (pg_system_memory_*, pg_system_swap_*). Compute memory pressure as (total - available) / total, which is accurate on Linux. Note: on FreeBSD/Windows sysinfo reports available == free, so 'mem available' understates reclaimable cache there. Rising 'swap used' on a database host is a red flag — PostgreSQL working set is being paged out. Requires --collector.system on a co-located host.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -13275,7 +13275,7 @@
           "type": "timeseries"
         }
       ],
-      "title": "Host CPU / Memory (requires --collector.system, co-located only \u2014 not RDS/Aurora)",
+      "title": "Host CPU / Memory (requires --collector.system, co-located only — not RDS/Aurora)",
       "type": "row",
       "description": "Host-level CPU and memory for the machine running pg_exporter, from --collector.system (Linux/FreeBSD). Reads only the OS (/proc/stat, sysctls, sysinfo) and never queries PostgreSQL. Only meaningful when the exporter is co-located with the database server; on managed services (RDS/Aurora) these numbers describe the exporter's host, not the DB."
     },
@@ -14095,7 +14095,8 @@
     "postgresql",
     "database",
     "monitoring",
-    "pg_exporter"
+    "pg_exporter",
+    "0.17.2"
   ],
   "templating": {
     "list": [
@@ -14220,7 +14221,7 @@
   "timezone": "browser",
   "title": "PostgreSQL Monitoring Dashboard",
   "uid": "pg_exporter_monitoring",
-  "version": 10,
+  "version": 11,
   "weekStart": "",
   "description": "PostgreSQL Performance Monitoring Dashboard This dashboard provides comprehensive monitoring for PostgreSQL databases using pg_exporter metrics. KEY SECTIONS: - Instance Information: PostgreSQL version, settings, and uptime - Critical Alerts: Connection pool utilization and performance warnings - Connection Analysis: Active connections, idle transactions, and connection age - Query Performance: Top queries by execution time, calls, and I/O (requires pg_stat_statements extension) - Cache & I/O: Buffer cache hit ratios, shared buffers, and I/O operations - Locks & Blocking: Lock monitoring and blocking query detection - Vacuum & Maintenance: Autovacuum activity, table bloat, and maintenance statistics - WAL: WAL throughput, record activity, buffer pressure, and FPI ratio - Replication: lag, role, and max replication lag bytes (requires replication collector) - Table Statistics: DML operations and table-level activity - Database Size: Database growth and size trends REQUIREMENTS: - PostgreSQL 14+ - pg_stat_statements extension enabled for query performance metrics - Appropriate monitoring user permissions For more information, visit: https://github.com/nbari/pg_exporter"
 }
