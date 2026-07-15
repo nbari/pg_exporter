@@ -14095,8 +14095,7 @@
     "postgresql",
     "database",
     "monitoring",
-    "pg_exporter",
-    "0.17.2"
+    "pg_exporter"
   ],
   "templating": {
     "list": [
@@ -14221,7 +14220,7 @@
   "timezone": "browser",
   "title": "PostgreSQL Monitoring Dashboard",
   "uid": "pg_exporter_monitoring",
-  "version": 11,
+  "version": 10,
   "weekStart": "",
   "description": "PostgreSQL Performance Monitoring Dashboard This dashboard provides comprehensive monitoring for PostgreSQL databases using pg_exporter metrics. KEY SECTIONS: - Instance Information: PostgreSQL version, settings, and uptime - Critical Alerts: Connection pool utilization and performance warnings - Connection Analysis: Active connections, idle transactions, and connection age - Query Performance: Top queries by execution time, calls, and I/O (requires pg_stat_statements extension) - Cache & I/O: Buffer cache hit ratios, shared buffers, and I/O operations - Locks & Blocking: Lock monitoring and blocking query detection - Vacuum & Maintenance: Autovacuum activity, table bloat, and maintenance statistics - WAL: WAL throughput, record activity, buffer pressure, and FPI ratio - Replication: lag, role, and max replication lag bytes (requires replication collector) - Table Statistics: DML operations and table-level activity - Database Size: Database growth and size trends REQUIREMENTS: - PostgreSQL 14+ - pg_stat_statements extension enabled for query performance metrics - Appropriate monitoring user permissions For more information, visit: https://github.com/nbari/pg_exporter"
 }
