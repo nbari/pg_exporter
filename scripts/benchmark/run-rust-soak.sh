@@ -532,6 +532,7 @@ set -euo pipefail
 
 RUN_ID="${RUN_ID}"
 INSTANCE="10.246.1.90:9432"
+DB_NODE_INSTANCE="${BENCH_DB_SSH}:9100"
 PROM="http://127.0.0.1:9090/api/v1/query"
 METRICS_URL="http://\${INSTANCE}/metrics"
 OUT="/tmp/pg_exporter_rust_soak_${RUN_ID}_prom.csv"
@@ -542,7 +543,7 @@ query_one() {
     curl -fsS "\${PROM}" --get --data-urlencode "query=\${expr}" | jq -r '.data.result[0].value[1] // ""'
 }
 
-echo "ts,exporter_up,pg_up,rss_bytes,cpu_percent,open_fds,scrape_duration_s,scrape_samples,dead_tup_max,locks_sum,long_query_age_s,autovacuum_ratio_max,direct_http_status,direct_scrape_duration_s,direct_curl_rc" > "\${OUT}"
+echo "ts,exporter_up,pg_up,rss_bytes,cpu_percent,open_fds,scrape_duration_s,scrape_samples,dead_tup_max,locks_sum,long_query_age_s,autovacuum_ratio_max,direct_http_status,direct_scrape_duration_s,direct_curl_rc,statements_mean_duration_5m_s,statements_p95_duration_5m_s,statements_success,db_cpu_busy_ratio_5m,db_memory_available_bytes,db_load1" > "\${OUT}"
 
 while (( \$(date +%s) < STOP_AT )); do
     ts="\$(date -u +%FT%TZ)"
@@ -557,6 +558,12 @@ while (( \$(date +%s) < STOP_AT )); do
     locks_sum="\$(query_one "sum(pg_locks_count{job=\"pg_exporter_rust\",instance=\"\${INSTANCE}\"})")"
     long_query_age="\$(query_one "max(pg_stat_activity_oldest_query_age_seconds{job=\"pg_exporter_rust\",instance=\"\${INSTANCE}\"})")"
     autovacuum_ratio_max="\$(query_one "max(pg_stat_user_tables_autovacuum_threshold_ratio{job=\"pg_exporter_rust\",instance=\"\${INSTANCE}\"})")"
+    statements_mean_duration="\$(query_one "sum(rate(pg_exporter_collector_scrape_duration_seconds_sum{job=\"pg_exporter_rust\",instance=\"\${INSTANCE}\",collector=\"statements\"}[5m])) / sum(rate(pg_exporter_collector_scrape_duration_seconds_count{job=\"pg_exporter_rust\",instance=\"\${INSTANCE}\",collector=\"statements\"}[5m]))")"
+    statements_p95_duration="\$(query_one "histogram_quantile(0.95, sum by (le) (rate(pg_exporter_collector_scrape_duration_seconds_bucket{job=\"pg_exporter_rust\",instance=\"\${INSTANCE}\",collector=\"statements\"}[5m])))")"
+    statements_success="\$(query_one "pg_exporter_collector_last_scrape_success{job=\"pg_exporter_rust\",instance=\"\${INSTANCE}\",collector=\"statements\"}")"
+    db_cpu_busy_ratio="\$(query_one "1 - avg(rate(node_cpu_seconds_total{instance=\"\${DB_NODE_INSTANCE}\",mode=\"idle\"}[5m]))")"
+    db_memory_available="\$(query_one "node_memory_MemAvailable_bytes{instance=\"\${DB_NODE_INSTANCE}\"}")"
+    db_load1="\$(query_one "node_load1{instance=\"\${DB_NODE_INSTANCE}\"}")"
 
     # Avoid probing on the same second as Prometheus's scheduled scrape.
     sleep 3
@@ -571,7 +578,7 @@ while (( \$(date +%s) < STOP_AT )); do
             "\${ts}" "\${direct_http_status}" "\${direct_scrape_duration}" "\${direct_curl_rc}" >&2
     fi
 
-    echo "\${ts},\${exporter_up},\${pg_up},\${rss_bytes},\${cpu_percent},\${open_fds},\${scrape_duration},\${scrape_samples},\${dead_tup_max},\${locks_sum},\${long_query_age},\${autovacuum_ratio_max},\${direct_http_status},\${direct_scrape_duration},\${direct_curl_rc}" >> "\${OUT}"
+    echo "\${ts},\${exporter_up},\${pg_up},\${rss_bytes},\${cpu_percent},\${open_fds},\${scrape_duration},\${scrape_samples},\${dead_tup_max},\${locks_sum},\${long_query_age},\${autovacuum_ratio_max},\${direct_http_status},\${direct_scrape_duration},\${direct_curl_rc},\${statements_mean_duration},\${statements_p95_duration},\${statements_success},\${db_cpu_busy_ratio},\${db_memory_available},\${db_load1}" >> "\${OUT}"
     sleep 60
 done
 EOF

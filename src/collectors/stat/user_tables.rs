@@ -203,8 +203,8 @@ const STAT_USER_TABLES_QUERY: &str = r"
         s.autoanalyze_count::bigint,
         pg_indexes_size(s.relid)::bigint AS index_size_bytes,
         pg_table_size(s.relid)::bigint   AS table_size_bytes,
-        EXTRACT(EPOCH FROM (now() - s.last_autovacuum)) AS last_autovacuum_seconds_ago,
-        EXTRACT(EPOCH FROM (now() - s.last_autoanalyze)) AS last_autoanalyze_seconds_ago,
+        EXTRACT(EPOCH FROM (now() - s.last_autovacuum))::double precision AS last_autovacuum_seconds_ago,
+        EXTRACT(EPOCH FROM (now() - s.last_autoanalyze))::double precision AS last_autoanalyze_seconds_ago,
         CASE WHEN s.last_autovacuum IS NULL THEN 1 ELSE 0 END::bigint AS never_autovacuumed,
         CASE WHEN s.last_autoanalyze IS NULL THEN 1 ELSE 0 END::bigint AS never_autoanalyzed,
         CASE
@@ -486,11 +486,9 @@ impl Collector for StatUserTablesCollector {
                             index_size_bytes: row.try_get("index_size_bytes").unwrap_or(0),
                             table_size_bytes: row.try_get("table_size_bytes").unwrap_or(0),
                             last_autovacuum_seconds_ago: row
-                                .try_get("last_autovacuum_seconds_ago")
-                                .ok(),
+                                .try_get("last_autovacuum_seconds_ago")?,
                             last_autoanalyze_seconds_ago: row
-                                .try_get("last_autoanalyze_seconds_ago")
-                                .ok(),
+                                .try_get("last_autoanalyze_seconds_ago")?,
                             never_autovacuumed: row.try_get("never_autovacuumed").unwrap_or(0),
                             never_autoanalyzed: row.try_get("never_autoanalyzed").unwrap_or(0),
                             autovacuum_threshold_ratio: row
@@ -665,6 +663,18 @@ mod tests {
             STAT_USER_TABLES_QUERY.contains("never_autoanalyzed"),
             "query should expose never_autoanalyzed flag"
         );
+    }
+
+    #[test]
+    fn test_stat_user_tables_query_casts_maintenance_ages() {
+        for column in ["last_autovacuum", "last_autoanalyze"] {
+            assert!(
+                STAT_USER_TABLES_QUERY.contains(&format!(
+                    "EXTRACT(EPOCH FROM (now() - s.{column}))::double precision AS {column}_seconds_ago"
+                )),
+                "query should cast {column}_seconds_ago to double precision"
+            );
+        }
     }
 
     #[test]

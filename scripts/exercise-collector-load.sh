@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Exercise the 0.16.0 collectors (#25 stat_io, #27 vacuum blockers, #28 sequences,
-# #29 slru / session churn / checksum / slot spill / progress views) so their
-# Grafana panels light up with real data.
+# Generate the mixed load and specialized PostgreSQL states used by the unified
+# collector exercise workflow.
 #
 # Group A stimuli work against a stock local PostgreSQL. Group B (prepared xacts,
 # logical replication slots) needs server settings that require a restart; the
@@ -13,25 +12,30 @@ set -euo pipefail
 DB="pgbench_test"
 SCALE="50"
 DURATION="90"
+CLIENTS="5"
 DO_SETUP=1
 DO_IO_TIMING=0
 DO_GROUP_B=0
 DO_CLEANUP=0
 GROUP_B_HOLD="${GROUP_B_HOLD:-30}"
+ANALYZE_STATS_TARGET="${ANALYZE_STATS_TARGET:-10000}"
+ANALYZE_COST_DELAY="${ANALYZE_COST_DELAY:-10ms}"
+ANALYZE_COST_LIMIT="${ANALYZE_COST_LIMIT:-100}"
 
 source "$(dirname "${BASH_SOURCE[0]}")/pg-connection.sh"
 
 usage() {
     cat <<'EOF'
-Usage: exercise-new-collectors.sh [options]
+Usage: exercise-collector-load.sh [options]
 
-Generate load/data so every new 0.16.0 collector exports non-trivial series.
+Generate mixed load and specialized states for collector metrics.
 
 Options:
   --db NAME        Target database for pgbench data (default: pgbench_test)
   --scale N        pgbench scale; use >= 100 to make CREATE INDEX progress span a
                    scrape and > shared_buffers to force stat_io evictions (default: 50)
   --duration N     Seconds to run the background load (default: 90)
+  --clients N      Clients for the mixed read/write workload (default: 5)
   --no-setup       Skip ./scripts/setup-local-test-db.sh (assume data already loaded)
   --io-timing      Enable track_io_timing (reload only) so stat_io latency panels populate
   --group-b        Also run prepared-xact and logical-slot stimuli if the server allows them
@@ -45,6 +49,7 @@ while [[ $# -gt 0 ]]; do
         --db) DB="$2"; shift 2 ;;
         --scale) SCALE="$2"; shift 2 ;;
         --duration) DURATION="$2"; shift 2 ;;
+        --clients) CLIENTS="$2"; shift 2 ;;
         --no-setup) DO_SETUP=0; shift ;;
         --io-timing) DO_IO_TIMING=1; shift ;;
         --group-b) DO_GROUP_B=1; shift ;;
@@ -57,8 +62,25 @@ done
 psql_db() { pg_connection_psql_cmd "$DB" "$@"; }
 psqlq() { pg_connection_psql_cmd "$DB" -qAt -c "$1"; }
 
-if ! psql_db -c 'SELECT 1' >/dev/null 2>&1; then
-    echo "❌ PostgreSQL is not reachable ($(pg_connection_description "$DB")). Start it with: just postgres" >&2
+if ! pg_connection_psql_cmd postgres -c 'SELECT 1' >/dev/null 2>&1; then
+    echo "❌ PostgreSQL is not reachable ($(pg_connection_description postgres)). Start it with: just postgres" >&2
+    exit 1
+fi
+
+if [[ "${DO_SETUP}" -eq 1 && "${DO_CLEANUP}" -eq 0 ]]; then
+    echo "🔧 Ensuring pgbench dataset exists (scale=${SCALE})..."
+    # setup-local-test-db.sh pipes `pgbench | grep` with pipefail, so a benign
+    # pgbench exit code can surface even when the dataset built fine. Don't let
+    # that abort the exercise — verify the dataset itself instead of trusting
+    # the exit status.
+    if ! "$(dirname "${BASH_SOURCE[0]}")/setup-local-test-db.sh" --pgbench --pgbench-scale "${SCALE}"; then
+        echo "⚠️  setup-local-test-db.sh returned non-zero; verifying the dataset directly..."
+    fi
+fi
+
+if [[ "${DO_CLEANUP}" -eq 0 ]] \
+    && ! psql_db -c 'SELECT 1 FROM pgbench_accounts LIMIT 1' >/dev/null 2>&1; then
+    echo "❌ pgbench dataset is unavailable in ${DB}. Fix the DB, then re-run 'just exercise-collectors'." >&2
     exit 1
 fi
 
@@ -109,21 +131,6 @@ if psqlq "SELECT 1 FROM pg_replication_slots WHERE slot_name = 'exercise_spill'"
     psqlq "SELECT pg_drop_replication_slot('exercise_spill')" >/dev/null 2>&1 || true
 fi
 
-if [[ "${DO_SETUP}" -eq 1 ]]; then
-    echo "🔧 Ensuring pgbench dataset exists (scale=${SCALE})..."
-    # setup-local-test-db.sh pipes `pgbench | grep` with pipefail, so a benign
-    # pgbench exit code can surface even when the dataset built fine. Don't let
-    # that abort the exercise — verify the dataset itself instead of trusting
-    # the exit status.
-    if ! "$(dirname "${BASH_SOURCE[0]}")/setup-local-test-db.sh" --pgbench --pgbench-scale "${SCALE}"; then
-        echo "⚠️  setup-local-test-db.sh returned non-zero; verifying the dataset directly..."
-    fi
-    if ! psqlq "SELECT 1 FROM pg_class WHERE relname = 'pgbench_accounts' AND relkind = 'r'" | grep -q 1; then
-        echo "❌ pgbench dataset is missing after setup. Fix the DB, then re-run 'just exercise-collectors' (or pass --no-setup once data exists)." >&2
-        exit 1
-    fi
-fi
-
 if [[ "${DO_IO_TIMING}" -eq 1 ]]; then
     echo "⏱️  Enabling track_io_timing (reload only)..."
     pg_connection_psql_cmd postgres -qAt -c "ALTER SYSTEM SET track_io_timing = on" || true
@@ -153,9 +160,14 @@ if ! command -v pgbench >/dev/null 2>&1; then
 fi
 
 if [[ "${have_pgbench}" -eq 1 ]]; then
+    # Standard pgbench traffic populates statements, activity, locks, and table/index stats.
+    echo "🔥 Mixed pgbench workload with ${CLIENTS} clients for ${DURATION}s..."
+    pg_connection_pgbench_cmd "$DB" -c "${CLIENTS}" -T "${DURATION}" >/dev/null 2>&1 &
+    BG_PIDS+=("$!")
+
     # --- #29.2 Session churn: reconnect per transaction ---
     echo "🔁 [#29.2] pgbench -C session churn for ${DURATION}s..."
-    pg_connection_pgbench_cmd "$DB" -C -c 10 -T "${DURATION}" >/dev/null 2>&1 &
+    pg_connection_pgbench_cmd "$DB" -C -S -c 10 -T "${DURATION}" >/dev/null 2>&1 &
     BG_PIDS+=("$!")
 
     # --- #25 stat_io: read-heavy load to force buffer evictions ---
@@ -164,14 +176,32 @@ if [[ "${have_pgbench}" -eq 1 ]]; then
     BG_PIDS+=("$!")
 fi
 
-# --- #29.5 Progress views: keep a CREATE INDEX + ANALYZE running ---
-echo "🏗️  [#29.5] Looping CREATE INDEX CONCURRENTLY + ANALYZE for ${DURATION}s..."
+# --- #29.5 Progress views: make ANALYZE span at least one scrape, then build an index. ---
+echo "📊 [#29.5] Running a throttled ANALYZE so progress spans a 10s scrape..."
+psqlq "SET default_statistics_target = ${ANALYZE_STATS_TARGET};
+       SET vacuum_cost_delay = '${ANALYZE_COST_DELAY}';
+       SET vacuum_cost_limit = ${ANALYZE_COST_LIMIT};
+       ANALYZE pgbench_accounts;" >/dev/null 2>&1 &
+BG_PIDS+=("$!")
+
+analyze_progress_seen=0
+for _ in $(seq 1 100); do
+    if psqlq "SELECT 1 FROM pg_stat_progress_analyze WHERE relid = 'pgbench_accounts'::regclass" | grep -q 1; then
+        analyze_progress_seen=1
+        break
+    fi
+    sleep 0.1
+done
+if [[ "${analyze_progress_seen}" -eq 0 ]]; then
+    echo "⚠️  Throttled ANALYZE finished or failed before its progress row was observed."
+fi
+
+echo "🏗️  [#29.5] Looping CREATE INDEX CONCURRENTLY for ${DURATION}s..."
 (
     end=$((SECONDS + DURATION))
     while [[ ${SECONDS} -lt ${end} ]]; do
         psqlq "DROP INDEX CONCURRENTLY IF EXISTS ex_demo_idx" >/dev/null 2>&1 || true
         psqlq "CREATE INDEX CONCURRENTLY ex_demo_idx ON pgbench_accounts (abalance)" >/dev/null 2>&1 || true
-        psqlq "ANALYZE pgbench_accounts" >/dev/null 2>&1 || true
     done
 ) &
 BG_PIDS+=("$!")

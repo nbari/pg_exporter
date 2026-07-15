@@ -11,7 +11,6 @@ use tracing::{debug, instrument, warn};
 /// Monitors the `pg_exporter` process itself
 ///
 /// Tracks CPU and memory usage to help detect resource issues.
-/// Matches output from scripts/monitor-exporter.sh for consistency.
 ///
 /// # Metrics Exported
 ///

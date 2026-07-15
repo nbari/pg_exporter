@@ -116,6 +116,56 @@ main() {
          if [ -f '${sampler_log}' ]; then tail -n 20 '${sampler_log}'; else echo 'log not found'; fi"
 
     echo ""
+    echo "== Comparison signals =="
+    ssh_run "${BENCH_METRICS_SSH}" \
+        "set -euo pipefail; \
+         if [ -f '${sampler_csv}' ]; then \
+             awk -F, ' \
+                 NR == 1 { \
+                     new_schema = (\$16 == \"statements_mean_duration_5m_s\" && \$21 == \"db_load1\"); \
+                     next \
+                 } \
+                 new_schema && \$16 != \"\" { \
+                     statements_mean_samples++; statements_mean_sum += \$16; \
+                     if (\$16 + 0 > statements_mean_max) statements_mean_max = \$16 + 0 \
+                 } \
+                 new_schema && \$17 != \"\" { \
+                     statements_p95_samples++; statements_p95_sum += \$17; \
+                     if (\$17 + 0 > statements_p95_max) statements_p95_max = \$17 + 0 \
+                 } \
+                 new_schema && \$18 != \"\" { \
+                     statements_success_samples++; \
+                     if (\$18 + 0 != 1) statements_failures++ \
+                 } \
+                 new_schema && \$19 != \"\" { \
+                     cpu_samples++; cpu_sum += \$19; \
+                     if (\$19 + 0 > cpu_max) cpu_max = \$19 + 0 \
+                 } \
+                 new_schema && \$20 != \"\" { \
+                     memory_samples++; \
+                     if (memory_samples == 1 || \$20 + 0 < memory_min) memory_min = \$20 + 0 \
+                 } \
+                 new_schema && \$21 != \"\" { \
+                     load_samples++; load_sum += \$21; \
+                     if (\$21 + 0 > load_max) load_max = \$21 + 0 \
+                 } \
+                 END { \
+                     if (!new_schema) { \
+                         print \"comparison signals unavailable (legacy sampler schema)\"; \
+                         exit \
+                     } \
+                     printf \"statements_mean_5m_samples=%d avg_s=%.4f max_s=%.4f\\n\", \
+                         statements_mean_samples, statements_mean_samples ? statements_mean_sum / statements_mean_samples : 0, statements_mean_max; \
+                     printf \"statements_p95_5m_samples=%d avg_s=%.4f max_s=%.4f success_failures=%d/%d\\n\", \
+                         statements_p95_samples, statements_p95_samples ? statements_p95_sum / statements_p95_samples : 0, statements_p95_max, statements_failures, statements_success_samples; \
+                     printf \"db_cpu_samples=%d avg_busy_pct=%.2f max_busy_pct=%.2f memory_min_gib=%.2f load1_avg=%.2f load1_max=%.2f\\n\", \
+                         cpu_samples, cpu_samples ? 100 * cpu_sum / cpu_samples : 0, 100 * cpu_max, memory_samples ? memory_min / 1073741824 : 0, load_samples ? load_sum / load_samples : 0, load_max \
+                 }' '${sampler_csv}'; \
+         else \
+             echo 'sampler CSV not found'; \
+         fi"
+
+    echo ""
     echo "== Prometheus health =="
     ssh_run "${BENCH_METRICS_SSH}" \
         "set -euo pipefail; \

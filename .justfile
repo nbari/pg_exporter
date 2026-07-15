@@ -204,6 +204,13 @@ _bump bump_kind: check-develop check-clean clean update test
     echo "🧪 Running tests with new version (via just test)..."
     just test
 
+    echo "📊 Updating Grafana dashboard version to ${new_version}..."
+    jq --arg ver "${new_version}" '
+      .tags = ((.tags // []) | map(select(test("^[0-9]+\\.[0-9]+\\.[0-9]+") | not))) + [$ver] |
+      .version = .version + 1
+    ' grafana/dashboard.json > grafana/dashboard.json.tmp
+    mv grafana/dashboard.json.tmp grafana/dashboard.json
+
     git add .
     git commit -m "bump version to ${new_version}"
     git push origin develop
@@ -383,107 +390,14 @@ top-queries:
     PGPASSWORD="${PGPASSWORD:-postgres}" psql -h "${pg_host}" -p "${pg_port}" -U postgres \
         -d "${PGDATABASE:-postgres}" -P pager=off -f scripts/top-queries.sql
 
-# Exercise every new 0.16.0 collector so its Grafana panels get real data.
+# Exercise every collector that can be stimulated on a local PostgreSQL.
+# This includes the normal workload, progress views, manual vacuum, and automatic
+# vacuum/analyze workflows. Restart-dependent features are attempted when available.
 # Pass flags through to the script, e.g.:
-#   just exercise-collectors --duration 120 --scale 100 --io-timing --group-b
+#   just exercise-collectors --duration 120 --scale 100 --clients 10
 # Clean up afterwards with: just exercise-collectors --cleanup
 exercise-collectors *args:
-    ./scripts/exercise-new-collectors.sh {{args}}
-
-# Run a live pgbench workload for local metrics testing
-workload duration="60" clients="5" scale="10" db="pgbench_test":
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    duration="{{duration}}"
-    clients="{{clients}}"
-    scale="{{scale}}"
-    db="{{db}}"
-
-    duration="${duration#duration=}"
-    clients="${clients#clients=}"
-    scale="${scale#scale=}"
-    db="${db#db=}"
-
-    if ! command -v pgbench >/dev/null 2>&1; then
-        echo "❌ pgbench not found in PATH"
-        echo "Install postgresql-contrib (or equivalent) to use this recipe."
-        exit 1
-    fi
-
-    # Honor PG_HOST/PG_PORT/PGPASSWORD so this works both on the host (localhost)
-    # and inside the devcontainer (postgres service), matching the other recipes.
-    pg_host="${PG_HOST:-localhost}"
-    pg_port="${PG_PORT:-5432}"
-
-    if ! PGPASSWORD="${PGPASSWORD:-postgres}" psql -h "${pg_host}" -p "${pg_port}" -U postgres -d postgres -c "SELECT 1" >/dev/null 2>&1; then
-        echo "❌ PostgreSQL is not reachable on ${pg_host}:${pg_port}"
-        echo "Start it first with: just postgres"
-        exit 1
-    fi
-
-    echo "🔧 Ensuring pgbench dataset exists (scale=${scale})..."
-    ./scripts/setup-local-test-db.sh --pgbench --pgbench-scale "${scale}"
-
-    echo "🚀 Running pgbench workload against ${db} for ${duration}s with ${clients} clients..."
-    PGPASSWORD="${PGPASSWORD:-postgres}" pgbench -h "${pg_host}" -p "${pg_port}" -U postgres -c "${clients}" -T "${duration}" "${db}"
-
-# Create table churn and run a manual vacuum for vacuum-related collector testing
-vacuum-workflow scale="20" rounds="5" sample_mod="5" db="pgbench_test" table="pgbench_accounts":
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    scale="{{scale}}"
-    rounds="{{rounds}}"
-    sample_mod="{{sample_mod}}"
-    db="{{db}}"
-    table="{{table}}"
-
-    scale="${scale#scale=}"
-    rounds="${rounds#rounds=}"
-    sample_mod="${sample_mod#sample_mod=}"
-    db="${db#db=}"
-    table="${table#table=}"
-
-    bash ./scripts/run-vacuum-workflow.sh \
-        --scale "${scale}" \
-        --rounds "${rounds}" \
-        --sample-mod "${sample_mod}" \
-        --db "${db}" \
-        --table "${table}"
-
-# Create churn and wait for PostgreSQL autovacuum to clean it up without manual VACUUM
-autovacuum-workflow scale="20" rounds="5" sample_mod="5" timeout="180" poll="5" naptime="5s" db="pgbench_test" table="pgbench_accounts":
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    scale="{{scale}}"
-    rounds="{{rounds}}"
-    sample_mod="{{sample_mod}}"
-    timeout="{{timeout}}"
-    poll="{{poll}}"
-    naptime="{{naptime}}"
-    db="{{db}}"
-    table="{{table}}"
-
-    scale="${scale#scale=}"
-    rounds="${rounds#rounds=}"
-    sample_mod="${sample_mod#sample_mod=}"
-    timeout="${timeout#timeout=}"
-    poll="${poll#poll=}"
-    naptime="${naptime#naptime=}"
-    db="${db#db=}"
-    table="${table#table=}"
-
-    bash ./scripts/run-autovacuum-workflow.sh \
-        --scale "${scale}" \
-        --rounds "${rounds}" \
-        --sample-mod "${sample_mod}" \
-        --timeout "${timeout}" \
-        --poll "${poll}" \
-        --naptime "${naptime}" \
-        --db "${db}" \
-        --table "${table}"
+    ./scripts/exercise-collectors.sh {{args}}
 
 postgres version="latest":
   mkdir -p db/log/postgres

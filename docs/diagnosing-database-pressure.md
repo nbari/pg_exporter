@@ -170,8 +170,10 @@ Sequential scans on large tables waste CPU and I/O. The `stat` collector exports
 per-table `pg_stat_user_tables_*` gauges (labels `datname`, `schemaname`, `relname`).
 The exporter publishes these cumulative PostgreSQL counters as Prometheus **gauges**,
 so use instant ratios for usage and `deriv(...[5m])` (the gauge-appropriate
-per-second slope) for rates. Avoid `rate()`/`increase()` here — they are counter
-functions and Grafana will warn that the metric is not a counter.
+per-second slope) for rates. For recent-window ratios, use non-negative
+`delta(...[5m])` values and filter out tables with no matching activity. Avoid
+`rate()`/`increase()` here — they are counter functions and Grafana will warn that
+the metric is not a counter.
 
 Use these three signals together — none proves a missing index on its own.
 
@@ -221,12 +223,25 @@ clamp_min(pg_stat_user_tables_heap_blks_hit_total + pg_stat_user_tables_heap_blk
 ```
 
 Index cache-hit ratio for the same table (low values mean the index itself is not
-resident in cache, so even index scans hit disk):
+resident in shared buffers, so index scans require reads outside that cache). Rank
+only tables with index I/O; otherwise idle tables appear as false 0% problems:
 
 ```promql
-pg_stat_user_tables_idx_blks_hit_total
-/
-clamp_min(pg_stat_user_tables_idx_blks_hit_total + pg_stat_user_tables_idx_blks_read_total, 1)
+(
+  clamp_min(delta(pg_stat_user_tables_idx_blks_hit_total[5m]), 0)
+  /
+  clamp_min(
+    clamp_min(delta(pg_stat_user_tables_idx_blks_hit_total[5m]), 0)
+    + clamp_min(delta(pg_stat_user_tables_idx_blks_read_total[5m]), 0),
+    0.000000001
+  )
+)
+and on (datname, schemaname, relname)
+(
+  clamp_min(delta(pg_stat_user_tables_idx_blks_hit_total[5m]), 0)
+  + clamp_min(delta(pg_stat_user_tables_idx_blks_read_total[5m]), 0)
+  > 0
+)
 ```
 
 The `index` collector exposes the equivalent cluster-wide index I/O via
@@ -236,7 +251,76 @@ useful for a per-database rollup. TOAST and TOAST-index blocks are available too
 
 A persistently low heap or index hit ratio on a hot table points to memory pressure:
 either `shared_buffers` is too small for the working set, or a missing/oversized index
-is forcing extra reads. Pair this with §3.1–§3.3 before acting.
+is forcing extra reads. PostgreSQL block reads may still be served by the operating
+system cache, so correlate the ratio with read volume and query latency. Pair this
+with §3.1–§3.3 before acting.
+
+### 3.5 HOT update ratio
+
+HOT (heap-only tuple) updates avoid rewriting indexes when no indexed column changes
+and the heap page has enough free space. Calculate the ratio only for tables with
+recent updates:
+
+```promql
+(
+  clamp_min(delta(pg_stat_user_tables_n_tup_hot_upd[5m]), 0)
+  /
+  clamp_min(delta(pg_stat_user_tables_n_tup_upd[5m]), 0.000000001)
+)
+and on (datname, schemaname, relname)
+  clamp_min(delta(pg_stat_user_tables_n_tup_upd[5m]), 0) > 0
+```
+
+A persistently low ratio on a write-heavy table is a reason to check whether the
+workload updates indexed columns and whether a lower `fillfactor` would leave enough
+room for HOT updates. Some update patterns are not HOT-eligible, so a low ratio is
+not automatically a configuration defect.
+
+### 3.6 Index scan selectivity and size
+
+Rows fetched per active index scan is a workload/selectivity signal:
+
+```promql
+(
+  clamp_min(delta(pg_stat_user_tables_idx_tup_fetch[5m]), 0)
+  /
+  clamp_min(delta(pg_stat_user_tables_idx_scan[5m]), 0.000000001)
+)
+and on (datname, schemaname, relname)
+  clamp_min(delta(pg_stat_user_tables_idx_scan[5m]), 0) > 0
+```
+
+High values can reveal broad range scans or low selectivity, but may be normal for
+batch queries and bitmap scans. Confirm with `EXPLAIN (ANALYZE, BUFFERS)`.
+
+Find the largest per-table index footprints with:
+
+```promql
+topk(15, pg_stat_user_tables_index_size_bytes)
+```
+
+Large indexes increase cache pressure and write/vacuum work, but size alone does not
+mean bloat or justify dropping an index. Compare with table size, scan activity, and
+the unused-index collector.
+
+### 3.7 Stale planner statistics
+
+Use the normalized autoanalyze threshold ratio instead of ranking absolute
+`n_mod_since_analyze`, which unfairly favors large tables:
+
+```promql
+topk(10, pg_stat_user_tables_autoanalyze_threshold_ratio)
+```
+
+`1.0` means the effective per-table autoanalyze trigger has been reached; values above
+`1.0` suggest planner statistics may be overdue. Pair it with:
+
+```promql
+topk(10, pg_stat_user_tables_last_autoanalyze_seconds_ago)
+```
+
+Tables that have never been autoanalyzed have no age series; use
+`pg_stat_user_tables_never_autoanalyzed` to identify them.
 
 ### How to act
 
@@ -248,7 +332,7 @@ insert/update/delete cost, storage, WAL, and vacuum overhead.
 
 Requires `--collector.stat`.
 
-### 3.5 Cluster-wide I/O and shared-buffer pressure (`pg_stat_io`)
+### 3.8 Cluster-wide I/O and shared-buffer pressure (`pg_stat_io`)
 
 Per-table cache-hit ratios can stay high (98–99%) even while the instance is under real
 memory pressure, because the working set churns through `shared_buffers` faster than the

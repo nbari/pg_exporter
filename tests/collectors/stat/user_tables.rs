@@ -1,6 +1,9 @@
 use super::super::common;
 use anyhow::Result;
-use pg_exporter::collectors::{Collector, stat::user_tables::StatUserTablesCollector};
+use pg_exporter::collectors::{
+    Collector,
+    stat::{StatCollector, user_tables::StatUserTablesCollector},
+};
 use prometheus::Registry;
 use sqlx::postgres::PgPoolOptions;
 use std::{
@@ -979,6 +982,114 @@ async fn test_stat_user_tables_collector_marks_never_autovacuumed_tables() -> Re
     )))
     .execute(&pool)
     .await?;
+
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_stat_user_tables_collector_emits_automatic_maintenance_ages() -> Result<()> {
+    let bootstrap_pool = common::create_test_pool().await?;
+    bootstrap_pool.close().await;
+
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&common::get_test_dsn())
+        .await?;
+    let table_name = unique_table_name("test_maintenance_ages");
+
+    sqlx::query("SET search_path TO pg_temp, pg_catalog")
+        .execute(&pool)
+        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "CREATE TEMP TABLE {table_name} (id INT)"
+    )))
+    .execute(&pool)
+    .await?;
+
+    // Shadow the statistics views in this session so the exact collector query receives
+    // deterministic non-NULL auto-maintenance timestamps without waiting for autovacuum.
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        r"
+        CREATE TEMP VIEW pg_stat_user_tables AS
+        SELECT
+            'maintenance_fixture'::name AS schemaname,
+            '{table_name}'::name AS relname,
+            '{table_name}'::regclass::oid AS relid,
+            0::bigint AS seq_scan,
+            0::bigint AS seq_tup_read,
+            0::bigint AS idx_scan,
+            0::bigint AS idx_tup_fetch,
+            1::bigint AS n_tup_ins,
+            0::bigint AS n_tup_upd,
+            0::bigint AS n_tup_del,
+            0::bigint AS n_tup_hot_upd,
+            1::bigint AS n_live_tup,
+            0::bigint AS n_dead_tup,
+            0::bigint AS n_mod_since_analyze,
+            NULL::timestamp with time zone AS last_vacuum,
+            now() - interval '5 minutes' AS last_autovacuum,
+            NULL::timestamp with time zone AS last_analyze,
+            now() - interval '10 minutes' AS last_autoanalyze,
+            0::bigint AS vacuum_count,
+            1::bigint AS autovacuum_count,
+            0::bigint AS analyze_count,
+            1::bigint AS autoanalyze_count
+        "
+    )))
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        r"
+        CREATE TEMP VIEW pg_statio_user_tables AS
+        SELECT
+            '{table_name}'::regclass::oid AS relid,
+            0::bigint AS heap_blks_read,
+            0::bigint AS heap_blks_hit,
+            0::bigint AS idx_blks_read,
+            0::bigint AS idx_blks_hit,
+            0::bigint AS toast_blks_read,
+            0::bigint AS toast_blks_hit,
+            0::bigint AS tidx_blks_read,
+            0::bigint AS tidx_blks_hit
+        "
+    )))
+    .execute(&pool)
+    .await?;
+
+    let database_name: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(&pool)
+        .await?;
+    let collector = StatCollector::new();
+    let registry = Registry::new();
+    collector.register_metrics(&registry)?;
+    collector.collect(&pool).await?;
+
+    let metric_families = registry.gather();
+    for (metric_name, expected_seconds) in [
+        ("pg_stat_user_tables_last_autovacuum_seconds_ago", 300.0),
+        ("pg_stat_user_tables_last_autoanalyze_seconds_ago", 600.0),
+    ] {
+        let metric = find_metric_for_table(&metric_families, metric_name, &table_name)
+            .ok_or_else(|| anyhow::anyhow!("{metric_name} was not collected for {table_name}"))?;
+        let value = metric.get_gauge().value();
+
+        assert!(value.is_finite(), "{metric_name} should be finite");
+        assert!(
+            (value - expected_seconds).abs() < 1.0,
+            "{metric_name} should be approximately {expected_seconds}, got {value}"
+        );
+        assert!(
+            metric
+                .get_label()
+                .iter()
+                .any(|label| { label.name() == "datname" && label.value() == database_name })
+        );
+        assert!(metric.get_label().iter().any(|label| {
+            label.name() == "schemaname" && label.value() == "maintenance_fixture"
+        }));
+    }
 
     pool.close().await;
     Ok(())

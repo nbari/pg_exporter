@@ -16,7 +16,7 @@ The internal collector consists of two sub-collectors:
 
 ### 1. ProcessCollector (`process.rs`)
 
-Monitors the exporter's process resource consumption. Matches output from `scripts/monitor-exporter.sh`.
+Monitors the exporter's process resource consumption.
 
 **Metrics:**
 - `pg_exporter_process_cpu_percent` - Current CPU usage percentage (Gauge)
@@ -32,7 +32,7 @@ Monitors the exporter's process resource consumption. Matches output from `scrip
 **Simple Approach:**
 - Reads current CPU% directly from kernel (via sysinfo)
 - No complex delta tracking or counters
-- Matches what `ps %cpu` and monitor-exporter.sh show
+- Matches the operating-system process accounting exposed by `sysinfo`
 - Easy to understand and troubleshoot
 
 **Implementation:**
@@ -235,18 +235,6 @@ Platform-specific code is guarded with `#[cfg(target_os = "linux")]`.
 - **Memory**: ~10KB for cached `System` object
 - **Collection time**: ~1-5ms per scrape
 - **Lock contention**: Minimal (scrapes happen every 15-60 seconds)
-
-## Comparison with `scripts/monitor-exporter.sh`
-
-| Feature | Internal Metrics | Bash Script |
-|---------|-----------------|-------------|
-| Accuracy | ✅ Same (reads /proc) | ✅ Same |
-| Sampling Rate | 15-60s (scrape interval) | 1-5s (configurable) |
-| Historical Data | ✅ In Prometheus | ❌ Point-in-time only |
-| Alerting | ✅ Prometheus alerts | ❌ Manual monitoring |
-| Use Case | Production monitoring | Debugging/troubleshooting |
-
-**Both are complementary!** Use internal metrics for production monitoring and alerts. Use the script for high-frequency debugging during incidents.
 
 ## Testing
 

@@ -15,8 +15,9 @@ tests on the benchmark VMs.
   distinguished from an exporter hang. The DB host independently samples
   `pg_stat_activity` every 30 seconds and fails the run if `pg_exporter`
   exceeds its five-connection budget.
-- `check-rust-soak.sh`: Prints current workload/sampler status and a recent log
-  tail for a given run id.
+- `check-rust-soak.sh`: Prints workload/sampler status, connection-budget and
+  lock checks, recent logs, and the accumulated comparison-signal summary for a
+  given run id.
 - `rust-soak-dashboard.json`: Grafana dashboard focused on exporter reliability,
   collector scrape cost, activity/locks/statements pressure, and vacuum debt.
 
@@ -46,6 +47,12 @@ and timeouts. While the lock is held, a bounded `200` (partial multi-database
 collection) or `503` (failed or concurrent scrape) is acceptable. `000` or a
 non-zero curl return code means the exporter did not answer within the client
 bound.
+
+The Prometheus sampler keeps the original direct-probe fields at columns 13-15
+and appends comparison signals for the statements collector's 5-minute mean and
+p95 duration, last-scrape success, and the database host's 5-minute busy CPU
+ratio, available memory, and load average. This makes completed runs
+self-contained even after Prometheus retention expires.
 
 ## pg_stat_statements Self-Filter Benchmark
 

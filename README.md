@@ -358,14 +358,21 @@ immediately with SQLSTATE `53300` (it does not queue and waits for nothing). Set
 Either way, keep enough cluster-wide `max_connections` headroom; the role limit is a
 backstop, not a substitute for the exporter's own concurrency bound.
 
-For local observability testing with Prometheus and Grafana, a practical flow is:
+For comprehensive local observability testing with Prometheus and Grafana, run:
 
     just postgres
-    cargo run -- --collector.statements --collector.activity --collector.locks --collector.database -v
-    just metrics
-    just workload duration=120 clients=10
+    just watch
+    just metrics-dev
+    just exercise-collectors --duration 120 --scale 100 --clients 10
 
-`just workload` reuses `pgbench` to populate `pg_stat_statements` and generate live activity while you inspect `/metrics`, Prometheus, or Grafana.
+`just exercise-collectors` is the umbrella workflow. It sets up pgbench once, then
+runs mixed read/write load, session churn, statements, locks, table/index I/O,
+SLRU and sequence stimuli, CREATE INDEX and ANALYZE progress, manual VACUUM, and
+real autovacuum plus autoanalyze. Features that require restart-time PostgreSQL
+settings (prepared transactions and logical replication slots) are attempted and
+reported as skipped when unavailable. The ANALYZE phase uses session-local
+throttling so it remains active across at least one 10-second Prometheus scrape;
+the database defaults are not changed.
 
 Inside the **devcontainer**, prefer the on-demand compose stack instead, which
 scrapes the exporter by service name (`app:9432`) and hot-reloads the dashboard:
@@ -375,18 +382,6 @@ scrapes the exporter by service name (`app:9432`) and hot-reloads the dashboard:
     just metrics-dev-stop
 
 See [.devcontainer/README.md](.devcontainer/README.md#dashboards-prometheus--grafana--on-demand) for details (editing `grafana/dashboard.json` hot-reloads in Grafana within ~10s).
-
-For vacuum-specific testing, use:
-
-    just vacuum-workflow scale=20 rounds=5 sample_mod=5
-
-`just vacuum-workflow` creates dead tuples in `pgbench_accounts`, shows the table-level autovacuum pressure metrics, and then runs a manual `VACUUM (VERBOSE, ANALYZE)` so the vacuum collector and dashboard have real maintenance activity to display.
-
-For PostgreSQL-managed cleanup testing, use:
-
-    just autovacuum-workflow scale=20 rounds=5 sample_mod=5 timeout=180
-
-`just autovacuum-workflow` creates dead tuples, temporarily lowers the local autovacuum trigger for `pgbench_accounts`, shortens `autovacuum_naptime`, and then waits for PostgreSQL autovacuum to clean the table without a manual `VACUUM`.
 
 For long-running benchmark VM soak tests (Rust exporter only), use:
 

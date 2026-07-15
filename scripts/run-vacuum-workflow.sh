@@ -6,6 +6,7 @@ SCALE="20"
 ROUNDS="5"
 SAMPLE_MOD="5"
 TABLE="pgbench_accounts"
+DO_SETUP=1
 
 source "$(dirname "${BASH_SOURCE[0]}")/pg-connection.sh"
 
@@ -22,6 +23,7 @@ Options:
   --rounds N          Number of update rounds to create dead tuples (default: 5)
   --sample-mod N      Update rows where aid % N = 0 (default: 5)
   --table NAME        Table to vacuum manually (default: pgbench_accounts)
+  --no-setup          Reuse an existing pgbench dataset
   -h, --help          Show this help
 EOF
 }
@@ -47,6 +49,10 @@ while [[ $# -gt 0 ]]; do
         --table)
             TABLE="$2"
             shift 2
+            ;;
+        --no-setup)
+            DO_SETUP=0
+            shift
             ;;
         -h|--help)
             usage
@@ -84,8 +90,10 @@ if ! psql_cmd postgres -c "SELECT 1" >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "🔧 Ensuring pgbench dataset exists (scale=${SCALE})..."
-./scripts/setup-local-test-db.sh --pgbench --pgbench-scale "${SCALE}"
+if [[ "${DO_SETUP}" -eq 1 ]]; then
+    echo "🔧 Ensuring pgbench dataset exists (scale=${SCALE})..."
+    "$(dirname "${BASH_SOURCE[0]}")/setup-local-test-db.sh" --pgbench --pgbench-scale "${SCALE}"
+fi
 
 show_vacuum_stats() {
     local title="$1"

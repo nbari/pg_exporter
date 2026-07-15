@@ -3721,7 +3721,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Ratio of modified tuples to autoanalyze trigger threshold. 1.0 means autoanalyze should trigger now, >1.0 means table statistics are overdue and planner quality can degrade.",
+      "description": "Stale-statistics risk normalized to each table's effective autoanalyze trigger. The collector divides n_mod_since_analyze by the configured threshold plus scale-factor component. 1.0 means autoanalyze should trigger now; >1.0 means planner statistics may be overdue.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3804,7 +3804,7 @@
           "refId": "A"
         }
       ],
-      "title": "Top Tables by Autoanalyze Threshold Ratio",
+      "title": "Stale Statistics: Autoanalyze Threshold Ratio",
       "type": "timeseries"
     },
     {
@@ -3812,7 +3812,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Time since the last autovacuum by table. Large values on write-heavy tables suggest maintenance is not keeping up or is being blocked.",
+      "description": "Time since the last automatic vacuum and analyze by table. Large values on write-heavy tables suggest maintenance is not keeping up or is blocked. Tables that have never been autoanalyzed have no age series and are counted by the adjacent Never Autoanalyzed Tables panel.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3891,11 +3891,20 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "expr": "topk(10, pg_stat_user_tables_last_autovacuum_seconds_ago{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
-          "legendFormat": "{{datname}}.{{schemaname}}.{{relname}}",
+          "legendFormat": "autovacuum {{datname}}.{{schemaname}}.{{relname}}",
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "topk(10, pg_stat_user_tables_last_autoanalyze_seconds_ago{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
+          "legendFormat": "autoanalyze {{datname}}.{{schemaname}}.{{relname}}",
+          "refId": "B"
         }
       ],
-      "title": "Tables Since Last Autovacuum",
+      "title": "Tables Since Last Automatic Maintenance",
       "type": "timeseries"
     },
     {
@@ -4903,7 +4912,7 @@
               },
               "expr": "pg_stat_progress_create_index_blocks_done{job=\"$job\", instance=\"$instance\", database_name=~\"$database\"}",
               "refId": "A",
-              "legendFormat": "blocks done {{datname}}.{{relid}}"
+              "legendFormat": "blocks done {{database_name}}.{{table_name}} ({{phase}})"
             },
             {
               "datasource": {
@@ -4912,7 +4921,7 @@
               },
               "expr": "pg_stat_progress_create_index_blocks_total{job=\"$job\", instance=\"$instance\", database_name=~\"$database\"}",
               "refId": "B",
-              "legendFormat": "blocks total {{datname}}.{{relid}}"
+              "legendFormat": "blocks total {{database_name}}.{{table_name}} ({{phase}})"
             },
             {
               "datasource": {
@@ -4921,7 +4930,7 @@
               },
               "expr": "pg_stat_progress_create_index_tuples_done{job=\"$job\", instance=\"$instance\", database_name=~\"$database\"}",
               "refId": "C",
-              "legendFormat": "tuples done {{datname}}.{{relid}}"
+              "legendFormat": "tuples done {{database_name}}.{{table_name}} ({{phase}})"
             },
             {
               "datasource": {
@@ -4930,7 +4939,7 @@
               },
               "expr": "pg_stat_progress_create_index_tuples_total{job=\"$job\", instance=\"$instance\", database_name=~\"$database\"}",
               "refId": "D",
-              "legendFormat": "tuples total {{datname}}.{{relid}}"
+              "legendFormat": "tuples total {{database_name}}.{{table_name}} ({{phase}})"
             }
           ],
           "title": "Active CREATE INDEX Progress",
@@ -5022,7 +5031,7 @@
               },
               "expr": "pg_stat_progress_analyze_sample_blks_scanned{job=\"$job\", instance=\"$instance\", database_name=~\"$database\"}",
               "refId": "A",
-              "legendFormat": "scanned {{datname}}.{{relid}}"
+              "legendFormat": "scanned {{database_name}}.{{table_name}} ({{phase}})"
             },
             {
               "datasource": {
@@ -5031,7 +5040,7 @@
               },
               "expr": "pg_stat_progress_analyze_sample_blks_total{job=\"$job\", instance=\"$instance\", database_name=~\"$database\"}",
               "refId": "B",
-              "legendFormat": "total {{datname}}.{{relid}}"
+              "legendFormat": "total {{database_name}}.{{table_name}} ({{phase}})"
             }
           ],
           "title": "Active ANALYZE Progress (sample blocks)",
@@ -8822,11 +8831,363 @@
               "sort": "none"
             }
           }
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Estimated live rows per table from PostgreSQL statistics. This is a lightweight estimate rather than an exact COUNT(*); use it to identify the largest row populations and interpret scan, bloat, and maintenance signals.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "linear",
+                "lineWidth": 2
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 207
+          },
+          "id": 99991,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "topk(15, pg_stat_user_tables_n_live_tup{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
+              "legendFormat": "{{datname}}/{{schemaname}}.{{relname}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Top Tables by Estimated Row Count (Live Tuples)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Windowed HOT updates divided by total updates for tables with update activity. Low sustained values mean PostgreSQL is rewriting indexes for most updates; check whether indexed columns are changing and whether a lower fillfactor would leave enough page space. Some workloads are not HOT-eligible, so use this as an investigation signal rather than a universal target.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "linear",
+                "lineWidth": 2
+              },
+              "mappings": [],
+              "max": 1,
+              "min": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "percentunit"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 215
+          },
+          "id": 780039,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "min"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "asc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "bottomk(15, (clamp_min(delta(pg_stat_user_tables_n_tup_hot_upd{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[$__rate_interval]), 0) / clamp_min(delta(pg_stat_user_tables_n_tup_upd{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[$__rate_interval]), 0.000000001)) and on(datname, schemaname, relname) (clamp_min(delta(pg_stat_user_tables_n_tup_upd{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[$__rate_interval]), 0) > 0))",
+              "legendFormat": "{{datname}}/{{schemaname}}.{{relname}}",
+              "refId": "A"
+            }
+          ],
+          "title": "HOT Update Ratio (Active Tables)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Total disk space used by all indexes attached to each table. Large index footprints increase cache pressure, write amplification, and vacuum work, but can be legitimate for large or read-heavy tables. Compare with table size and the unused-index panels before dropping anything.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "linear",
+                "lineWidth": 2
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 215
+          },
+          "id": 780040,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "topk(15, pg_stat_user_tables_index_size_bytes{job=\"$job\", instance=\"$instance\", datname=~\"$database\"})",
+              "legendFormat": "{{datname}}/{{schemaname}}.{{relname}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Top Tables by Total Index Size",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Windowed shared-buffer hit ratio for index blocks, ranked from lowest to highest and limited to tables with observed index I/O. Reads indicate blocks not found in shared_buffers and may still be served by the operating-system cache. Investigate sustained low ratios together with read volume, query latency, and index size.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "linear",
+                "lineWidth": 2
+              },
+              "mappings": [],
+              "max": 1,
+              "min": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 0.95
+                  },
+                  {
+                    "color": "green",
+                    "value": 0.99
+                  }
+                ]
+              },
+              "unit": "percentunit"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 223
+          },
+          "id": 780041,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "min"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "asc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "bottomk(15, (clamp_min(delta(pg_stat_user_tables_idx_blks_hit_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[$__rate_interval]), 0) / clamp_min(clamp_min(delta(pg_stat_user_tables_idx_blks_hit_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[$__rate_interval]), 0) + clamp_min(delta(pg_stat_user_tables_idx_blks_read_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[$__rate_interval]), 0), 0.000000001)) and on(datname, schemaname, relname) ((clamp_min(delta(pg_stat_user_tables_idx_blks_hit_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[$__rate_interval]), 0) + clamp_min(delta(pg_stat_user_tables_idx_blks_read_total{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[$__rate_interval]), 0)) > 0))",
+              "legendFormat": "{{datname}}/{{schemaname}}.{{relname}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Lowest Active Table Index Cache Hit Ratio",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Windowed live rows fetched divided by index scans for tables with scan activity. High values can indicate broad range scans or low selectivity, but may be expected for legitimate batch queries and bitmap scans. Confirm the responsible SQL and execution plan before changing an index.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "linear",
+                "lineWidth": 2
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 223
+          },
+          "id": 780042,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "topk(15, (clamp_min(delta(pg_stat_user_tables_idx_tup_fetch{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[$__rate_interval]), 0) / clamp_min(delta(pg_stat_user_tables_idx_scan{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[$__rate_interval]), 0.000000001)) and on(datname, schemaname, relname) (clamp_min(delta(pg_stat_user_tables_idx_scan{job=\"$job\", instance=\"$instance\", datname=~\"$database\"}[$__rate_interval]), 0) > 0))",
+              "legendFormat": "{{datname}}/{{schemaname}}.{{relname}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Rows Fetched per Active Index Scan",
+          "type": "timeseries"
         }
       ],
       "title": "Table Statistics (requires --collector.stat)",
       "type": "row",
-      "description": "Table-level DML activity and statistics. Identify hot tables and optimization candidates. REQUIRES --collector.stat flag."
+      "description": "Table-level DML, cardinality, HOT-update efficiency, scan selectivity, index footprint, and heap/index cache behavior. Identify hot tables and optimization candidates. REQUIRES --collector.stat flag."
     },
     {
       "collapsed": true,
@@ -13734,7 +14095,8 @@
     "postgresql",
     "database",
     "monitoring",
-    "pg_exporter"
+    "pg_exporter",
+    "0.17.2"
   ],
   "templating": {
     "list": [
@@ -13859,7 +14221,7 @@
   "timezone": "browser",
   "title": "PostgreSQL Monitoring Dashboard",
   "uid": "pg_exporter_monitoring",
-  "version": 10,
+  "version": 11,
   "weekStart": "",
   "description": "PostgreSQL Performance Monitoring Dashboard This dashboard provides comprehensive monitoring for PostgreSQL databases using pg_exporter metrics. KEY SECTIONS: - Instance Information: PostgreSQL version, settings, and uptime - Critical Alerts: Connection pool utilization and performance warnings - Connection Analysis: Active connections, idle transactions, and connection age - Query Performance: Top queries by execution time, calls, and I/O (requires pg_stat_statements extension) - Cache & I/O: Buffer cache hit ratios, shared buffers, and I/O operations - Locks & Blocking: Lock monitoring and blocking query detection - Vacuum & Maintenance: Autovacuum activity, table bloat, and maintenance statistics - WAL: WAL throughput, record activity, buffer pressure, and FPI ratio - Replication: lag, role, and max replication lag bytes (requires replication collector) - Table Statistics: DML operations and table-level activity - Database Size: Database growth and size trends REQUIREMENTS: - PostgreSQL 14+ - pg_stat_statements extension enabled for query performance metrics - Appropriate monitoring user permissions For more information, visit: https://github.com/nbari/pg_exporter"
 }

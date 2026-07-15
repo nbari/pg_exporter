@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.2] - 2026-07-15
+
+### Added
+- **Expanded table-statistics dashboard coverage**: Added panels for estimated row counts, HOT-update ratio, total index size, active-table index cache-hit ratio, and rows fetched per active index scan. Refined stale-statistics and automatic-maintenance panels, with matching diagnostic guidance for interpreting each signal safely.
+- **Unified collector exercise workflow**: `just exercise-collectors` now performs one pgbench setup followed by mixed workload/session/I/O stimuli, SLRU and sequence activity, scrape-visible ANALYZE and CREATE INDEX progress, manual VACUUM, and verified autovacuum plus autoanalyze. Restart-dependent prepared-transaction and logical-slot stimuli are attempted when supported and reported as skipped otherwise.
+- **End-to-end maintenance-age regression**: Added an always-run PostgreSQL integration test that executes the real `stat` collector path and verifies both automatic-maintenance age metric families, labels, finite values, and expected ages in the Prometheus registry.
+- **Richer soak comparison signals**: Extended the benchmark sampler and status report with statements collector mean/p95 duration and success, plus database-host CPU, available memory, and load averages, preserving comparison data beyond Prometheus retention.
+
+### Fixed
+- **Automatic-maintenance ages were silently missing**: Explicitly cast `EXTRACT(EPOCH ...)` results to `double precision` before SQLx decodes them as `f64`, and propagate decode failures instead of converting type mismatches into absent metrics. `pg_stat_user_tables_last_autovacuum_seconds_ago` and `pg_stat_user_tables_last_autoanalyze_seconds_ago` now emit whenever PostgreSQL has the corresponding timestamps.
+- **ANALYZE progress was missed between scrapes**: The local exercise uses session-only statistics and vacuum-cost settings to keep ANALYZE active across a 10-second Prometheus scrape. ANALYZE and CREATE INDEX dashboard legends now use their actual `database_name`, `table_name`, and `phase` labels.
+- **Exercise cleanup and auto-maintenance verification**: The unified workflow requires both autovacuum and autoanalyze to complete, reports effective per-table thresholds, restores temporary autovacuum settings on exit, and preserves recovery state when an interrupted cleanup cannot reach PostgreSQL.
+
+### Removed
+- **Superseded local workflow surface**: Removed the separate `just workload`, `just vacuum-workflow`, and `just autovacuum-workflow` recipes in favor of the single comprehensive `just exercise-collectors` entrypoint.
+- **Orphaned process diagnostics**: Removed the unreferenced `compare-cpu-live.sh` and `monitor-exporter.sh` scripts; exporter process metrics and Prometheus now provide the maintained resource-monitoring path.
+
 ## [0.17.1] - 2026-07-15
 
 ### Fixed
