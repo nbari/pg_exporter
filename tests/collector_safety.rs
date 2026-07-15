@@ -60,6 +60,38 @@ fn production_collectors_do_not_bypass_connection_budget() -> Result<()> {
 }
 
 #[test]
+fn production_collectors_do_not_use_regexp_replace() -> Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let collector_root = root.join("src").join("collectors");
+    let mut failures = Vec::new();
+
+    for path in rust_files_under(&collector_root)? {
+        let source = std::fs::read_to_string(&path)?;
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or(source.as_str());
+
+        if production_source
+            .to_ascii_lowercase()
+            .contains("regexp_replace(")
+        {
+            let relative = path.strip_prefix(root).unwrap_or(path.as_path());
+            failures.push(format!(
+                "{} uses regexp_replace in collector code; avoid per-row regex processing in scrape queries",
+                relative.display()
+            ));
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!(failures.join("\n")))
+    }
+}
+
+#[test]
 fn open_db_connection_has_bounded_connect_timeout() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let util_path = root.join("src").join("collectors").join("util.rs");

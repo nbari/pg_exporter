@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.1] - 2026-07-15
+
+### Fixed
+- **Faster `pg_stat_statements` scrapes** ([#31](https://github.com/nbari/pg_exporter/issues/31)): Replaced the collector's per-row `BTRIM(REGEXP_REPLACE(...))` self-query filter with a stable direct `NOT LIKE` prefix match, avoiding full regex processing of large accumulated query texts. Added SQL-shape and live PostgreSQL self-exclusion regressions, a repository-wide guard against `regexp_replace` in production collectors, and an always-run configurable benchmark; local measurements showed roughly 56x faster predicate evaluation on the default dataset and 87x on a 5,000-row/~700 MB workload. Manual query-diagnostic scripts now also bound query text before whitespace normalization.
+
 ## [0.17.0] - 2026-07-14
 
 ### Added

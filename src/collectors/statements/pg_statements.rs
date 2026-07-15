@@ -74,6 +74,8 @@ enum ExtensionState {
 }
 
 const MISSING_EXTENSION_RECHECK_AFTER: Duration = Duration::from_mins(1);
+// Reuse this value for the query start and self-filter so formatting cannot drift.
+const SELF_QUERY_PREFIX: &str = "SELECT queryid::text, d.datname,";
 
 impl PgStatementsCollector {
     /// Create a new `pg_statements` collector
@@ -207,10 +209,7 @@ impl PgStatementsCollector {
     fn build_pg_statements_query(&self) -> String {
         // IMPORTANT: keep casts to avoid NUMERIC/i64 mismatches.
         format!(
-            r"
-            SELECT
-                queryid::text,
-                d.datname,
+            r"{SELF_QUERY_PREFIX}
                 COALESCE(r.rolname, '<unknown>') as usename,
                 LEFT(query, 80) as query_short,
                 calls::bigint,
@@ -236,7 +235,7 @@ impl PgStatementsCollector {
             WHERE queryid IS NOT NULL
               AND total_exec_time > 0
               AND d.datname NOT IN ('{TEMPLATE0}', '{TEMPLATE1}')
-              AND BTRIM(REGEXP_REPLACE(query, '[[:space:]]+', ' ', 'g')) NOT LIKE 'SELECT queryid::text, d.datname,%'
+              AND query NOT LIKE '{SELF_QUERY_PREFIX}%'
             ORDER BY total_exec_time DESC
             LIMIT {}
             ",
@@ -561,13 +560,15 @@ mod tests {
     }
 
     #[test]
-    fn test_build_pg_statements_query_excludes_self_query() {
+    fn test_build_pg_statements_query_uses_fast_self_filter() {
         let collector = PgStatementsCollector::with_top_n(25);
         let query = collector.build_pg_statements_query();
+        let expected_filter = format!("AND query NOT LIKE '{SELF_QUERY_PREFIX}%'");
 
-        assert!(query.contains(
-            "AND BTRIM(REGEXP_REPLACE(query, '[[:space:]]+', ' ', 'g')) NOT LIKE 'SELECT queryid::text, d.datname,%'"
-        ));
+        assert!(query.starts_with(SELF_QUERY_PREFIX));
+        assert!(query.contains(&expected_filter));
+        assert!(!query.contains("REGEXP_REPLACE"));
+        assert!(!query.contains("BTRIM"));
     }
 
     #[test]

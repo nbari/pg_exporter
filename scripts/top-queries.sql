@@ -16,7 +16,7 @@ SELECT
     round(mean_exec_time::numeric, 2)                                  AS mean_ms,
     round(100.0 * shared_blks_hit / NULLIF(shared_blks_hit + shared_blks_read, 0), 1) AS hit_pct,
     rows,
-    left(regexp_replace(query, '\s+', ' ', 'g'), 70)                   AS query
+    left(regexp_replace(left(query, 256), '\s+', ' ', 'g'), 70)        AS query
 FROM pg_stat_statements
 ORDER BY total_exec_time DESC
 LIMIT 20;

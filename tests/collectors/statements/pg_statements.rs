@@ -1,14 +1,62 @@
 use super::super::common;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use pg_exporter::collectors::Collector;
 use pg_exporter::collectors::statements::pg_statements::PgStatementsCollector;
 use prometheus::Registry;
-use sqlx::postgres::PgPoolOptions;
-use std::time::Duration as StdDuration;
+use sqlx::{PgConnection, postgres::PgPoolOptions};
+use std::{
+    env,
+    time::{Duration as StdDuration, Instant},
+};
 use tokio::time::{Duration, sleep};
+
+const SELF_QUERY_PREFIX: &str = "SELECT queryid::text, d.datname,";
+const BASELINE_FILTER_BENCHMARK_QUERY: &str = "
+    SELECT COUNT(*)::bigint
+    FROM pg_statements_filter_benchmark
+    WHERE BTRIM(REGEXP_REPLACE(query, '[[:space:]]+', ' ', 'g'))
+          NOT LIKE 'SELECT queryid::text, d.datname,%'
+";
+const PREFIX_FILTER_BENCHMARK_QUERY: &str = "
+    SELECT COUNT(*)::bigint
+    FROM pg_statements_filter_benchmark
+    WHERE query NOT LIKE 'SELECT queryid::text, d.datname,%'
+";
+const BENCHMARK_RUNS: usize = 5;
+const DEFAULT_BENCHMARK_ROWS: i32 = 5_000;
+const DEFAULT_BENCHMARK_QUERY_BYTES: i32 = 4_096;
 
 async fn setup_pg_statements_test_db() -> Result<Option<common::IsolatedTestDatabase>> {
     common::create_pg_statements_test_database("pg_statements").await
+}
+
+fn positive_benchmark_setting(name: &str, default: i32) -> Result<i32> {
+    let value = match env::var(name) {
+        Ok(value) => value,
+        Err(env::VarError::NotPresent) => return Ok(default),
+        Err(error) => return Err(error.into()),
+    };
+    let parsed = value
+        .parse::<i32>()
+        .with_context(|| format!("{name} must be a positive integer"))?;
+    anyhow::ensure!(parsed > 0, "{name} must be a positive integer");
+    Ok(parsed)
+}
+
+async fn timed_filter_count(
+    connection: &mut PgConnection,
+    query: &'static str,
+) -> Result<(i64, StdDuration)> {
+    let started = Instant::now();
+    let count = sqlx::query_scalar::<_, i64>(query)
+        .fetch_one(connection)
+        .await?;
+    Ok((count, started.elapsed()))
+}
+
+fn median_duration(samples: &mut [StdDuration]) -> StdDuration {
+    samples.sort_unstable();
+    samples.get(samples.len() / 2).copied().unwrap_or_default()
 }
 
 #[tokio::test]
@@ -113,6 +161,155 @@ async fn test_pg_statements_collector_with_top_n_configuration() -> Result<()> {
     let result = collector.collect(pool).await;
     assert!(result.is_ok());
 
+    test_db.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_pg_statements_collector_excludes_own_query() -> Result<()> {
+    let Some(test_db) = setup_pg_statements_test_db().await? else {
+        println!("pg_stat_statements extension not installed, skipping test");
+        return Ok(());
+    };
+    let pool = test_db.pool();
+
+    common::reset_pg_stat_statements_current_database(pool).await?;
+
+    let collector = PgStatementsCollector::with_top_n(100_000);
+    let registry = Registry::new();
+    collector.register_metrics(&registry)?;
+    collector.collect(pool).await?;
+
+    let self_query_recorded = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+            SELECT 1
+            FROM pg_stat_statements
+            WHERE dbid = (
+                SELECT oid
+                FROM pg_database
+                WHERE datname = current_database()
+            )
+              AND query LIKE 'SELECT queryid::text, d.datname,%'
+        )",
+    )
+    .fetch_one(pool)
+    .await?;
+    assert!(
+        self_query_recorded,
+        "expected PostgreSQL to record the collector query with its stable prefix"
+    );
+
+    collector.collect(pool).await?;
+
+    let metric_families = registry.gather();
+    let calls_family = metric_families
+        .iter()
+        .find(|family| family.name() == "postgres_pg_stat_statements_calls_total")
+        .context("expected pg_stat_statements calls metrics after collection")?;
+    let self_query_exposed = calls_family.get_metric().iter().any(|metric| {
+        metric.get_label().iter().any(|label| {
+            label.name() == "query_short" && label.value().starts_with(SELF_QUERY_PREFIX)
+        })
+    });
+    assert!(
+        !self_query_exposed,
+        "collector must exclude its own pg_stat_statements query"
+    );
+
+    test_db.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn benchmark_pg_statements_self_filter() -> Result<()> {
+    let row_count =
+        positive_benchmark_setting("PG_EXPORTER_STATEMENTS_BENCH_ROWS", DEFAULT_BENCHMARK_ROWS)?;
+    let query_bytes = positive_benchmark_setting(
+        "PG_EXPORTER_STATEMENTS_BENCH_QUERY_BYTES",
+        DEFAULT_BENCHMARK_QUERY_BYTES,
+    )?;
+    let filler_repeats = query_bytes.saturating_add(31) / 32;
+
+    let test_db = common::IsolatedTestDatabase::new("pg_statements_benchmark").await?;
+    let mut connection = test_db.pool().acquire().await?;
+
+    sqlx::query("SET max_parallel_workers_per_gather = 0")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query("SET jit = off")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query(
+        "CREATE TEMP TABLE pg_statements_filter_benchmark (
+            query text NOT NULL
+        )",
+    )
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "INSERT INTO pg_statements_filter_benchmark (query)
+         SELECT CASE
+             WHEN benchmark_id = 1 THEN
+                 $1 || repeat('x', GREATEST($2 - length($1), 0))
+             ELSE
+                 'SELECT benchmark_' || benchmark_id::text || ' ' ||
+                 repeat(md5(benchmark_id::text), $3)
+             END
+         FROM generate_series(1, $4) AS benchmark_id",
+    )
+    .bind(SELF_QUERY_PREFIX)
+    .bind(query_bytes)
+    .bind(filler_repeats)
+    .bind(row_count)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query("ANALYZE pg_statements_filter_benchmark")
+        .execute(&mut *connection)
+        .await?;
+
+    let (baseline_warmup_count, _) =
+        timed_filter_count(&mut connection, BASELINE_FILTER_BENCHMARK_QUERY).await?;
+    let (prefix_warmup_count, _) =
+        timed_filter_count(&mut connection, PREFIX_FILTER_BENCHMARK_QUERY).await?;
+    let expected_count = i64::from(row_count) - 1;
+    assert_eq!(baseline_warmup_count, expected_count);
+    assert_eq!(prefix_warmup_count, expected_count);
+
+    let mut baseline_samples = Vec::with_capacity(BENCHMARK_RUNS);
+    let mut prefix_samples = Vec::with_capacity(BENCHMARK_RUNS);
+    for iteration in 0..BENCHMARK_RUNS {
+        let (baseline, prefix) = if iteration.is_multiple_of(2) {
+            (
+                timed_filter_count(&mut connection, BASELINE_FILTER_BENCHMARK_QUERY).await?,
+                timed_filter_count(&mut connection, PREFIX_FILTER_BENCHMARK_QUERY).await?,
+            )
+        } else {
+            let prefix = timed_filter_count(&mut connection, PREFIX_FILTER_BENCHMARK_QUERY).await?;
+            let baseline =
+                timed_filter_count(&mut connection, BASELINE_FILTER_BENCHMARK_QUERY).await?;
+            (baseline, prefix)
+        };
+
+        assert_eq!(baseline.0, prefix.0);
+        baseline_samples.push(baseline.1);
+        prefix_samples.push(prefix.1);
+    }
+
+    let baseline_median = median_duration(&mut baseline_samples);
+    let prefix_median = median_duration(&mut prefix_samples);
+    let speedup = if prefix_median.is_zero() {
+        f64::INFINITY
+    } else {
+        baseline_median.as_secs_f64() / prefix_median.as_secs_f64()
+    };
+    println!(
+        "pg_statements self-filter benchmark: rows={row_count}, query_bytes={query_bytes}, \
+         regex_median_ms={:.3}, prefix_median_ms={:.3}, speedup={speedup:.2}x",
+        baseline_median.as_secs_f64() * 1_000.0,
+        prefix_median.as_secs_f64() * 1_000.0,
+    );
+
+    drop(connection);
     test_db.cleanup().await?;
     Ok(())
 }

@@ -12,12 +12,12 @@ SELECT
     blocked.usename                                           AS blocked_user,
     blocked.datname                                           AS datname,
     round(extract(epoch FROM now() - blocked.query_start))::int AS wait_s,
-    left(regexp_replace(blocked.query, '\s+', ' ', 'g'), 50)  AS blocked_query,
+    left(regexp_replace(left(blocked.query, 256), '\s+', ' ', 'g'), 50) AS blocked_query,
     blocking.pid                                              AS blocking_pid,
     blocking.usename                                          AS blocking_user,
     blocking.state                                            AS blocking_state,
     round(extract(epoch FROM now() - blocking.state_change))::int AS blocking_state_age_s,
-    left(regexp_replace(blocking.query, '\s+', ' ', 'g'), 60) AS blocking_query
+    left(regexp_replace(left(blocking.query, 256), '\s+', ' ', 'g'), 60) AS blocking_query
 FROM pg_stat_activity blocked
 JOIN LATERAL unnest(pg_blocking_pids(blocked.pid)) AS bp(pid) ON true
 JOIN pg_stat_activity blocking ON blocking.pid = bp.pid

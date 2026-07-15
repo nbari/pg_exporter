@@ -18,7 +18,7 @@ SELECT
     round(extract(epoch FROM now() - COALESCE(query_start, xact_start))::numeric, 1) AS age_s,
     wait_event_type,
     wait_event,
-    left(regexp_replace(query, '\s+', ' ', 'g'), 70)                   AS query
+    left(regexp_replace(left(query, 256), '\s+', ' ', 'g'), 70)        AS query
 FROM pg_stat_activity
 WHERE backend_type = 'client backend'
   AND pid <> pg_backend_pid()

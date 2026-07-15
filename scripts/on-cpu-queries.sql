@@ -19,7 +19,7 @@ SELECT
     datname                                                   AS datname,
     round(extract(epoch FROM now() - query_start)::numeric, 1) AS running_s,
     backend_type,
-    left(regexp_replace(query, '\s+', ' ', 'g'), 80)          AS query
+    left(regexp_replace(left(query, 256), '\s+', ' ', 'g'), 80) AS query
 FROM pg_stat_activity
 WHERE state = 'active'
   AND wait_event IS NULL

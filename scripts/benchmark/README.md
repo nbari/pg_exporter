@@ -46,3 +46,35 @@ and timeouts. While the lock is held, a bounded `200` (partial multi-database
 collection) or `503` (failed or concurrent scrape) is acceptable. `000` or a
 non-zero curl return code means the exporter did not answer within the client
 bound.
+
+## pg_stat_statements Self-Filter Benchmark
+
+The statements integration suite compares the previous
+`BTRIM(REGEXP_REPLACE(...))` self-filter with the direct `NOT LIKE` prefix
+filter. It creates an isolated local database and temporary synthetic query
+texts, verifies both predicates return the same result, and prints their median
+execution times and speedup. The benchmark runs as part of the normal test
+suite.
+
+Run only this benchmark:
+
+```bash
+PG_EXPORTER_DSN="postgresql://postgres:postgres@localhost:5432/postgres" \
+cargo test --test collectors_tests benchmark_pg_statements_self_filter -- --nocapture
+```
+
+The default dataset is 5,000 rows with approximately 4 KiB per query. Override
+its size with `PG_EXPORTER_STATEMENTS_BENCH_ROWS` and
+`PG_EXPORTER_STATEMENTS_BENCH_QUERY_BYTES`. To approximate the workload from
+issue #31:
+
+```bash
+PG_EXPORTER_DSN="postgresql://postgres:postgres@localhost:5432/postgres" \
+PG_EXPORTER_STATEMENTS_BENCH_ROWS=5000 \
+PG_EXPORTER_STATEMENTS_BENCH_QUERY_BYTES=140000 \
+cargo test --test collectors_tests benchmark_pg_statements_self_filter -- --nocapture
+```
+
+The benchmark measures the predicate cost in isolation. PostgreSQL still loads
+the external `pg_stat_statements` query-text file when reading the view, so the
+reported speedup does not represent the collector's entire scrape duration.
