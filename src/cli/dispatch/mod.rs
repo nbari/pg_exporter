@@ -14,6 +14,7 @@ use clap::ArgMatches;
 use secrecy::SecretString;
 use std::fs;
 use std::num::{NonZeroU64, NonZeroUsize};
+use std::time::Duration;
 use tracing::info;
 
 /// Read DSN with priority: `PG_EXPORTER_DSN_FILE` > `PG_EXPORTER_DSN`/--dsn > default
@@ -175,6 +176,16 @@ pub fn get_collector_config(matches: &ArgMatches) -> Result<CollectorConfig> {
         })?
         .get();
 
+    let statements_query_text_refresh = matches
+        .get_one::<u64>("statements.query-text-refresh")
+        .copied()
+        .ok_or_else(|| {
+            anyhow!(
+                "internal CLI error: missing resolved value for --statements.query-text-refresh"
+            )
+        })
+        .map(|seconds| (seconds > 0).then(|| Duration::from_secs(seconds)))?;
+
     let sequences_min_ratio = matches
         .get_one::<f64>("sequences.min-ratio")
         .copied()
@@ -183,6 +194,7 @@ pub fn get_collector_config(matches: &ArgMatches) -> Result<CollectorConfig> {
         })?;
 
     Ok(CollectorConfig::new(statements_top_n)
+        .with_statements_query_text_refresh(statements_query_text_refresh)
         .with_sequences_min_ratio(sequences_min_ratio)
         .with_enabled(&enabled))
 }

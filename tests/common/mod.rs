@@ -342,6 +342,54 @@ pub async fn reset_pg_stat_statements_current_database(pool: &PgPool) -> Result<
     Ok(())
 }
 
+/// Drops `pg_stat_statements` entries that belong to databases which no longer exist.
+///
+/// The view is cluster-wide and entries outlive their database, so every integration
+/// test that seeds statements into a throwaway database leaves its query texts behind
+/// forever. That inflates the query-text file for *all* later tests — enough to change
+/// whether a `showtext = true` read spills — and is invisible in any single database.
+/// Only orphaned dbids are reset, so concurrently running tests are unaffected.
+pub async fn prune_orphaned_pg_stat_statements(pool: &PgPool) -> Result<u64> {
+    let orphans = sqlx::query_scalar::<_, i64>(
+        "SELECT DISTINCT s.dbid::bigint
+         FROM pg_stat_statements s
+         LEFT JOIN pg_database d ON d.oid = s.dbid
+         WHERE d.oid IS NULL",
+    )
+    .fetch_all(pool)
+    .await
+    .context("Failed to list orphaned pg_stat_statements databases")?;
+
+    let mut pruned = 0;
+    for dbid in orphans {
+        let reset = sqlx::query("SELECT pg_stat_statements_reset(0::oid, $1::oid, 0::bigint)")
+            .bind(i32::try_from(dbid).unwrap_or_default())
+            .execute(pool)
+            .await;
+
+        if reset.is_ok() {
+            pruned += 1;
+        }
+    }
+
+    Ok(pruned)
+}
+
+/// Total size of the query texts `pg_stat_statements` currently keeps, in bytes.
+///
+/// A `showtext = true` read materializes all of them at once, so this is what decides
+/// whether such a read fits in `work_mem`.
+pub async fn pg_stat_statements_text_bytes(pool: &PgPool) -> Result<i64> {
+    let bytes = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(SUM(length(query)), 0)::bigint FROM pg_stat_statements",
+    )
+    .fetch_one(pool)
+    .await
+    .context("Failed to measure pg_stat_statements query text size")?;
+
+    Ok(bytes)
+}
+
 /// Get test DSN as `SecretString`
 pub fn get_test_dsn_secret() -> SecretString {
     SecretString::from(get_test_dsn())

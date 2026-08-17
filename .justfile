@@ -322,9 +322,21 @@ t-deploy message="CI test": check-develop check-clean test
     echo "🧹 To remove it:"
     echo "   git push origin :refs/tags/${tag} && git tag -d ${tag}"
 
-# Watch for changes and run
+# List every registered collector as a --collector.<name> flag
+collector-flags:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    sed -n '/register_collectors! {/,/^}/p' src/collectors/mod.rs \
+        | sed -n 's/^[[:space:]]*\([a-z0-9_]\+\)[[:space:]]*=>.*/--collector.\1/p' \
+        | tr '\n' ' '
+
+# Watch for changes and run with every collector enabled
 watch:
-  cargo watch -x 'run -- --collector.vacuum --collector.activity --collector.locks --collector.database --collector.stat --collector.replication --collector.index --collector.statements --collector.exporter --collector.tls --collector.stat_io --collector.slru --collector.sequences --collector.system -v'
+    #!/usr/bin/env bash
+    set -euo pipefail
+    flags=$(just collector-flags)
+    echo "▶️  enabling: ${flags}"
+    cargo watch -x "run -- ${flags} -v"
 
 # get metrics curl
 curl:

@@ -197,6 +197,7 @@ register_collectors! {
     stat => StatCollector,
     stat_io => StatIoCollector,
     slru => SlruCollector,
+    temp => TempCollector,
     replication => ReplicationCollector,
     index => IndexCollector,
     sequences => SequencesCollector,

@@ -7,7 +7,6 @@ mod common;
 
 pub mod activity;
 pub mod connection;
-pub mod connection_hardening;
 pub mod database;
 pub mod default;
 pub mod index;
@@ -19,5 +18,6 @@ pub mod stat;
 pub mod stat_io;
 pub mod statements;
 pub mod system;
+pub mod temp;
 pub mod tls;
 pub mod vacuum;

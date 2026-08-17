@@ -8,6 +8,9 @@ on:
     branches:
       - '*'
 
+permissions:
+  contents: read
+
 # Harden against spurious crates.io/curl network failures on hosted runners.
 env:
   CARGO_NET_RETRY: "10"

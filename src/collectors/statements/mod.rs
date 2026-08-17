@@ -1,10 +1,11 @@
 use crate::collectors::Collector;
-use anyhow::Result;
+use crate::collectors::config::DEFAULT_STATEMENTS_QUERY_TEXT_REFRESH;use anyhow::Result;
 use futures::future::BoxFuture;
 use futures::stream::{FuturesUnordered, StreamExt};
 use prometheus::Registry;
 use sqlx::PgPool;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{debug, info_span, instrument, warn};
 use tracing_futures::Instrument as _;
 
@@ -65,8 +66,20 @@ impl StatementsCollector {
 
     #[must_use]
     pub fn with_top_n(top_n: usize) -> Self {
+        Self::with_config(top_n, Some(DEFAULT_STATEMENTS_QUERY_TEXT_REFRESH))
+    }
+
+    /// Build the collector from resolved runtime options.
+    ///
+    /// `query_text_refresh` is the minimum delay between two `pg_stat_statements`
+    /// query-text lookups; `None` disables them.
+    #[must_use]
+    pub fn with_config(top_n: usize, query_text_refresh: Option<Duration>) -> Self {
         Self {
-            subs: vec![Arc::new(PgStatementsCollector::with_top_n(top_n))],
+            subs: vec![Arc::new(PgStatementsCollector::with_config(
+                top_n,
+                query_text_refresh,
+            ))],
         }
     }
 }

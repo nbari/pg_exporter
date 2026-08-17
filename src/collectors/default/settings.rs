@@ -28,6 +28,14 @@ impl SettingsCollector {
         }
     }
 
+    fn insert_gauge(&self, name: &str, gauge: IntGauge) -> Result<()> {
+        self.gauges
+            .write()
+            .map_err(|e| anyhow::anyhow!("Failed to acquire write lock: {e}"))?
+            .insert(name.to_string(), gauge);
+        Ok(())
+    }
+
     #[instrument(
         skip(self, pool),
         level = "info",
@@ -64,10 +72,12 @@ impl SettingsCollector {
                 'autovacuum_naptime',
                 'autovacuum_analyze_threshold',
                 'autovacuum_vacuum_threshold',
+                'block_size',
                 'checkpoint_timeout',
                 'data_checksums',
                 'fsync',
                 'log_min_duration_statement',
+                'log_temp_files',
                 'maintenance_work_mem',
                 'max_connections',
                 'max_locks_per_transaction',
@@ -75,6 +85,7 @@ impl SettingsCollector {
                 'min_wal_size',
                 'shared_buffers',
                 'synchronous_commit',
+                'temp_file_limit',
                 'wal_buffers',
                 'work_mem'
             )
@@ -103,7 +114,12 @@ impl SettingsCollector {
                 |v| v,
             );
 
-            // Convert memory settings to bytes based on their units
+            // Convert memory settings to bytes based on their units.
+            //
+            // Negative values are sentinels, not sizes: `temp_file_limit = -1` means
+            // unlimited and `log_temp_files = -1` means disabled. Scaling them by the
+            // unit would turn `-1` into `-1024` and silently break every dashboard and
+            // alert that compares against `-1`.
             if matches!(
                 name.as_str(),
                 "shared_buffers"
@@ -112,15 +128,18 @@ impl SettingsCollector {
                     | "wal_buffers"
                     | "max_wal_size"
                     | "min_wal_size"
-            ) && let Some(ref u) = unit
+                    | "temp_file_limit"
+                    | "log_temp_files"
+            ) && value >= 0
+                && let Some(ref u) = unit
             {
-                value *= match u.as_str() {
+                value = value.saturating_mul(match u.as_str() {
                     "8kB" => 8192,
                     "kB" => 1024,
                     "MB" => 1024 * 1024,
                     "GB" => 1024 * 1024 * 1024,
                     _ => 1,
-                };
+                });
             }
 
             metrics.push((name, value));
@@ -129,6 +148,108 @@ impl SettingsCollector {
         Ok(metrics)
     }
 }
+
+/// `pg_settings` names exported by this collector, paired with their metric name
+/// and help text. Kept next to the `SELECT` above: both lists must stay in sync.
+const SETTINGS_METRICS: &[(&str, &str, &str)] = &[
+        (
+            "autovacuum",
+            "pg_settings_autovacuum",
+            "PostgreSQL setting: autovacuum",
+        ),
+        (
+            "autovacuum_max_workers",
+            "pg_settings_autovacuum_max_workers",
+            "PostgreSQL setting: autovacuum_max_workers",
+        ),
+        (
+            "autovacuum_naptime",
+            "pg_settings_autovacuum_naptime_seconds",
+            "PostgreSQL setting: autovacuum_naptime in seconds",
+        ),
+        (
+            "autovacuum_analyze_threshold",
+            "pg_settings_autovacuum_analyze_threshold",
+            "PostgreSQL setting: autovacuum_analyze_threshold",
+        ),
+        (
+            "autovacuum_vacuum_threshold",
+            "pg_settings_autovacuum_vacuum_threshold",
+            "PostgreSQL setting: autovacuum_vacuum_threshold",
+        ),
+        (
+            "block_size",
+            "pg_settings_block_size_bytes",
+            "PostgreSQL setting: block_size in bytes; multiply pg_stat_statements temp_blks_* by this to get bytes",
+        ),
+        (
+            "checkpoint_timeout",
+            "pg_settings_checkpoint_timeout_seconds",
+            "PostgreSQL setting: checkpoint_timeout in seconds",
+        ),
+        ("data_checksums", "pg_settings_data_checksums", "PostgreSQL setting: data_checksums"),
+        ("fsync", "pg_settings_fsync", "PostgreSQL setting: fsync"),
+        (
+            "log_min_duration_statement",
+            "pg_settings_log_min_duration_statement_milliseconds",
+            "PostgreSQL setting: log_min_duration_statement in milliseconds",
+        ),
+        (
+            "log_temp_files",
+            "pg_settings_log_temp_files_bytes",
+            "PostgreSQL setting: log_temp_files in bytes; -1 disables temp-file logging, 0 logs every temporary file",
+        ),
+        (
+            "maintenance_work_mem",
+            "pg_settings_maintenance_work_mem_bytes",
+            "PostgreSQL setting: maintenance_work_mem in bytes",
+        ),
+        (
+            "max_connections",
+            "pg_settings_max_connections",
+            "PostgreSQL setting: max_connections",
+        ),
+        (
+            "max_locks_per_transaction",
+            "pg_settings_max_locks_per_transaction",
+            "PostgreSQL setting: max_locks_per_transaction",
+        ),
+        (
+            "max_wal_size",
+            "pg_settings_max_wal_size_bytes",
+            "PostgreSQL setting: max_wal_size in bytes",
+        ),
+        (
+            "min_wal_size",
+            "pg_settings_min_wal_size_bytes",
+            "PostgreSQL setting: min_wal_size in bytes",
+        ),
+        (
+            "shared_buffers",
+            "pg_settings_shared_buffers_bytes",
+            "PostgreSQL setting: shared_buffers in bytes",
+        ),
+        (
+            "synchronous_commit",
+            "pg_settings_synchronous_commit",
+            "PostgreSQL setting: synchronous_commit",
+        ),
+        (
+            "temp_file_limit",
+            "pg_settings_temp_file_limit_bytes",
+            "PostgreSQL setting: temp_file_limit in bytes; -1 means unlimited. Applies per process, so parallel workers and concurrent sessions can each consume this much. Reflects the exporter connection's effective value; database, role and session overrides may differ",
+        ),
+        (
+            "wal_buffers",
+            "pg_settings_wal_buffers_bytes",
+            "PostgreSQL setting: wal_buffers in bytes",
+        ),
+        (
+            "work_mem",
+            "pg_settings_work_mem_bytes",
+            "PostgreSQL setting: work_mem in bytes",
+        ),
+];
 
 impl Collector for SettingsCollector {
     fn name(&self) -> &'static str {
@@ -142,103 +263,11 @@ impl Collector for SettingsCollector {
         fields(collector = "settings")
     )]
     fn register_metrics(&self, registry: &Registry) -> Result<()> {
-        let metric_configs = vec![
-            (
-                "autovacuum",
-                "pg_settings_autovacuum",
-                "PostgreSQL setting: autovacuum",
-            ),
-            (
-                "autovacuum_max_workers",
-                "pg_settings_autovacuum_max_workers",
-                "PostgreSQL setting: autovacuum_max_workers",
-            ),
-            (
-                "autovacuum_naptime",
-                "pg_settings_autovacuum_naptime_seconds",
-                "PostgreSQL setting: autovacuum_naptime in seconds",
-            ),
-            (
-                "autovacuum_analyze_threshold",
-                "pg_settings_autovacuum_analyze_threshold",
-                "PostgreSQL setting: autovacuum_analyze_threshold",
-            ),
-            (
-                "autovacuum_vacuum_threshold",
-                "pg_settings_autovacuum_vacuum_threshold",
-                "PostgreSQL setting: autovacuum_vacuum_threshold",
-            ),
-            (
-                "checkpoint_timeout",
-                "pg_settings_checkpoint_timeout_seconds",
-                "PostgreSQL setting: checkpoint_timeout in seconds",
-            ),
-            ("data_checksums", "pg_settings_data_checksums", "PostgreSQL setting: data_checksums"),
-            ("fsync", "pg_settings_fsync", "PostgreSQL setting: fsync"),
-            (
-                "log_min_duration_statement",
-                "pg_settings_log_min_duration_statement_milliseconds",
-                "PostgreSQL setting: log_min_duration_statement in milliseconds",
-            ),
-            (
-                "maintenance_work_mem",
-                "pg_settings_maintenance_work_mem_bytes",
-                "PostgreSQL setting: maintenance_work_mem in bytes",
-            ),
-            (
-                "max_connections",
-                "pg_settings_max_connections",
-                "PostgreSQL setting: max_connections",
-            ),
-            (
-                "max_locks_per_transaction",
-                "pg_settings_max_locks_per_transaction",
-                "PostgreSQL setting: max_locks_per_transaction",
-            ),
-            (
-                "max_wal_size",
-                "pg_settings_max_wal_size_bytes",
-                "PostgreSQL setting: max_wal_size in bytes",
-            ),
-            (
-                "min_wal_size",
-                "pg_settings_min_wal_size_bytes",
-                "PostgreSQL setting: min_wal_size in bytes",
-            ),
-            (
-                "shared_buffers",
-                "pg_settings_shared_buffers_bytes",
-                "PostgreSQL setting: shared_buffers in bytes",
-            ),
-            (
-                "synchronous_commit",
-                "pg_settings_synchronous_commit",
-                "PostgreSQL setting: synchronous_commit",
-            ),
-            (
-                "wal_buffers",
-                "pg_settings_wal_buffers_bytes",
-                "PostgreSQL setting: wal_buffers in bytes",
-            ),
-            (
-                "work_mem",
-                "pg_settings_work_mem_bytes",
-                "PostgreSQL setting: work_mem in bytes",
-            ),
-        ];
-
-        {
-            let mut gauges = self
-                .gauges
-                .write()
-                .map_err(|e| anyhow::anyhow!("Failed to acquire write lock: {e}"))?;
-
-            for (name, metric_name, help) in metric_configs {
-                let gauge = IntGauge::with_opts(Opts::new(metric_name, help))?;
-                registry.register(Box::new(gauge.clone()))?;
-                gauges.insert(name.to_string(), gauge);
-                debug!(metric = %metric_name, "registered settings gauge");
-            }
+        for &(name, metric_name, help) in SETTINGS_METRICS {
+            let gauge = IntGauge::with_opts(Opts::new(metric_name, help))?;
+            registry.register(Box::new(gauge.clone()))?;
+            self.insert_gauge(name, gauge)?;
+            debug!(metric = %metric_name, "registered settings gauge");
         }
 
         Ok(())

@@ -18,6 +18,20 @@ Before making non-trivial changes:
 2. Read [tests/TESTING.md](tests/TESTING.md) if touching collectors or tests.
 3. Check [.justfile](.justfile) for the supported local workflows.
 
+## DevPod Workflow (Preferred)
+
+- Prefer the compose-based DevPod environment documented in
+  [CONTRIBUTING.md](CONTRIBUTING.md) and
+  [.devcontainer/README.md](.devcontainer/README.md) for development and
+  database-backed validation.
+- Start or refresh it with `scripts/dev-up`, then enter it with `scripts/dev-ssh`.
+  For non-interactive commands, use
+  `devpod ssh pg-exporter --workdir /workspaces/pg_exporter --command '<command>'`.
+- Run setup checks, Rust tests, and collector integration tests inside DevPod so
+  they use the bundled `postgres` service with `pg_stat_statements` preloaded.
+- Do not start a second host-side PostgreSQL container when the DevPod services
+  are available.
+
 ## Local Commands
 
 - Start local PostgreSQL: `just postgres`
@@ -33,7 +47,8 @@ Clippy, or tests fail locally.
 
 ## Test Database Rules
 
-- Tests must run against local PostgreSQL on `localhost:5432`.
+- Tests must run against local PostgreSQL: `localhost:5432` for the host workflow,
+  or the compose `postgres:5432` service inside DevPod.
 - Do not run the test suite against a remote `PG_EXPORTER_DSN`.
 - The local PostgreSQL instance must have `pg_stat_statements` preloaded and the extension created.
 - Rootless Podman is used in local workflows. Podman networking may invoke `pasta`; errors from `pasta` are container-networking failures, not Rust test failures by themselves.

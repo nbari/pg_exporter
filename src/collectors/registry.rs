@@ -32,7 +32,10 @@ fn build_collector(
 ) -> Option<CollectorType> {
     match name {
         "statements" => Some(CollectorType::StatementsCollector(
-            StatementsCollector::with_top_n(config.statements.top_n),
+            StatementsCollector::with_config(
+                config.statements.top_n,
+                config.statements.query_text_refresh,
+            ),
         )),
         "sequences" => Some(CollectorType::SequencesCollector(
             SequencesCollector::with_min_ratio(config.sequences.min_ratio),

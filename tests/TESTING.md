@@ -143,6 +143,36 @@ async fn test_collector_with_realistic_data() -> Result<()> {
 
 **See `src/collectors/statements/pg_statements.rs` for production examples of all these patterns.**
 
+## Dashboard Contract Tests
+
+`grafana/dashboard.json` is validated by [tests/dashboard.rs](dashboard.rs), which runs
+as part of `cargo test` (and therefore `just test` and CI). A panel is only as good as
+the metric it queries: a renamed metric leaves the JSON valid and the panel empty, so
+these tests tie every panel query back to a metric the exporter actually produces.
+
+| Test | Needs a database | What it catches |
+| --- | --- | --- |
+| `dashboard_metrics_are_declared_in_source` | no | a panel querying a metric name that exists nowhere in `src/` (typos, renames) |
+| `dashboard_metrics_are_exported_by_collectors` | yes | a metric that exists as a string in the source but never actually reaches `/metrics` |
+| `conditional_metrics_are_still_referenced_by_the_dashboard` | no | stale `CONDITIONAL_METRICS` entries that would mask a real regression |
+| `temp_disk_pressure_row_metrics_are_exported` | yes | the Temp Disk Pressure row spans four collectors; pins which ones it needs |
+| `temp_safeguard_settings_keep_their_sentinels` | yes | `-1` ("unlimited"/"disabled") being scaled to `-1024` by the kB-to-bytes conversion |
+
+Metric names are extracted from every `targets[].expr`, with label matchers stripped
+first so a regex label *value* is never mistaken for a metric name.
+
+### Adding a panel
+
+If a new panel queries a metric that a local single-node instance cannot produce, the
+live test will fail. Add it to `CONDITIONAL_METRICS` **with a reason** — that list is
+for metrics needing a connected replica, a blocked session, an in-flight
+`VACUUM`/`ANALYZE`/`CREATE INDEX`, TLS clients, or a co-located host. If the metric can
+be observed locally, it does not belong there; fix the collector instead.
+
+`scripts/validate-dashboard.sh` (`just validate-dashboard`) remains as a quick manual
+check. It also verifies JSON validity, the `job`/`instance`/`database` template
+variables, and job-filter coverage, which the Rust tests do not.
+
 ## Test Coverage Requirements
 
 Before merging:
@@ -151,6 +181,7 @@ Before merging:
 - [ ] Edge cases (NULL, zero, empty) are tested
 - [ ] Type conversions are tested with realistic data
 - [ ] CI passes on all PostgreSQL versions
+- [ ] New dashboard panels query metrics the exporter really exports (`cargo test --test dashboard`)
 
 ## Debugging Test Failures
 

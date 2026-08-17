@@ -4565,7 +4565,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 1,
+            "y": 169,
             "w": 12,
             "h": 8
           },
@@ -4605,6 +4605,98 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
+          "description": "The single worst offender per holder type, labelled with its identity so you know exactly what to act on: backend -> application_name (terminate with pg_terminate_backend(pid)), prepared_xact -> gid (resolve with ROLLBACK PREPARED '<gid>' or COMMIT PREPARED), replication_slot -> slot_name (drop with pg_drop_replication_slot or let the consumer catch up). The value is that holder's xmin age in XIDs - the higher it is, the more it is holding VACUUM back. Empty or low is healthy. When 'Xmin Horizon Age by Holder' above is climbing, this panel names the culprit: match the holder label to the matching action. Reset every scrape, so a resolved holder disappears immediately.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 169,
+            "w": 12,
+            "h": 8
+          },
+          "id": 780011,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_xmin_horizon_holder_age_xids{job=\"$job\", instance=\"$instance\"}",
+              "refId": "A",
+              "legendFormat": "{{holder}}: {{identity}}"
+            }
+          ],
+          "title": "Worst Xmin Horizon Holder (XIDs)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "description": "Count of open prepared (two-phase / 2PC) transactions left in PREPARE TRANSACTION state, waiting for COMMIT PREPARED or ROLLBACK PREPARED. Fewer is better: 0 (green) is the healthy normal for almost all systems, since 2PC is only used by specific distributed-transaction / XA setups. Each open prepared xact pins the xmin horizon and holds its locks indefinitely until resolved, so even one that lingers blocks vacuum and drives bloat and transaction-ID wraparound pressure. 1 or more (yellow) that persists for more than a few minutes usually means an application or transaction manager crashed mid-2PC and orphaned it; 5 or more (red) points at a systemic problem such as a broken transaction coordinator or a misconfigured app. If your workload does not use 2PC/XA at all, this should always be 0 and any nonzero value is suspicious. To fix: find the gid in the 'Worst Xmin Horizon Holder' table, and after confirming with the app owner run ROLLBACK PREPARED '<gid>' (or COMMIT PREPARED).",
           "fieldConfig": {
             "defaults": {
@@ -4635,7 +4727,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 9,
+            "y": 177,
             "w": 12,
             "h": 4
           },
@@ -4702,7 +4794,7 @@
           },
           "gridPos": {
             "x": 12,
-            "y": 9,
+            "y": 177,
             "w": 12,
             "h": 4
           },
@@ -4733,98 +4825,6 @@
           ],
           "title": "Oldest Prepared Xact Age (s)",
           "type": "stat"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "description": "The single worst offender per holder type, labelled with its identity so you know exactly what to act on: backend -> application_name (terminate with pg_terminate_backend(pid)), prepared_xact -> gid (resolve with ROLLBACK PREPARED '<gid>' or COMMIT PREPARED), replication_slot -> slot_name (drop with pg_drop_replication_slot or let the consumer catch up). The value is that holder's xmin age in XIDs - the higher it is, the more it is holding VACUUM back. Empty or low is healthy. When 'Xmin Horizon Age by Holder' above is climbing, this panel names the culprit: match the holder label to the matching action. Reset every scrape, so a resolved holder disappears immediately.",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "drawStyle": "line",
-                "fillOpacity": 10,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "tooltip": false,
-                  "viz": false,
-                  "legend": false
-                },
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "never",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              },
-              "unit": "short"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "x": 12,
-            "y": 1,
-            "w": 12,
-            "h": 8
-          },
-          "id": 780011,
-          "options": {
-            "legend": {
-              "calcs": [
-                "last",
-                "max"
-              ],
-              "displayMode": "table",
-              "placement": "right",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            }
-          },
-          "pluginVersion": "10.0.0",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
-              },
-              "expr": "pg_xmin_horizon_holder_age_xids{job=\"$job\", instance=\"$instance\"}",
-              "refId": "A",
-              "legendFormat": "{{holder}}: {{identity}}"
-            }
-          ],
-          "title": "Worst Xmin Horizon Holder (XIDs)",
-          "type": "timeseries"
         },
         {
           "datasource": {
@@ -4883,7 +4883,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 13,
+            "y": 181,
             "w": 12,
             "h": 8
           },
@@ -5002,7 +5002,7 @@
           },
           "gridPos": {
             "x": 12,
-            "y": 13,
+            "y": 181,
             "w": 12,
             "h": 8
           },
@@ -11890,7 +11890,7 @@
             "h": 8,
             "w": 18,
             "x": 0,
-            "y": 1
+            "y": 181
           },
           "id": 780015,
           "options": {
@@ -11960,7 +11960,7 @@
             "h": 4,
             "w": 6,
             "x": 18,
-            "y": 1
+            "y": 181
           },
           "id": 780016,
           "options": {
@@ -12023,7 +12023,7 @@
             "h": 4,
             "w": 6,
             "x": 18,
-            "y": 5
+            "y": 185
           },
           "id": 780017,
           "options": {
@@ -12135,7 +12135,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 1
+            "y": 182
           },
           "id": 780019,
           "options": {
@@ -12227,7 +12227,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 1
+            "y": 182
           },
           "id": 780020,
           "options": {
@@ -12319,7 +12319,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 9
+            "y": 190
           },
           "id": 780021,
           "options": {
@@ -12420,7 +12420,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 9
+            "y": 190
           },
           "id": 780022,
           "options": {
@@ -13287,6 +13287,771 @@
         "x": 0,
         "y": 183
       },
+      "id": 790009,
+      "title": "Temp Disk Pressure (requires --collector.temp)",
+      "type": "row",
+      "description": "Live temporary-file footprint from pg_ls_tmpdir() plus the cumulative temp counters and the configured safeguards. PostgreSQL spills sorts, hashes and materialized CTEs that exceed work_mem into pgsql_tmp; the cumulative counters only update when a statement finishes, so the live gauges here are what catches an in-progress runaway query. Requires --collector.temp (pg_ls_tmpdir() needs superuser or pg_monitor).",
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Bytes currently held by temporary files in each tablespace's pgsql_tmp directory, read live from pg_ls_tmpdir(). Unlike pg_stat_database_temp_bytes this is a point-in-time value: it rises while a query is still spilling and drops back to zero once PostgreSQL removes the files. This is the panel that shows a runaway sort filling the data volume *before* it runs out of space. PostgreSQL cannot report free space on the volume, so on managed services correlate this with the provider metric (RDS: FreeStorageSpace).",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 10737418240
+                  },
+                  {
+                    "color": "red",
+                    "value": 107374182400
+                  }
+                ]
+              },
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 0,
+            "y": 184
+          },
+          "id": 790000,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto"
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_temp_files_current_bytes{job=\"$job\", instance=\"$instance\"}",
+              "legendFormat": "{{tablespace}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Current Temp Files On Disk",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Number of temporary files currently present in each tablespace's pgsql_tmp directory. A large count with a small total size usually means many parallel workers each spilling a little; a small count with a huge size means one query is writing a very large sort or hash.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 50
+                  },
+                  {
+                    "color": "red",
+                    "value": 200
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 6,
+            "y": 184
+          },
+          "id": 790001,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto"
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_temp_files_current_count{job=\"$job\", instance=\"$instance\"}",
+              "legendFormat": "{{tablespace}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Current Temp File Count",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Age of the oldest temporary file still on disk. A value that keeps climbing means a single long-running statement has been spilling for that long and has not released its files yet - the usual shape of an incident. Files are removed when the statement ends, so a healthy instance shows short-lived spikes.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 300
+                  },
+                  {
+                    "color": "red",
+                    "value": 1800
+                  }
+                ]
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 12,
+            "y": 184
+          },
+          "id": 790002,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto"
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_temp_files_oldest_age_seconds{job=\"$job\", instance=\"$instance\"}",
+              "legendFormat": "{{tablespace}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Oldest Temp File Age",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Configured temp_file_limit, normalized to bytes. -1 means unlimited, which is the PostgreSQL default and the reason a single query can fill the volume. NOTE: the limit applies per PostgreSQL *process*, so parallel workers and concurrent sessions can each consume it; the total footprint is not bounded by this value. The exporter reports its own connection's effective setting - database, role and session overrides may differ.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [
+                {
+                  "options": {
+                    "-1": {
+                      "index": 0,
+                      "text": "Unlimited"
+                    }
+                  },
+                  "type": "value"
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 0
+                  }
+                ]
+              },
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 18,
+            "y": 184
+          },
+          "id": 790003,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto"
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_settings_temp_file_limit_bytes{job=\"$job\", instance=\"$instance\"}",
+              "legendFormat": "{{instance}}",
+              "refId": "A"
+            }
+          ],
+          "title": "temp_file_limit",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "How fast the live temp-file footprint is growing, in bytes/second. Sustained positive growth is the earliest actionable signal of a temp-disk incident: it tells you how long you have before the volume fills. Divide the free space by this rate to get the time to exhaustion. Negative values are PostgreSQL cleaning up finished statements.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 10485760
+                  },
+                  {
+                    "color": "red",
+                    "value": 104857600
+                  }
+                ]
+              },
+              "unit": "Bps"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 188
+          },
+          "id": 790004,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "deriv(pg_temp_files_current_bytes{job=\"$job\", instance=\"$instance\"}[5m])",
+              "legendFormat": "{{tablespace}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Temp Footprint Growth Rate",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "The raw live footprint per tablespace over time. Use this together with the cumulative 'Temp Bytes Written' panel below: this one shows what is *on disk*, the other shows what has been *written since the last stats reset*. A flat cumulative counter with a rising live footprint means a statement is still running and has not been accounted for yet.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 20,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 188
+          },
+          "id": 790005,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_temp_files_current_bytes{job=\"$job\", instance=\"$instance\"}",
+              "legendFormat": "{{tablespace}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Live Temp Footprint Over Time",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Rate of pg_stat_database_temp_bytes per database. This is the cumulative counter: it only moves when a statement *finishes*, so it lags the live footprint above. It answers 'which database is responsible' once the dust has settled. Requires --collector.database.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "normal"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "Bps"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 196
+          },
+          "id": 790006,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "rate(pg_stat_database_temp_bytes{job=\"$job\", instance=\"$instance\"}[5m])",
+              "legendFormat": "{{datname}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Temp Bytes Written by Database (cumulative)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Temporary bytes written per statement, derived from pg_stat_statements_temp_blks_written_total x pg_settings_block_size_bytes. The statements collector deliberately selects the union of the top N by execution time and the top N by temp blocks written, so a query that spills heavily but is not among the slowest still shows up here. Requires --collector.statements.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "Bps"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 196
+          },
+          "id": 790007,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "rate(postgres_pg_stat_statements_temp_blks_written_total{job=\"$job\", instance=\"$instance\"}[5m]) * on(instance, job) group_left() pg_settings_block_size_bytes{job=\"$job\", instance=\"$instance\"}",
+              "legendFormat": "{{datname}}: {{query_short}} | {{queryid}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Top Statements by Temp Bytes Written",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Configured log_temp_files, normalized to bytes: temporary files larger than this are written to the PostgreSQL log. -1 disables the logging entirely (the default), 0 logs every temporary file. Setting this to a few megabytes is the cheapest way to find out *which query* spilled, since these metrics deliberately do not carry per-file or per-PID labels.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "tooltip": false,
+                  "viz": false,
+                  "legend": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 204
+          },
+          "id": 790008,
+          "options": {
+            "legend": {
+              "calcs": [
+                "last",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "pg_settings_log_temp_files_bytes{job=\"$job\", instance=\"$instance\"}",
+              "legendFormat": "{{instance}}",
+              "refId": "A"
+            }
+          ],
+          "title": "log_temp_files Threshold",
+          "type": "timeseries"
+        }
+      ]
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 184
+      },
       "id": 200,
       "panels": [
         {
@@ -13369,7 +14134,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 183
+            "y": 185
           },
           "id": 201,
           "options": {
@@ -13475,7 +14240,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 183
+            "y": 185
           },
           "id": 202,
           "options": {
@@ -13585,7 +14350,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 183
+            "y": 185
           },
           "id": 2004,
           "options": {
@@ -13670,7 +14435,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 191
+            "y": 193
           },
           "id": 2003,
           "options": {
@@ -13766,7 +14531,7 @@
             "h": 12,
             "w": 12,
             "x": 12,
-            "y": 191
+            "y": 193
           },
           "id": 204,
           "options": {
@@ -13843,7 +14608,7 @@
             "h": 4,
             "w": 12,
             "x": 0,
-            "y": 203
+            "y": 205
           },
           "id": 1011,
           "options": {
@@ -13915,7 +14680,7 @@
             "h": 4,
             "w": 8,
             "x": 0,
-            "y": 207
+            "y": 209
           },
           "id": 203,
           "options": {
@@ -13975,7 +14740,7 @@
             "h": 4,
             "w": 8,
             "x": 8,
-            "y": 207
+            "y": 209
           },
           "id": 2001,
           "options": {
@@ -14034,7 +14799,7 @@
             "h": 4,
             "w": 8,
             "x": 16,
-            "y": 207
+            "y": 209
           },
           "id": 2002,
           "options": {

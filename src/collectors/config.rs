@@ -1,9 +1,15 @@
 use crate::collectors::COLLECTOR_NAMES;
-use std::collections::HashSet;
+use std::{collections::HashSet, time::Duration};
+
+/// Default minimum delay between two `pg_stat_statements` query-text lookups.
+pub const DEFAULT_STATEMENTS_QUERY_TEXT_REFRESH: Duration = Duration::from_mins(15);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StatementsConfig {
     pub top_n: usize,
+    /// Minimum delay between two query-text lookups, or `None` when the exporter must
+    /// never read `pg_stat_statements` query texts.
+    pub query_text_refresh: Option<Duration>,
 }
 
 /// Default minimum `pg_sequences` used-ratio required for a sequence to be exported.
@@ -31,11 +37,21 @@ impl CollectorConfig {
             enabled_collectors: HashSet::new(),
             statements: StatementsConfig {
                 top_n: statements_top_n,
+                query_text_refresh: Some(DEFAULT_STATEMENTS_QUERY_TEXT_REFRESH),
             },
             sequences: SequencesConfig {
                 min_ratio: DEFAULT_SEQUENCES_MIN_RATIO,
             },
         }
+    }
+
+    /// Set the minimum delay between two `pg_stat_statements` query-text lookups.
+    ///
+    /// `None` disables text lookups entirely.
+    #[must_use]
+    pub const fn with_statements_query_text_refresh(mut self, refresh: Option<Duration>) -> Self {
+        self.statements.query_text_refresh = refresh;
+        self
     }
 
     /// Set the minimum `pg_sequences` used-ratio for the sequences collector.
@@ -77,6 +93,21 @@ mod tests {
     fn test_new_sets_statements_top_n() {
         let config = CollectorConfig::new(25);
         assert_eq!(config.statements.top_n, 25);
+    }
+
+    #[test]
+    fn test_new_sets_default_query_text_refresh() {
+        let config = CollectorConfig::new(25);
+        assert_eq!(
+            config.statements.query_text_refresh,
+            Some(DEFAULT_STATEMENTS_QUERY_TEXT_REFRESH)
+        );
+    }
+
+    #[test]
+    fn test_query_text_refresh_can_be_disabled() {
+        let config = CollectorConfig::new(25).with_statements_query_text_refresh(None);
+        assert_eq!(config.statements.query_text_refresh, None);
     }
 
     #[test]

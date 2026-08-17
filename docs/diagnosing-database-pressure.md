@@ -531,3 +531,113 @@ data-checksum panels (status, failures over time, last-failure age) in the **Cri
 row, immediately after **Active vs Idle Connections**; slot spill appears in
 the **Replication** row. Requires `--collector.database` and `--collector.replication`
 respectively.
+
+---
+
+## 9. Temporary-file disk pressure
+
+PostgreSQL writes sorts, hash joins, materialized CTEs and large cursors that exceed
+`work_mem` into a `pgsql_tmp` directory inside the data volume. A single bad plan — a
+missing index, a stale statistic, an accidental cross join — can turn that into hundreds
+of gigabytes and fill the volume, which takes the whole cluster down.
+
+### Why the cumulative counters are not enough
+
+`pg_stat_database_temp_bytes` and `pg_stat_statements_temp_blks_written_total` are
+**cumulative** and only updated when a statement *finishes*. A query that has been
+spilling for twenty minutes and is still running contributes **nothing** to either. That
+is precisely the incident shape you need to catch: by the time the counters move, the
+volume is already full.
+
+The opt-in `temp` collector reads `pg_ls_tmpdir()` (PostgreSQL 12+) and reports what is on
+disk *right now*:
+
+```promql
+# Bytes currently held by temporary files, per tablespace
+pg_temp_files_current_bytes{job="$job", instance="$instance"}
+
+# How many files, and how old the oldest one is
+pg_temp_files_current_count{job="$job", instance="$instance"}
+pg_temp_files_oldest_age_seconds{job="$job", instance="$instance"}
+```
+
+Enable it with `--collector.temp`. The function is restricted to superusers and members of
+`pg_monitor`, so grant the role first:
+
+```sql
+GRANT pg_monitor TO <exporter role>;
+```
+
+Without the privilege the collector warns once and exports nothing; it never fails the
+scrape or takes `pg_up` down.
+
+### Alerting
+
+The most useful alert is on *growth*, because it converts directly into time-to-failure:
+
+```promql
+# Sustained growth: >100 MB/s of new temp files for 5 minutes
+deriv(pg_temp_files_current_bytes{job="$job", instance="$instance"}[5m]) > 100e6
+
+# Large absolute footprint (tune to your volume size)
+pg_temp_files_current_bytes{job="$job", instance="$instance"} > 100e9
+
+# A single statement has been spilling for over 30 minutes
+pg_temp_files_oldest_age_seconds{job="$job", instance="$instance"} > 1800
+```
+
+> **PostgreSQL cannot report free space on the volume.** These gauges tell you how much
+> temp data exists, not how much room is left. On managed services correlate them with the
+> provider metric — on RDS/Aurora that is `FreeStorageSpace`. Dividing free space by the
+> `deriv()` expression above gives an estimated time to exhaustion.
+
+### Finding the responsible query
+
+The temp gauges deliberately carry **only** a `tablespace` label — no filename, PID or
+query text — because a spilling query creates one file per parallel worker and per spill
+batch, which would make the series count unbounded. To attribute the spill:
+
+```promql
+# Which database, once the statement finished (cumulative)
+rate(pg_stat_database_temp_bytes{job="$job", instance="$instance", datname=~"$database"}[5m])
+
+# Which statement, in bytes (temp blocks x block size)
+rate(postgres_pg_stat_statements_temp_blks_written_total{job="$job", instance="$instance"}[5m])
+  * on(instance, job) group_left() pg_settings_block_size_bytes{job="$job", instance="$instance"}
+```
+
+The `statements` collector selects the **deduplicated union** of the top N by
+`total_exec_time` and the top N by `temp_blks_written`, so a heavy spiller that is not one
+of the slowest queries still appears (at most `2 x --statements.top-n` series per metric).
+
+For live attribution, set `log_temp_files` to a few megabytes: PostgreSQL then logs every
+temporary file larger than the threshold together with the statement that created it.
+That is the cheapest way to name the query, and it is off by default:
+
+```promql
+# -1 = disabled (default), 0 = log every temp file, otherwise a byte threshold
+pg_settings_log_temp_files_bytes{job="$job", instance="$instance"}
+```
+
+### The safeguards
+
+```promql
+pg_settings_temp_file_limit_bytes{job="$job", instance="$instance"}   # -1 = unlimited
+pg_settings_log_temp_files_bytes{job="$job", instance="$instance"}    # -1 = disabled
+pg_settings_block_size_bytes{job="$job", instance="$instance"}
+```
+
+> **`temp_file_limit` is per PostgreSQL process, not per cluster or per query.** Every
+> parallel worker and every concurrent session may consume the full limit, so the total
+> footprint is *not* bounded by this value: a query with 8 parallel workers can use
+> 9 x `temp_file_limit`. It also only applies to temporary *files*, not temporary tables.
+> Setting it aborts offending statements with `ERROR: temporary file size exceeds
+> temp_file_limit`, which is usually preferable to filling the volume.
+>
+> The exporter reports the effective value **for its own connection**. `ALTER DATABASE`,
+> `ALTER ROLE` and per-session `SET` overrides mean other backends may run with a
+> different limit; treat the metric as the cluster default, not a guarantee.
+
+Everything above is plotted in the Grafana **Temp Disk Pressure** row. Requires
+`--collector.temp` (plus `--collector.database` and `--collector.statements` for the
+attribution panels).

@@ -135,7 +135,7 @@ All metrics include these labels:
 - `queryid` - Unique query identifier
 - `datname` - Database name
 - `usename` - User/role name
-- `query_short` - First 80 characters of the query (or `<utility>` for VACUUM/ANALYZE)
+- `query_short` - First 80 characters of the query (or `<unknown>` when the text has not been resolved yet, see [How `query_short` is resolved](#how-query_short-is-resolved))
 
 `query_short` is intentionally capped at 80 characters to keep Prometheus label
 cardinality and label size under control. It is meant for fast identification in
@@ -143,6 +143,47 @@ Prometheus and Grafana, not as a full SQL text export.
 
 When you need the full normalized statement text, use the `queryid` label from
 the metric and query `pg_stat_statements` directly.
+
+#### How `query_short` is resolved
+
+The scrape does **not wait** for query texts (see
+[Scrape cost and query texts](#scrape-cost-and-query-texts)). They come from a
+single-flight background lookup that runs only when a newly exported `queryid` has
+no cached text, and never more often than `--statements.query-text-refresh`
+(default `900` seconds, env `PG_EXPORTER_STATEMENTS_QUERY_TEXT_REFRESH`). The first
+missing text starts a lookup immediately; 900 seconds is the minimum interval
+between later attempts, not a startup delay. A `queryid` always maps to the same
+normalized text, so cached entries never go stale and the cache is bounded by the
+number of exported statements.
+
+A statement whose text has not been resolved yet is labelled `<unknown>`; a scrape
+after the background task finishes normally fills it in. A statement first seen
+just after a lookup may remain unresolved until the next 900-second window. Numeric
+statement metrics still refresh on every scrape. PostgreSQL sometimes has no text
+at all for an entry — utility statements, or texts dropped by `pg_stat_statements`
+garbage collection. Those results are never cached, so the label stays `<unknown>`
+and the lookup is retried later instead of pinning an empty label forever. Setting
+the flag to `0` disables text lookups entirely — `query_short` then stays `<unknown>`
+and SQL must be looked up by `queryid` directly in `pg_stat_statements`.
+
+The lookup itself is the one place that still has to call `pg_stat_statements(true)`,
+which materializes every query text into a `work_mem`-bounded tuplestore. To keep it
+from writing the very temp files this collector was fixed to avoid, the lookup runs
+in its own transaction with `SET LOCAL work_mem` raised (64 MB) for the duration of
+that one statement. Nothing else in the session is affected. If the server refuses
+the `SET`, the exporter warns once and the background lookup still runs with the
+session default, where it may spill. A corpus larger than 64 MB may also spill. The
+lookup is not awaited by the scrape, but it still shares the PostgreSQL connection
+pool and database I/O, so it can indirectly contend with scrape queries.
+
+The collector excludes its own statements from the exported series without ever
+comparing query text on the scrape path. On PostgreSQL 14+ the scrape query reads
+its own `pg_stat_activity.query_id` while it is executing — that value is exactly
+the `queryid` `pg_stat_statements` records for it — so self-exclusion works on every
+scrape, including with `--statements.query-text-refresh=0`. On PostgreSQL 12 and 13
+`query_id` does not exist, so the collector falls back to learning its own `queryid`
+from the marker comment during the text lookup; with the lookup disabled on those
+versions its own queries may appear in the metrics.
 
 Example:
 
@@ -190,14 +231,44 @@ SELECT * FROM users WHERE id = $1;
 
 ### Utility Statements
 
-Utility statements (VACUUM, ANALYZE, CREATE INDEX, etc.) may appear as `<utility>` in the `query_short` label since PostgreSQL doesn't always track their full text.
+Utility statements (VACUUM, ANALYZE, CREATE INDEX, etc.) are tracked like any other
+statement, but PostgreSQL does not always keep their text. When it does not, the
+`query_short` label stays `<unknown>`.
 
-### Top N Queries
+### Statement Selection and Cardinality
 
-The collector tracks the top N queries **by total execution time**. This means:
-- Long-running infrequent queries appear at the top
+The collector exports the **deduplicated union** of two rankings:
+
+1. the top N by `total_exec_time`, and
+2. the top N by `temp_blks_written`,
+
+where N is `--statements.top-n` (default `25`).
+
+The second ranking exists because a query can write gigabytes of temporary files
+without being one of the slowest statements. Ranking by execution time alone made
+such a query disappear from the temp metrics entirely, which is exactly the
+statement you need during a temp-disk incident.
+
+**Maximum series count: `2 x --statements.top-n` per metric.** A statement present
+in both rankings is exported once, so the real count is usually well below the
+maximum.
+
+- Long-running infrequent queries appear via the execution-time ranking
 - Fast but frequent queries also appear if their total time is high
+- Heavy spillers appear via the temp ranking, regardless of their execution time
 - Adjust `--statements.top-n` based on your query diversity and scrape budget
+
+Convert temp blocks to bytes with `pg_settings_block_size_bytes` (from
+`--collector.default`):
+
+```promql
+rate(postgres_pg_stat_statements_temp_blks_written_total[5m])
+  * on(instance, job) group_left() pg_settings_block_size_bytes
+```
+
+These counters are **cumulative** and only update when a statement *finishes*. To
+see temporary files that are on disk **right now**, including those of a query that
+is still running, enable the [`temp` collector](../temp/README.md).
 
 ### Performance Impact
 
@@ -205,6 +276,28 @@ The collector tracks the top N queries **by total execution time**. This means:
 - Higher `pg_stat_statements.max` values use more memory
 - The collector queries `pg_stat_statements` on each scrape
 - For high-traffic databases, consider longer scrape intervals
+
+#### Scrape cost and query texts
+
+The per-scrape query reads `pg_stat_statements(false)` — that is, **without** query
+texts — and resolves the `query_short` label from the cache. Missing texts schedule
+a separate, rate-limited background lookup; the scrape never waits for it.
+
+This is not a micro-optimization. `pg_stat_statements` is a set-returning function:
+with `showtext = true` it loads the entire query-text file into backend memory and
+materializes **every** row, text included, into a `work_mem`-bounded tuplestore
+*before* any filter, join or `LIMIT` runs. On an instance with ~10k entries and tens
+of megabytes of query text, every single scrape wrote a multi-megabyte file into
+`base/pgsql_tmp`. Moving the ranking into a CTE does not help, because the
+materialization happens below every planner node — only `showtext = false` avoids it.
+
+Measured on a seeded instance (9002 entries, 8365 kB of text, `work_mem = 4MB`):
+
+| Query | Temp blocks written | Duration |
+| --- | ---: | ---: |
+| Reading `pg_stat_statements` (`showtext = true`) | 1506 | 38.8 ms |
+| Same, with the ranking moved into a CTE | 3012 | 56.9 ms |
+| Reading `pg_stat_statements(false)` (current) | **0** | **7.8 ms** |
 
 ## Troubleshooting
 
@@ -231,12 +324,19 @@ yum install postgresql-contrib
 3. No queries executed yet - Run some queries to populate stats
 4. Collector not enabled - Use `--collector.statements`
 
-### Query Text Shows as NULL or `<utility>`
+### Query Text Shows as `<unknown>`
 
-This is normal for:
-- Utility statements (VACUUM, ANALYZE, etc.)
-- Queries from other monitoring tools
-- Internal PostgreSQL operations
+`query_short` is `<unknown>` until the text lookup resolves it. That is expected:
+
+- On the scrape where a statement first enters the top-N. The first lookup starts
+  immediately in the background; later attempts are limited by
+  `--statements.query-text-refresh` (see [How `query_short` is resolved](#how-query_short-is-resolved)).
+- Permanently, when PostgreSQL has no text for the entry — utility statements, or
+  entries whose text was dropped by `pg_stat_statements` garbage collection.
+
+Missing texts are never cached, so a statement that gains a text later is picked up on
+a subsequent lookup. Setting `--statements.query-text-refresh=0` disables the lookup
+entirely, leaving every label `<unknown>`.
 
 ## Best Practices
 

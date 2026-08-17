@@ -134,6 +134,52 @@ fn shared_pool_uses_the_connection_budget_constant() -> Result<()> {
     Ok(())
 }
 
+/// Query-text resolution can materialize and spill the entire `pg_stat_statements` text
+/// corpus, so `collect()` must only schedule it and never await it on the scrape path.
+#[test]
+fn statements_query_text_lookup_stays_detached_from_collect() -> Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let statements_path = root
+        .join("src")
+        .join("collectors")
+        .join("statements")
+        .join("pg_statements.rs");
+    let source = std::fs::read_to_string(&statements_path)?;
+
+    let (_, collector_impl) = source
+        .split_once("impl Collector for PgStatementsCollector")
+        .ok_or_else(|| anyhow!("PgStatementsCollector Collector impl not found"))?;
+    let (_, collect_tail) = collector_impl
+        .split_once("fn collect")
+        .ok_or_else(|| anyhow!("PgStatementsCollector::collect not found"))?;
+    let collect_source = collect_tail
+        .split_once("fn enabled_by_default")
+        .map_or(collect_tail, |(collect, _)| collect);
+
+    assert!(
+        collect_source.contains("self.schedule_query_text_refresh(pool, missing);"),
+        "PgStatementsCollector::collect must dispatch query-text resolution without awaiting it"
+    );
+    assert!(
+        !collect_source.contains("refresh_query_texts("),
+        "PgStatementsCollector::collect must not call the query-text lookup directly"
+    );
+
+    let (_, scheduler_tail) = source
+        .split_once("fn schedule_query_text_refresh")
+        .ok_or_else(|| anyhow!("schedule_query_text_refresh not found"))?;
+    let scheduler_source = scheduler_tail
+        .split_once("fn should_warn_work_mem_refusal")
+        .map_or(scheduler_tail, |(scheduler, _)| scheduler);
+
+    assert!(
+        scheduler_source.contains("tokio::spawn(task)"),
+        "schedule_query_text_refresh must detach the lookup with tokio::spawn"
+    );
+
+    Ok(())
+}
+
 /// Enforces the collector module layout: `src/collectors/<name>/mod.rs` must be
 /// a thin **entry point / umbrella** that wires up sub-collectors, not the place
 /// where metrics and SQL live. The real implementation belongs in a sibling file

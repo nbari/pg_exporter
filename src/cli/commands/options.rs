@@ -7,10 +7,13 @@ pub fn add_collector_option_args(cmd: Command) -> Command {
     cmd.arg(
         Arg::new("statements.top-n")
             .long("statements.top-n")
-            .help("Number of pg_stat_statements rows to expose")
+            .help("Number of pg_stat_statements rows to expose per ranking")
             .long_help(
-                "Number of pg_stat_statements rows to expose.\n\n\
-                 This limits the exporter-side top-N query set ordered by total execution time.\n\
+                "Number of pg_stat_statements rows to expose per ranking.\n\n\
+                 Statements are selected twice: the top N by total execution time and the top N \
+                 by temporary blocks written, then deduplicated. A statement that spills \
+                 gigabytes of temporary files is therefore exported even when it is not among \
+                 the slowest ones. At most 2N series are exported per metric.\n\
                  Lower values reduce cardinality and scrape cost; higher values provide more query coverage.\n\n\
                  Examples:\n\
                    --statements.top-n 10\n\
@@ -22,6 +25,7 @@ pub fn add_collector_option_args(cmd: Command) -> Command {
             .value_name("N")
             .value_parser(value_parser!(NonZeroUsize)),
     )
+    .arg(statements_query_text_refresh_arg())
     .arg(max_db_concurrency_arg())
     .arg(connect_timeout_arg())
     .arg(
@@ -106,6 +110,34 @@ fn sequences_min_ratio_arg() -> Arg {
         .value_parser(parse_sequences_min_ratio)
 }
 
+fn statements_query_text_refresh_arg() -> Arg {
+    Arg::new("statements.query-text-refresh")
+        .long("statements.query-text-refresh")
+        .help("Minimum seconds between pg_stat_statements query-text lookups (0 disables them)")
+        .long_help(
+            "Minimum number of seconds between two pg_stat_statements query-text lookups.\n\n\
+             The per-scrape statistics query never reads query texts: pg_stat_statements is a \
+             set-returning function that loads the whole query-text file and materializes every \
+             row into a work_mem-bounded tuplestore before any filter or LIMIT applies, which \
+             made each scrape write a multi-megabyte file into base/pgsql_tmp on busy \
+             instances. The `query_short` label is instead resolved by a detached background \
+             lookup that only runs when a newly exported queryid has no cached text, and never \
+             more often than this interval. Scrapes publish '<unknown>' until a later scrape \
+             can use the cached result; they never wait for the lookup itself. A queryid always \
+             maps to the same normalized text, so cached entries never go stale.\n\n\
+             Use 0 to never read query texts at all: `query_short` then stays '<unknown>' and \
+             SQL must be looked up by queryid directly in pg_stat_statements.\n\n\
+             Examples:\n\
+               --statements.query-text-refresh 900\n\
+               --statements.query-text-refresh 0\n\
+               PG_EXPORTER_STATEMENTS_QUERY_TEXT_REFRESH=3600",
+        )
+        .env("PG_EXPORTER_STATEMENTS_QUERY_TEXT_REFRESH")
+        .default_value(STATEMENTS_QUERY_TEXT_REFRESH_DEFAULT)
+        .value_name("SECONDS")
+        .value_parser(value_parser!(u64))
+}
+
 fn max_db_concurrency_arg() -> Arg {
     Arg::new("collectors.max-db-concurrency")
         .long("collectors.max-db-concurrency")
@@ -160,6 +192,10 @@ const LOCK_TIMEOUT_MS_DEFAULT: &str = "2000";
 const STATEMENT_TIMEOUT_MS_DEFAULT: &str = "10000";
 const SCRAPE_TIMEOUT_MS_DEFAULT: &str = "15000";
 const SEQUENCES_MIN_RATIO_DEFAULT: &str = "0.5";
+/// String form of the default query-text lookup interval, kept in sync with
+/// [`crate::collectors::config::DEFAULT_STATEMENTS_QUERY_TEXT_REFRESH`] by
+/// `query_text_refresh_default_matches_const`.
+const STATEMENTS_QUERY_TEXT_REFRESH_DEFAULT: &str = "900";
 
 fn parse_sequences_min_ratio(value: &str) -> Result<f64, String> {
     let parsed = value
@@ -193,6 +229,61 @@ fn parse_max_db_concurrency(value: &str) -> Result<NonZeroUsize, String> {
 mod tests {
     use super::*;
     use crate::cli::commands;
+    use crate::collectors::config::DEFAULT_STATEMENTS_QUERY_TEXT_REFRESH;
+
+    #[test]
+    fn query_text_refresh_default_matches_const() {
+        assert_eq!(
+            STATEMENTS_QUERY_TEXT_REFRESH_DEFAULT.parse::<u64>().ok(),
+            Some(DEFAULT_STATEMENTS_QUERY_TEXT_REFRESH.as_secs())
+        );
+    }
+
+    #[test]
+    fn test_statements_query_text_refresh_default() {
+        temp_env::with_var(
+            "PG_EXPORTER_STATEMENTS_QUERY_TEXT_REFRESH",
+            None::<String>,
+            || {
+                let matches = commands::new().get_matches_from(vec!["pg_exporter"]);
+                assert_eq!(
+                    matches
+                        .get_one::<u64>("statements.query-text-refresh")
+                        .copied(),
+                    Some(DEFAULT_STATEMENTS_QUERY_TEXT_REFRESH.as_secs())
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn test_statements_query_text_refresh_from_env() {
+        temp_env::with_var(
+            "PG_EXPORTER_STATEMENTS_QUERY_TEXT_REFRESH",
+            Some("0"),
+            || {
+                let matches = commands::new().get_matches_from(vec!["pg_exporter"]);
+                assert_eq!(
+                    matches
+                        .get_one::<u64>("statements.query-text-refresh")
+                        .copied(),
+                    Some(0)
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn test_statements_query_text_refresh_from_cli() {
+        let matches = commands::new()
+            .get_matches_from(vec!["pg_exporter", "--statements.query-text-refresh=60"]);
+        assert_eq!(
+            matches
+                .get_one::<u64>("statements.query-text-refresh")
+                .copied(),
+            Some(60)
+        );
+    }
 
     #[test]
     fn test_statements_top_n_default() {

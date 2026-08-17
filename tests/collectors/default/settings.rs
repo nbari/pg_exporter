@@ -206,3 +206,85 @@ async fn test_settings_collector_exposes_wal_size_settings() -> Result<()> {
     pool.close().await;
     Ok(())
 }
+
+/// The temp-file safeguards from issue #32. `temp_file_limit` and `log_temp_files`
+/// are reported by `pg_settings` in kB, but `-1` is a sentinel (unlimited /
+/// disabled) that must survive the unit conversion untouched.
+#[tokio::test]
+async fn test_settings_collector_exposes_temp_safeguards() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+    let collector = SettingsCollector::new();
+    let registry = Registry::new();
+
+    collector.register_metrics(&registry)?;
+    collector.collect(&pool).await?;
+
+    let metric_families = registry.gather();
+    let value_of = |name: &str| -> Option<i64> {
+        metric_families
+            .iter()
+            .find(|family| family.name() == name)
+            .and_then(|family| family.get_metric().first())
+            .map(|metric| common::metric_value_to_i64(metric.get_gauge().value()))
+    };
+
+    let block_size = value_of("pg_settings_block_size_bytes")
+        .expect("pg_settings_block_size_bytes should exist");
+    assert!(
+        block_size >= 1024 && block_size.count_ones() == 1,
+        "block_size must be a power-of-two byte count, got {block_size}"
+    );
+
+    for setting_name in [
+        "pg_settings_temp_file_limit_bytes",
+        "pg_settings_log_temp_files_bytes",
+    ] {
+        let value = value_of(setting_name).unwrap_or_else(|| panic!("{setting_name} should exist"));
+        assert!(
+            value == -1 || value >= 0,
+            "{setting_name} must be -1 or a non-negative byte count, got {value}"
+        );
+        assert_ne!(
+            value, -1024,
+            "{setting_name}: the -1 sentinel must not be scaled by the kB unit"
+        );
+    }
+
+    pool.close().await;
+    Ok(())
+}
+
+/// A positive `temp_file_limit` must be converted from kB to bytes, while `-1`
+/// must stay `-1`.
+#[tokio::test]
+async fn test_settings_collector_converts_temp_file_limit_to_bytes() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+
+    let raw: i64 = sqlx::query_scalar(
+        "SELECT setting::bigint FROM pg_settings WHERE name = 'temp_file_limit'",
+    )
+    .fetch_one(&pool)
+    .await?;
+
+    let collector = SettingsCollector::new();
+    let registry = Registry::new();
+    collector.register_metrics(&registry)?;
+    collector.collect(&pool).await?;
+
+    let exported = registry
+        .gather()
+        .iter()
+        .find(|family| family.name() == "pg_settings_temp_file_limit_bytes")
+        .and_then(|family| family.get_metric().first())
+        .map(|metric| common::metric_value_to_i64(metric.get_gauge().value()))
+        .expect("pg_settings_temp_file_limit_bytes should exist");
+
+    let expected = if raw < 0 { raw } else { raw * 1024 };
+    assert_eq!(
+        exported, expected,
+        "temp_file_limit is reported in kB; only non-negative values are scaled"
+    );
+
+    pool.close().await;
+    Ok(())
+}
