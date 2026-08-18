@@ -5,8 +5,7 @@
 //! resolved only when the row belongs to the connected database; rows for other
 //! databases fall back to the numeric relation OID label.
 
-use crate::collectors::{
-    Collector,
+use crate::collectors::{Collected, Collector,
     util::{get_pg_version, is_pg_version_at_least},
 };
 use anyhow::Result;
@@ -204,7 +203,7 @@ impl Collector for AnalyzeProgressCollector {
         err,
         fields(collector = "analyze_progress", otel.kind = "internal")
     )]
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             let (version_num, support) = resolve_analyze_progress_support(pool).await?;
             if support == AnalyzeProgressSupport::Unsupported {
@@ -215,7 +214,7 @@ impl Collector for AnalyzeProgressCollector {
                     );
                 }
                 debug!("skipping analyze progress metrics on unsupported PostgreSQL version");
-                return Ok(());
+                return Ok(Collected::Skipped);
             }
 
             let query_span = info_span!(
@@ -240,8 +239,13 @@ impl Collector for AnalyzeProgressCollector {
             }
 
             debug!(rows = samples.len(), "updated analyze progress metrics");
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// Delegates to the existing full reset.
+    fn reset_metrics(&self) {
+        self.reset_all();
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::collectors::Collector;
+use crate::collectors::{Collected, Collector};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{Gauge, IntGauge, Opts, Registry};
@@ -156,8 +156,16 @@ impl ProcessCollector {
             .last_refresh
             .is_some_and(|last| now.duration_since(last) < sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
 
+        // Audit note, applying to every gauge set in this function: when a lookup fails, the
+        // corresponding gauge keeps its previous value rather than being cleared. That happens
+        // if `state.system.process(self.pid)` returns None in either branch below, and if the
+        // `/proc/<pid>/fd` read in the refresh path below fails. Unlike an ordinary NULL from
+        // PostgreSQL, failing to read our *own* process is a resilience question rather than
+        // data absence, and keeping the last known RSS / fd count is arguably better than
+        // removing it. Left as-is deliberately; revisit if these gauges are ever used for
+        // alerting where a stale value would mislead.
         if should_wait {
-            // Not enough time passed, skip CPU update but collect memory/fds
+            // Not enough time passed, skip CPU update but collect memory.
             if let Some(process) = state.system.process(self.pid) {
                 let rss = process.memory();
                 let vsz = process.virtual_memory();
@@ -239,11 +247,17 @@ impl Collector for ProcessCollector {
     }
 
     #[instrument(skip(self, _pool), level = "debug")]
-    fn collect<'a>(&'a self, _pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, _pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             self.collect_stats();
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// No-op: this collector has no skip path, so it is never settled, and its
+    /// metrics are scalars that cannot be removed while registered.
+    fn reset_metrics(&self) {
+        // Nothing to remove.
     }
 
     fn enabled_by_default(&self) -> bool {

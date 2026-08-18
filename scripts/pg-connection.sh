@@ -46,15 +46,28 @@ pg_connection_target_for_db() {
     printf '%s\n' "${db}"
 }
 
+# Runs psql against `db`, non-interactively.
+#
+# `--pset=pager=off` is load-bearing: psql defaults to `pager 1`, so whenever result output
+# is taller *or wider* than the terminal it pipes through $PAGER (less) and waits for the
+# user to press `q`. That stalls any script that prints a result set — the setup script's
+# "Top 5 queries" table is ~90 characters wide, so it hangs on any narrower terminal.
+# `--no-psqlrc` does not cover this: the pager default is built into psql, not ~/.psqlrc.
+# PAGER=cat is belt-and-braces for a psql built to consult it before the pset.
 pg_connection_psql_cmd() {
     local db="$1"
     shift
 
     if [[ -n "${PG_EXPORTER_DSN:-}" ]]; then
-        PGOPTIONS='--client-min-messages=warning' psql --no-psqlrc -d "$(pg_connection_target_for_db "${db}")" "$@"
-    else
-        PGOPTIONS='--client-min-messages=warning' psql \
+        PGOPTIONS='--client-min-messages=warning' PAGER=cat psql \
             --no-psqlrc \
+            --pset=pager=off \
+            -d "$(pg_connection_target_for_db "${db}")" \
+            "$@"
+    else
+        PGOPTIONS='--client-min-messages=warning' PAGER=cat psql \
+            --no-psqlrc \
+            --pset=pager=off \
             -h "${PG_HOST:-localhost}" \
             -p "${PG_PORT:-5432}" \
             -U "${PG_USER:-postgres}" \

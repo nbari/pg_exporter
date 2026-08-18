@@ -217,6 +217,25 @@ impl IsolatedTestDatabase {
         })
     }
 
+    /// DSN for this isolated database as another role.
+    ///
+    /// Lets a test drive a collector as an unprivileged role while keeping the privileged
+    /// pool for setup. Grants on `pg_catalog` views are per-database, so revoking one here
+    /// cannot affect a sibling test running against a different database.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the administrative DSN cannot be parsed.
+    pub fn dsn_for_role(&self, user: &str, password: &str) -> Result<String> {
+        let mut url = url::Url::parse(&self.admin_dsn).context("Failed to parse test DSN")?;
+        url.set_path(&format!("/{}", self.database_name));
+        url.set_username(user)
+            .map_err(|()| anyhow::anyhow!("cannot set username on test DSN"))?;
+        url.set_password(Some(password))
+            .map_err(|()| anyhow::anyhow!("cannot set password on test DSN"))?;
+        Ok(url.to_string())
+    }
+
     pub async fn with_pg_stat_statements(prefix: &str) -> Result<Option<Self>> {
         let test_db = Self::new(prefix).await?;
 

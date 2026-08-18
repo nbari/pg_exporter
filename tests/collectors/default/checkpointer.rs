@@ -2,6 +2,17 @@ use super::super::common;
 use anyhow::Result;
 use pg_exporter::collectors::{Collector, default::checkpointer::CheckpointerCollector};
 use prometheus::Registry;
+use sqlx::{PgPool, Row};
+
+/// `pg_stat_checkpointer` was introduced in `PostgreSQL` 17.
+const MIN_PG_STAT_CHECKPOINTER_VERSION: i32 = 170_000;
+
+async fn server_version_num(pool: &PgPool) -> Result<i32> {
+    let row = sqlx::query("SELECT current_setting('server_version_num')::int AS v")
+        .fetch_one(pool)
+        .await?;
+    Ok(row.try_get::<i32, _>("v")?)
+}
 
 #[tokio::test]
 async fn test_checkpointer_collector_registers_without_error() -> Result<()> {
@@ -15,6 +26,10 @@ async fn test_checkpointer_collector_registers_without_error() -> Result<()> {
 #[tokio::test]
 async fn test_checkpointer_collector_has_all_metrics() -> Result<()> {
     let pool = common::create_test_pool().await?;
+    if server_version_num(&pool).await? < MIN_PG_STAT_CHECKPOINTER_VERSION {
+        pool.close().await;
+        return Ok(());
+    }
     let registry = Registry::new();
     let collector = CheckpointerCollector::new();
 
@@ -76,6 +91,10 @@ async fn test_checkpointer_collector_values_non_negative() -> Result<()> {
 #[tokio::test]
 async fn test_checkpointer_collector_metrics_are_counters() -> Result<()> {
     let pool = common::create_test_pool().await?;
+    if server_version_num(&pool).await? < MIN_PG_STAT_CHECKPOINTER_VERSION {
+        pool.close().await;
+        return Ok(());
+    }
     let registry = Registry::new();
     let collector = CheckpointerCollector::new();
 
@@ -111,6 +130,10 @@ async fn test_checkpointer_collector_metrics_are_counters() -> Result<()> {
 #[tokio::test]
 async fn test_checkpointer_collector_concurrent_collections() -> Result<()> {
     let pool = common::create_test_pool().await?;
+    if server_version_num(&pool).await? < MIN_PG_STAT_CHECKPOINTER_VERSION {
+        pool.close().await;
+        return Ok(());
+    }
     let registry = Registry::new();
     let collector = CheckpointerCollector::new();
 
@@ -147,6 +170,10 @@ async fn test_checkpointer_collector_concurrent_collections() -> Result<()> {
 #[tokio::test]
 async fn test_checkpointer_collector_idempotent_collection() -> Result<()> {
     let pool = common::create_test_pool().await?;
+    if server_version_num(&pool).await? < MIN_PG_STAT_CHECKPOINTER_VERSION {
+        pool.close().await;
+        return Ok(());
+    }
     let registry = Registry::new();
     let collector = CheckpointerCollector::new();
 
@@ -177,6 +204,10 @@ async fn test_checkpointer_collector_idempotent_collection() -> Result<()> {
 #[tokio::test]
 async fn test_checkpointer_collector_metric_help_text() -> Result<()> {
     let pool = common::create_test_pool().await?;
+    if server_version_num(&pool).await? < MIN_PG_STAT_CHECKPOINTER_VERSION {
+        pool.close().await;
+        return Ok(());
+    }
     let registry = Registry::new();
     let collector = CheckpointerCollector::new();
 
@@ -278,6 +309,10 @@ async fn test_checkpointer_collector_double_registration_fails() -> Result<()> {
 #[tokio::test]
 async fn test_checkpointer_collector_timed_vs_requested() -> Result<()> {
     let pool = common::create_test_pool().await?;
+    if server_version_num(&pool).await? < MIN_PG_STAT_CHECKPOINTER_VERSION {
+        pool.close().await;
+        return Ok(());
+    }
     let registry = Registry::new();
     let collector = CheckpointerCollector::new();
 
@@ -306,6 +341,10 @@ async fn test_checkpointer_collector_timed_vs_requested() -> Result<()> {
 #[tokio::test]
 async fn test_checkpointer_collector_timing_metrics() -> Result<()> {
     let pool = common::create_test_pool().await?;
+    if server_version_num(&pool).await? < MIN_PG_STAT_CHECKPOINTER_VERSION {
+        pool.close().await;
+        return Ok(());
+    }
     let registry = Registry::new();
     let collector = CheckpointerCollector::new();
 
@@ -334,6 +373,10 @@ async fn test_checkpointer_collector_timing_metrics() -> Result<()> {
 #[tokio::test]
 async fn test_checkpointer_collector_handles_database_restart() -> Result<()> {
     let pool = common::create_test_pool().await?;
+    if server_version_num(&pool).await? < MIN_PG_STAT_CHECKPOINTER_VERSION {
+        pool.close().await;
+        return Ok(());
+    }
     let registry = Registry::new();
     let collector = CheckpointerCollector::new();
 
@@ -380,6 +423,10 @@ async fn test_checkpointer_collector_handles_database_restart() -> Result<()> {
 #[tokio::test]
 async fn test_checkpointer_collector_all_counters_valid_after_activity() -> Result<()> {
     let pool = common::create_test_pool().await?;
+    if server_version_num(&pool).await? < MIN_PG_STAT_CHECKPOINTER_VERSION {
+        pool.close().await;
+        return Ok(());
+    }
     let registry = Registry::new();
     let collector = CheckpointerCollector::new();
 
@@ -560,6 +607,51 @@ async fn test_checkpointer_control_checkpoint_idempotent() -> Result<()> {
         .find(|m| m.name() == "pg_last_checkpoint_age_seconds")
         .expect("age metric should exist");
     assert!(age.get_metric()[0].get_gauge().value() >= 0.0);
+
+    pool.close().await;
+    Ok(())
+}
+
+/// The control-checkpoint group comes from `pg_control_checkpoint()`, which every supported
+/// server has, and must be published even when `pg_stat_checkpointer` is skipped below
+/// `PostgreSQL` 17.
+///
+/// This is the regression guard for the settlement design: the collector publishes these
+/// gauges *before* the version gate, so reporting `Skipped` for the whole collector would
+/// clear metrics it had just refreshed.
+#[tokio::test]
+async fn test_checkpointer_control_metrics_survive_a_stat_checkpointer_skip() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+    let version = server_version_num(&pool).await?;
+    let registry = Registry::new();
+    let collector = CheckpointerCollector::new();
+
+    collector.register_metrics(&registry)?;
+    collector.collect(&pool).await?;
+
+    let families = registry.gather();
+    for name in [
+        "pg_last_checkpoint_age_seconds",
+        "pg_wal_bytes_since_last_checkpoint",
+    ] {
+        let family = families
+            .iter()
+            .find(|f| f.name() == name)
+            .unwrap_or_else(|| panic!("{name} must be published on server_version_num {version}"));
+        assert!(
+            !family.get_metric().is_empty(),
+            "{name} must expose a sample, not just be registered"
+        );
+    }
+
+    if version < MIN_PG_STAT_CHECKPOINTER_VERSION {
+        assert!(
+            !families.iter().any(
+                |f| f.name().starts_with("pg_stat_checkpointer_") && !f.get_metric().is_empty()
+            ),
+            "pg_stat_checkpointer_* must be absent below PostgreSQL 17, not zero"
+        );
+    }
 
     pool.close().await;
     Ok(())

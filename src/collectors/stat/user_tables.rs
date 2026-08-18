@@ -1,7 +1,7 @@
 use crate::collectors::util::{
     acquire_db_query_permit, get_default_database, get_excluded_databases, open_db_connection,
 };
-use crate::collectors::{Collector, all_databases_failed, i64_to_f64};
+use crate::collectors::{Collected, Collector, all_databases_failed, i64_to_f64};
 use anyhow::{Result, anyhow};
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, IntGaugeVec, Opts, Registry};
@@ -134,7 +134,7 @@ impl StatUserTablesCollector {
         }
     }
 
-    fn reset_metrics(&self) {
+    fn reset_all(&self) {
         self.seq_scan.reset();
         self.seq_tup_read.reset();
         self.idx_scan.reset();
@@ -367,7 +367,7 @@ impl Collector for StatUserTablesCollector {
     }
 
     #[instrument(skip(self, pool), level = "info", err, fields(collector="stat_user_tables", otel.kind="internal"))]
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             // 1) Discover databases (exclude templates and configured exclusions)
             let excluded = get_excluded_databases().to_vec();
@@ -548,7 +548,7 @@ impl Collector for StatUserTablesCollector {
                 );
             }
 
-            self.reset_metrics();
+            self.reset_all();
 
             for sample in &all_samples {
                 let labels = [&sample.datname, &sample.schemaname, &sample.relname];
@@ -628,8 +628,13 @@ impl Collector for StatUserTablesCollector {
                 );
             }
 
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// Delegates to the existing full reset.
+    fn reset_metrics(&self) {
+        self.reset_all();
     }
 }
 

@@ -29,26 +29,24 @@ async fn test_certificate_collector_disabled_by_default() {
     assert!(!collector.enabled_by_default());
 }
 
+/// Registration must accept all four metric names, proven by a second registration of the
+/// same names failing rather than by looking for them in `gather()`.
+///
+/// The metrics are zero-label vectors, so nothing is exposed until a value is set. Asserting
+/// on `gather()` right after registration is what the previous version of this test did, and
+/// it passed for the wrong reason: the scalars existed at `0` from registration alone, which
+/// is precisely the false "certificate invalid" reading this design removes.
 #[tokio::test]
-async fn test_certificate_collector_has_all_metrics() -> Result<()> {
-    let collector = CertificateCollector::new();
+async fn test_certificate_collector_registers_all_metric_names() -> Result<()> {
     let registry = Registry::new();
+    CertificateCollector::new().register_metrics(&registry)?;
 
-    collector.register_metrics(&registry)?;
-
-    let metric_families = registry.gather();
-
-    let expected_metrics = vec![
-        "pg_ssl_certificate_expiry_seconds",
-        "pg_ssl_certificate_valid",
-        "pg_ssl_certificate_not_before_timestamp",
-        "pg_ssl_certificate_not_after_timestamp",
-    ];
-
-    for metric_name in expected_metrics {
-        let found = metric_families.iter().any(|m| m.name() == metric_name);
-        assert!(found, "Metric {metric_name} should be registered");
-    }
+    assert!(
+        CertificateCollector::new()
+            .register_metrics(&registry)
+            .is_err(),
+        "re-registering the same metric names must conflict, proving they were registered"
+    );
 
     Ok(())
 }
@@ -73,20 +71,47 @@ async fn test_certificate_collector_handles_missing_cert_gracefully() -> Result<
     Ok(())
 }
 
+/// With no certificate configured, the collector must publish **nothing** rather than a
+/// zeroed snapshot.
+///
+/// A zeroed `pg_ssl_certificate_valid` reads as "the certificate is invalid" and a zeroed
+/// `pg_ssl_certificate_expiry_seconds` as "it expires now" — both false alarms, and both
+/// worse than no data. Absence is the honest answer, which is why these metrics are
+/// zero-label vectors: they can be removed, not just set to zero.
 #[tokio::test]
-async fn test_certificate_collector_collects_from_database() -> Result<()> {
+async fn test_certificate_collector_publishes_nothing_without_a_certificate() -> Result<()> {
     let pool = common::create_test_pool().await?;
 
     let collector = CertificateCollector::new();
     let registry = Registry::new();
-
     collector.register_metrics(&registry)?;
+
+    let configured: Option<String> = sqlx::query_scalar("SHOW ssl_cert_file")
+        .fetch_one(&pool)
+        .await
+        .ok()
+        .filter(|path: &String| !path.is_empty());
+
     collector.collect(&pool).await?;
 
-    let metric_families = registry.gather();
+    if configured.is_some() {
+        println!("ssl_cert_file is configured on this server, skipping the absence assertion");
+        pool.close().await;
+        return Ok(());
+    }
 
-    // Verify metrics were registered (they may not have values if SSL is not configured)
-    assert!(!metric_families.is_empty());
+    for family in registry.gather() {
+        assert!(
+            family.get_metric().is_empty(),
+            "{} must expose no sample without a configured certificate, got {:?}",
+            family.name(),
+            family
+                .get_metric()
+                .iter()
+                .map(|m| m.get_gauge().value())
+                .collect::<Vec<_>>()
+        );
+    }
 
     pool.close().await;
     Ok(())

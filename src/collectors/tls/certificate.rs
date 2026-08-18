@@ -1,10 +1,15 @@
-use crate::collectors::{Collector, i64_to_f64};
+use crate::collectors::util::{QueryFailure, classify_query_error};
+use crate::collectors::{NO_LABELS, Collected, Collector, i64_to_f64};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
-use prometheus::{Gauge, IntGauge, Opts, Registry};
+use prometheus::{GaugeVec, IntGaugeVec, Opts, Registry};
 use sqlx::PgPool;
 use std::fs;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::path::Path;
 use tracing::{debug, info_span, warn};
 use tracing_futures::Instrument;
@@ -21,10 +26,12 @@ use x509_parser::prelude::*;
 #[derive(Clone)]
 #[allow(clippy::struct_field_names)]
 pub struct CertificateCollector {
-    pg_ssl_certificate_expiry_seconds: Gauge,
-    pg_ssl_certificate_valid: IntGauge,
-    pg_ssl_certificate_not_before_timestamp: Gauge,
-    pg_ssl_certificate_not_after_timestamp: Gauge,
+    pg_ssl_certificate_expiry_seconds: GaugeVec,
+    pg_ssl_certificate_valid: IntGaugeVec,
+    pg_ssl_certificate_not_before_timestamp: GaugeVec,
+    pg_ssl_certificate_not_after_timestamp: GaugeVec,
+    /// Ensures the missing-privilege warning is logged at most once per process.
+    denied_warned: Arc<AtomicBool>,
 }
 
 impl CertificateCollector {
@@ -38,31 +45,32 @@ impl CertificateCollector {
     #[allow(clippy::new_without_default)]
     #[allow(clippy::expect_used)]
     pub fn new() -> Self {
-        let pg_ssl_certificate_expiry_seconds = Gauge::with_opts(Opts::new(
+        let pg_ssl_certificate_expiry_seconds = GaugeVec::new(Opts::new(
             "pg_ssl_certificate_expiry_seconds",
             "Seconds until SSL/TLS certificate expires (negative if expired)",
-        ))
+        ), &[])
         .expect("Failed to create pg_ssl_certificate_expiry_seconds metric");
 
-        let pg_ssl_certificate_valid = IntGauge::with_opts(Opts::new(
+        let pg_ssl_certificate_valid = IntGaugeVec::new(Opts::new(
             "pg_ssl_certificate_valid",
             "Whether SSL/TLS certificate is currently valid (1 = valid, 0 = invalid/expired)",
-        ))
+        ), &[])
         .expect("Failed to create pg_ssl_certificate_valid metric");
 
-        let pg_ssl_certificate_not_before_timestamp = Gauge::with_opts(Opts::new(
+        let pg_ssl_certificate_not_before_timestamp = GaugeVec::new(Opts::new(
             "pg_ssl_certificate_not_before_timestamp",
             "Unix timestamp when SSL/TLS certificate becomes valid",
-        ))
+        ), &[])
         .expect("Failed to create pg_ssl_certificate_not_before_timestamp metric");
 
-        let pg_ssl_certificate_not_after_timestamp = Gauge::with_opts(Opts::new(
+        let pg_ssl_certificate_not_after_timestamp = GaugeVec::new(Opts::new(
             "pg_ssl_certificate_not_after_timestamp",
             "Unix timestamp when SSL/TLS certificate expires",
-        ))
+        ), &[])
         .expect("Failed to create pg_ssl_certificate_not_after_timestamp metric");
 
         Self {
+            denied_warned: Arc::new(AtomicBool::new(false)),
             pg_ssl_certificate_expiry_seconds,
             pg_ssl_certificate_valid,
             pg_ssl_certificate_not_before_timestamp,
@@ -70,16 +78,18 @@ impl CertificateCollector {
         }
     }
 
-    /// Parse certificate file and extract validity information
+    /// Parses the certificate file and publishes its validity information.
     ///
-    /// Returns Ok(()) if the file doesn't exist or can't be read (expected for remote installations)
-    fn parse_certificate_file(&self, cert_path: &str) -> Result<()> {
+    /// Returns [`Collected::Skipped`] when the file is absent or unreadable, which is
+    /// expected when the exporter runs remotely from the server. A **malformed**
+    /// certificate is an `Err`: that means TLS is misconfigured rather than unobservable.
+    fn parse_certificate_file(&self, cert_path: &str) -> Result<Collected> {
         let path = Path::new(cert_path);
         if !path.exists() {
             debug!(
                 "Certificate file not accessible: {cert_path} (this is expected when running remotely)"
             );
-            return Ok(());
+            return Ok(Collected::Skipped);
         }
 
         // Read certificate file
@@ -89,7 +99,7 @@ impl CertificateCollector {
                 debug!(
                     "Cannot read certificate file {cert_path}: {e} (this is expected when running remotely)"
                 );
-                return Ok(());
+                return Ok(Collected::Skipped);
             }
         };
 
@@ -122,13 +132,13 @@ impl CertificateCollector {
 
         // Set metrics
         self.pg_ssl_certificate_expiry_seconds
-            .set(i64_to_f64(seconds_until_expiry));
+            .with_label_values(&NO_LABELS).set(i64_to_f64(seconds_until_expiry));
         self.pg_ssl_certificate_not_before_timestamp
-            .set(i64_to_f64(not_before));
+            .with_label_values(&NO_LABELS).set(i64_to_f64(not_before));
         self.pg_ssl_certificate_not_after_timestamp
-            .set(i64_to_f64(not_after));
+            .with_label_values(&NO_LABELS).set(i64_to_f64(not_after));
         self.pg_ssl_certificate_valid
-            .set(i64::from(is_valid));
+            .with_label_values(&NO_LABELS).set(i64::from(is_valid));
 
         // Log certificate info
         debug!(
@@ -139,7 +149,7 @@ impl CertificateCollector {
                 .map_or_else(|| "invalid".to_string(), |dt| dt.to_rfc3339()),
         );
 
-        Ok(())
+        Ok(Collected::Fresh)
     }
 }
 
@@ -160,7 +170,7 @@ impl Collector for CertificateCollector {
         Ok(())
     }
 
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             let span = info_span!(
                 "db.query",
@@ -179,24 +189,173 @@ impl Collector for CertificateCollector {
                 Ok(cert_path) => {
                     if cert_path.is_empty() {
                         debug!("ssl_cert_file is not configured");
-                        return Ok(());
+                        return Ok(Collected::Skipped);
                     }
 
-                    // Parse the certificate file
-                    if let Err(e) = self.parse_certificate_file(&cert_path) {
-                        warn!("Failed to parse certificate file '{cert_path}': {e}");
-                    }
+                    // A malformed certificate propagates: it means TLS is misconfigured,
+                    // which is worth failing loudly for, unlike a file this process simply
+                    // cannot see.
+                    self.parse_certificate_file(&cert_path)
                 }
-                Err(e) => {
-                    warn!("Failed to query ssl_cert_file: {}", e);
+                Err(error) => {
+                    // An absent or unreadable setting is a skip, which clears. Anything else
+                    // is a fault and propagates, so the previous certificate reading survives
+                    // for the next scrape instead of being destroyed by a transient error.
+                    match classify_query_error(&error) {
+                        QueryFailure::Absent => {
+                            debug!("Skipping certificate metrics (ssl_cert_file absent): {error}");
+                            Ok(Collected::Skipped)
+                        }
+                        QueryFailure::Denied => {
+                            if !self.denied_warned.swap(true, Ordering::Relaxed) {
+                                warn!(
+                                    "the exporter role may not read ssl_cert_file; certificate \
+                                     metrics will not be published"
+                                );
+                            }
+                            Ok(Collected::Skipped)
+                        }
+                        QueryFailure::Fault => Err(error.into()),
+                    }
                 }
             }
-
-            Ok(())
         })
+    }
+
+    /// Removes the certificate series.
+    ///
+    /// These are state and threshold gauges, so zeroing them would be actively wrong: a
+    /// zeroed `pg_ssl_certificate_valid` reads as "certificate invalid" and a zeroed
+    /// `pg_ssl_certificate_expiry_seconds` as "expires now". As zero-label vectors they
+    /// can be removed instead, so a missing certificate file reads as unknown.
+    fn reset_metrics(&self) {
+        self.pg_ssl_certificate_expiry_seconds.reset();
+        self.pg_ssl_certificate_valid.reset();
+        self.pg_ssl_certificate_not_before_timestamp.reset();
+        self.pg_ssl_certificate_not_after_timestamp.reset();
     }
 
     fn enabled_by_default(&self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::{CertificateCollector, Collected, NO_LABELS};
+    use std::io::Write;
+
+    /// Seeds a snapshot so "the previous values survived" is a real assertion rather than a
+    /// vacuous one.
+    fn seeded() -> CertificateCollector {
+        let collector = CertificateCollector::new();
+        collector
+            .pg_ssl_certificate_valid
+            .with_label_values(&NO_LABELS)
+            .set(1);
+        collector
+            .pg_ssl_certificate_expiry_seconds
+            .with_label_values(&NO_LABELS)
+            .set(86_400.0);
+        assert_eq!(
+            snapshot(&collector),
+            (1, 86_400.0),
+            "the seed must take, or the preservation assertions below are vacuous"
+        );
+        collector
+    }
+
+    fn snapshot(collector: &CertificateCollector) -> (i64, f64) {
+        (
+            collector
+                .pg_ssl_certificate_valid
+                .with_label_values(&NO_LABELS)
+                .get(),
+            collector
+                .pg_ssl_certificate_expiry_seconds
+                .with_label_values(&NO_LABELS)
+                .get(),
+        )
+    }
+
+    fn write_temp(contents: &[u8]) -> tempfile::NamedTempFile {
+        let mut file = tempfile::NamedTempFile::new().expect("temp file");
+        file.write_all(contents).expect("write");
+        file.flush().expect("flush");
+        file
+    }
+
+    /// A malformed certificate is a **fault**, not a skip.
+    ///
+    /// "The file is not readable from here" means the data is unavailable, so it clears. A file
+    /// that is present but unparsable means TLS is misconfigured, which is worth failing loudly
+    /// for — and the error must leave the previous snapshot intact rather than clearing it,
+    /// because `Collector::collect` only settles a skip.
+    #[test]
+    fn malformed_pem_is_an_error_and_keeps_the_previous_snapshot() {
+        let collector = seeded();
+        let before = snapshot(&collector);
+        let file = write_temp(
+            b"-----BEGIN CERTIFICATE-----\nthis is not base64 at all\n-----END CERTIFICATE-----\n",
+        );
+
+        let result = collector.parse_certificate_file(file.path().to_str().expect("path"));
+
+        assert!(result.is_err(), "a malformed PEM must be an error, got {result:?}");
+        assert_eq!(
+            snapshot(&collector),
+            before,
+            "an error must not disturb the previous snapshot"
+        );
+    }
+
+    /// Anything not starting with `-----BEGIN` is treated as DER, so garbage bytes exercise the
+    /// X.509 path rather than the PEM path.
+    #[test]
+    fn malformed_der_is_an_error_and_keeps_the_previous_snapshot() {
+        let collector = seeded();
+        let before = snapshot(&collector);
+        let file = write_temp(&[0x01, 0x02, 0x03, 0x04, 0xff, 0xfe]);
+
+        let result = collector.parse_certificate_file(file.path().to_str().expect("path"));
+
+        assert!(result.is_err(), "a malformed DER must be an error, got {result:?}");
+        assert_eq!(snapshot(&collector), before);
+    }
+
+    /// The contrasting case: a file this process cannot see is unavailable data, so it is a
+    /// skip. `Collector::collect` clears on that, which is why the distinction matters.
+    #[test]
+    fn a_missing_file_is_a_skip_not_an_error() {
+        let collector = seeded();
+
+        let outcome = collector
+            .parse_certificate_file("/nonexistent/pg_exporter/definitely-not-here.crt")
+            .expect("a missing file must not be an error");
+
+        assert_eq!(outcome, Collected::Skipped);
+    }
+
+    /// An unreadable file is also unavailable rather than corrupt.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_file_is_a_skip_not_an_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let file = write_temp(b"irrelevant");
+        std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o000))
+            .expect("chmod");
+
+        let collector = seeded();
+        let outcome = collector.parse_certificate_file(file.path().to_str().expect("path"));
+
+        // Running as root defeats the permission bits, so only assert when it actually applies.
+        if std::fs::read(file.path()).is_err() {
+            assert_eq!(
+                outcome.expect("an unreadable file must not be an error"),
+                Collected::Skipped
+            );
+        }
     }
 }

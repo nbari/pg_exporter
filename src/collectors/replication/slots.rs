@@ -1,4 +1,4 @@
-use crate::collectors::Collector;
+use crate::collectors::{Collected, Collector};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, Opts, Registry};
@@ -83,7 +83,7 @@ impl Collector for ReplicationSlotsCollector {
         err,
         fields(collector="replication_slots", otel.kind="internal")
     )]
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             let query_span = info_span!(
                 "db.query",
@@ -144,8 +144,14 @@ impl Collector for ReplicationSlotsCollector {
 
             debug!(slots_count = rows.len(), "collected replication slots metrics");
 
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// Removes every labeled series this collector owns.
+    fn reset_metrics(&self) {
+        self.wal_lsn_diff.reset();
+        self.active.reset();
     }
 }
 

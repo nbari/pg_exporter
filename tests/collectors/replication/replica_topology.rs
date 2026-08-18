@@ -10,7 +10,7 @@ use pg_exporter::collectors::{
 use prometheus::{Registry, proto::MetricFamily};
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 use std::time::Duration;
-use testcontainers_modules::testcontainers::{
+use testcontainers::{
     ContainerAsync, GenericImage, ImageExt,
     core::{CmdWaitFor, ExecCommand, IntoContainerPort},
     runners::AsyncRunner,
@@ -19,6 +19,13 @@ use tokio::time::sleep;
 use ulid::Ulid;
 
 const POSTGRES_TAG: &str = "16";
+
+/// Attempts at creating the primary/replica pair before giving up.
+///
+/// Docker's `create_container` call has been observed timing out on loaded CI runners, which
+/// is a transient daemon failure rather than a problem with the test, so one retry is worth
+/// the seconds it costs.
+const CREATE_ATTEMPTS: usize = 2;
 const CONNECT_ATTEMPTS: u32 = 60;
 const OBSERVE_ATTEMPTS: u32 = 60;
 const REPLAY_WAIT_ATTEMPTS: u32 = 80;
@@ -260,7 +267,9 @@ async fn start_primary_container(
         ])
         .start()
         .await
-        .map_err(Into::into)
+        .with_context(|| {
+            format!("failed to create the PRIMARY container {container_name} on network {network}")
+        })
 }
 
 async fn start_replica_container(
@@ -278,7 +287,7 @@ async fn start_replica_container(
         .with_cmd(vec!["-ceu", REPLICA_BOOTSTRAP_SCRIPT])
         .start()
         .await
-        .map_err(Into::into)
+        .with_context(|| format!("failed to create the REPLICA container {container_name} on network {network} (primary {primary_name})"))
 }
 
 async fn configure_primary_replication_hba(
@@ -696,34 +705,67 @@ async fn replication_lag_and_role_semantics_from_postgres_primary_replica_pair()
     }
 
     let require_runtime = common::should_require_container_runtime();
-    let suffix = Ulid::generate().to_string().to_lowercase();
-    let network = format!("pg-exporter-repl-{suffix}");
-    let primary_name = format!("pg-exporter-primary-{suffix}");
-    let replica_name = format!("pg-exporter-replica-{suffix}");
 
-    let primary = match start_primary_container(&network, &primary_name).await {
-        Ok(container) => container,
-        Err(error) => {
-            if require_runtime {
-                return Err(error);
+    // Creating a network plus two containers competes with the ~340 other tests in this
+    // binary, on a runner that already hosts the CI `services: postgres` container. Docker's
+    // create_container call has been observed timing out under that load:
+    //
+    //   Error: failed to create a container: Timeout error
+    //
+    // That is Bollard's client timeout on the create request, which elapses *before* the
+    // configurable testcontainers startup timeout begins — so raising the startup timeout
+    // cannot help. Serializing container-creating tests does not help either: this is the
+    // only container creator in this binary, and it creates the pair sequentially.
+    //
+    // A transient daemon timeout is worth one retry. Each attempt uses a fresh suffix so a
+    // partially-created container or network from the failed attempt cannot collide, and the
+    // previous attempt's handles are dropped first so testcontainers removes them.
+    let mut created = None;
+    let mut last_error = None;
+
+    for attempt in 1..=CREATE_ATTEMPTS {
+        let suffix = Ulid::generate().to_string().to_lowercase();
+        let network = format!("pg-exporter-repl-{suffix}");
+        let primary_name = format!("pg-exporter-primary-{suffix}");
+        let replica_name = format!("pg-exporter-replica-{suffix}");
+
+        let primary = match start_primary_container(&network, &primary_name).await {
+            Ok(container) => container,
+            Err(error) => {
+                eprintln!("attempt {attempt}/{CREATE_ATTEMPTS}: {error:?}");
+                last_error = Some(error);
+                continue;
             }
-            eprintln!("Skipping replication topology test: {error}");
-            return Ok(());
-        }
-    };
+        };
 
-    let primary_pool = connect_pool_for_container(&primary).await?;
-    configure_primary_replication_hba(&primary, &primary_pool).await?;
+        let primary_pool = connect_pool_for_container(&primary).await?;
+        configure_primary_replication_hba(&primary, &primary_pool).await?;
 
-    let replica = match start_replica_container(&network, &replica_name, &primary_name).await {
-        Ok(container) => container,
-        Err(error) => {
-            if require_runtime {
-                return Err(error);
+        match start_replica_container(&network, &replica_name, &primary_name).await {
+            Ok(replica) => {
+                created = Some((primary, primary_pool, replica));
+                break;
             }
-            eprintln!("Skipping replication topology test: {error}");
-            return Ok(());
+            Err(error) => {
+                eprintln!("attempt {attempt}/{CREATE_ATTEMPTS}: {error:?}");
+                last_error = Some(error);
+                primary_pool.close().await;
+                // Dropping `primary` here lets testcontainers remove it before the retry.
+                drop(primary);
+            }
         }
+    }
+
+    let Some((primary, primary_pool, replica)) = created else {
+        let error = last_error
+            .unwrap_or_else(|| anyhow::anyhow!("container creation failed without an error"));
+        if require_runtime {
+            return Err(error.context(format!(
+                "could not create the replication pair after {CREATE_ATTEMPTS} attempts"
+            )));
+        }
+        eprintln!("Skipping replication topology test: {error}");
+        return Ok(());
     };
 
     let replica_pool = connect_pool_for_container(&replica).await?;

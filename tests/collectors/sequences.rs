@@ -7,6 +7,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static SEQUENCE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+/// Serializes the tests that touch sequences in the shared database.
+///
+/// The `sequences` collector reads `pg_sequences`, which resolves `last_value` per sequence
+/// via `pg_sequence_last_value(oid)`. If a sibling test drops a sequence in the window
+/// between the catalog scan and that call, `PostgreSQL` raises
+/// `could not open relation with OID <n>`. These tests all share one database, and the
+/// collector treats a failure of *every* enumerated database as fatal — with a single
+/// database that is one transient race away from a hard error, which made CI fail
+/// intermittently on different tests and different `PostgreSQL` versions.
+///
+/// Holding this for the whole test keeps sequence DDL and sequence scrapes from
+/// overlapping. It is not a workaround for a product bug: dropping a sequence mid-scrape is
+/// a genuine race that only this test file creates at speed.
+static SEQUENCE_DDL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn next_sequence_name(prefix: &str) -> String {
     let counter = SEQUENCE_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!(
@@ -98,6 +113,7 @@ async fn test_sequences_name_and_default_disabled() {
 
 #[tokio::test]
 async fn test_sequences_collect_returns_ok_without_panicking() -> Result<()> {
+    let _serial = SEQUENCE_DDL_LOCK.lock().await;
     let pool = common::create_test_pool().await?;
     let registry = Registry::new();
     let collector = SequencesCollector::new();
@@ -111,6 +127,7 @@ async fn test_sequences_collect_returns_ok_without_panicking() -> Result<()> {
 
 #[tokio::test]
 async fn test_sequences_low_min_ratio_exports_advanced_sequence() -> Result<()> {
+    let _serial = SEQUENCE_DDL_LOCK.lock().await;
     let pool = common::create_test_pool().await?;
     let sequence_name = next_sequence_name("advanced");
     create_sequence(&pool, &sequence_name, 10).await?;
@@ -134,6 +151,7 @@ async fn test_sequences_low_min_ratio_exports_advanced_sequence() -> Result<()> 
 
 #[tokio::test]
 async fn test_sequences_default_threshold_suppresses_fresh_low_usage_sequence() -> Result<()> {
+    let _serial = SEQUENCE_DDL_LOCK.lock().await;
     let pool = common::create_test_pool().await?;
     let sequence_name = next_sequence_name("fresh");
     create_sequence(&pool, &sequence_name, 1_000_000).await?;
@@ -155,6 +173,7 @@ async fn test_sequences_default_threshold_suppresses_fresh_low_usage_sequence() 
 
 #[tokio::test]
 async fn test_sequences_used_ratio_type_conversion_is_finite() -> Result<()> {
+    let _serial = SEQUENCE_DDL_LOCK.lock().await;
     let pool = common::create_test_pool().await?;
     let sequence_name = next_sequence_name("ratio");
     create_sequence(&pool, &sequence_name, 4).await?;

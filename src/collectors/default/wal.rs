@@ -1,9 +1,14 @@
-use crate::collectors::Collector;
+use crate::collectors::{NO_LABELS, Collected, Collector};
+use crate::collectors::util::{INSUFFICIENT_PRIVILEGE, UNDEFINED_TABLE};
 use anyhow::Result;
 use futures::future::BoxFuture;
-use prometheus::{IntCounter, Opts, Registry};
+use prometheus::{IntCounterVec, Opts, Registry};
 use sqlx::{PgPool, Row};
-use tracing::{debug, info_span, instrument};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use tracing::{debug, info_span, instrument, warn};
 use tracing_futures::Instrument as _;
 
 /// Exposes `PostgreSQL` WAL statistics from `pg_stat_wal`:
@@ -13,10 +18,12 @@ use tracing_futures::Instrument as _;
 /// - `pg_stat_wal_buffers_full_total` (`Counter`)
 #[derive(Clone)]
 pub struct WalCollector {
-    records: IntCounter,      // pg_stat_wal_records_total
-    fpi: IntCounter,           // pg_stat_wal_fpi_total
-    bytes: IntCounter,         // pg_stat_wal_bytes_total
-    buffers_full: IntCounter,  // pg_stat_wal_buffers_full_total
+    records: IntCounterVec,      // pg_stat_wal_records_total
+    fpi: IntCounterVec,           // pg_stat_wal_fpi_total
+    bytes: IntCounterVec,         // pg_stat_wal_bytes_total
+    buffers_full: IntCounterVec,  // pg_stat_wal_buffers_full_total
+    /// Ensures the missing-privilege warning is logged at most once per process.
+    denied_warned: Arc<AtomicBool>,
 }
 
 impl Default for WalCollector {
@@ -34,35 +41,68 @@ impl WalCollector {
     #[must_use]
     #[allow(clippy::expect_used)]
     pub fn new() -> Self {
-        let wal_records = IntCounter::with_opts(Opts::new(
+        let wal_records = IntCounterVec::new(Opts::new(
             "pg_stat_wal_records_total",
             "Total number of WAL records generated",
-        ))
+        ), &[])
         .expect("Failed to create pg_stat_wal_records_total");
 
-        let wal_fpi = IntCounter::with_opts(Opts::new(
+        let wal_fpi = IntCounterVec::new(Opts::new(
             "pg_stat_wal_fpi_total",
             "Total number of WAL full page images generated",
-        ))
+        ), &[])
         .expect("Failed to create pg_stat_wal_fpi_total");
 
-        let wal_bytes = IntCounter::with_opts(Opts::new(
+        let wal_bytes = IntCounterVec::new(Opts::new(
             "pg_stat_wal_bytes_total",
             "Total amount of WAL bytes generated",
-        ))
+        ), &[])
         .expect("Failed to create pg_stat_wal_bytes_total");
 
-        let wal_buffers_full = IntCounter::with_opts(Opts::new(
+        let wal_buffers_full = IntCounterVec::new(Opts::new(
             "pg_stat_wal_buffers_full_total",
             "Number of times WAL data was written to disk because WAL buffers became full",
-        ))
+        ), &[])
         .expect("Failed to create pg_stat_wal_buffers_full_total");
 
         Self {
+            denied_warned: Arc::new(AtomicBool::new(false)),
             records: wal_records,
             fpi: wal_fpi,
             bytes: wal_bytes,
             buffers_full: wal_buffers_full,
+        }
+    }
+
+    /// Classifies a failed `pg_stat_wal` read.
+    ///
+    /// This used to match the *error message* for the view name, which reads a permission
+    /// error as an absent view, since the view name appears in both messages. `SQLSTATE`
+    /// separates them. Neither case is an `Err`: the registry treats any collector error as
+    /// fatal for the whole scrape, so "I cannot read my source" degrades to a skip.
+    fn handle_query_error(&self, error: sqlx::Error) -> Result<Collected> {
+        let code = match &error {
+            sqlx::Error::Database(db_error) => db_error.code().map(|code| code.to_string()),
+            _ => None,
+        };
+
+        match code.as_deref() {
+            Some(UNDEFINED_TABLE) => {
+                debug!("Skipping pg_stat_wal metrics (view not found)");
+                Ok(Collected::Skipped)
+            }
+            Some(INSUFFICIENT_PRIVILEGE) => {
+                if !self.denied_warned.swap(true, Ordering::Relaxed) {
+                    warn!(
+                        "collector.default is enabled but the exporter role may not read \
+                         pg_stat_wal; grant pg_monitor to expose WAL generation metrics \
+                         (GRANT pg_monitor TO <exporter role>)"
+                    );
+                }
+                debug!("Skipping pg_stat_wal metrics (insufficient privilege)");
+                Ok(Collected::Skipped)
+            }
+            _ => Err(error.into()),
         }
     }
 }
@@ -92,7 +132,7 @@ impl Collector for WalCollector {
         err,
         fields(collector="wal", otel.kind="internal")
     )]
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             let query_span = info_span!(
                 "db.query",
@@ -119,14 +159,7 @@ impl Collector for WalCollector {
 
             let row = match row_result {
                 Ok(row) => row,
-                Err(e) => {
-                    // pg_stat_wal was introduced in PostgreSQL 14
-                    if e.to_string().contains("pg_stat_wal") {
-                        debug!("pg_stat_wal view not found (requires PostgreSQL 14+)");
-                        return Ok(());
-                    }
-                    return Err(e.into());
-                }
+                Err(error) => return self.handle_query_error(error),
             };
 
             let wal_records: i64 = row.try_get("wal_records")?;
@@ -140,10 +173,10 @@ impl Collector for WalCollector {
             self.bytes.reset();
             self.buffers_full.reset();
 
-            self.records.inc_by(u64::try_from(wal_records).unwrap_or(0));
-            self.fpi.inc_by(u64::try_from(wal_fpi).unwrap_or(0));
-            self.bytes.inc_by(u64::try_from(wal_bytes).unwrap_or(0));
-            self.buffers_full.inc_by(u64::try_from(wal_buffers_full).unwrap_or(0));
+            self.records.with_label_values(&NO_LABELS).inc_by(u64::try_from(wal_records).unwrap_or(0));
+            self.fpi.with_label_values(&NO_LABELS).inc_by(u64::try_from(wal_fpi).unwrap_or(0));
+            self.bytes.with_label_values(&NO_LABELS).inc_by(u64::try_from(wal_bytes).unwrap_or(0));
+            self.buffers_full.with_label_values(&NO_LABELS).inc_by(u64::try_from(wal_buffers_full).unwrap_or(0));
 
             debug!(
                 wal_records,
@@ -153,8 +186,17 @@ impl Collector for WalCollector {
                 "updated WAL metrics"
             );
 
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// Removes the WAL series. Zero-label vectors, so a skip makes them absent instead
+    /// of publishing zero WAL activity.
+    fn reset_metrics(&self) {
+        self.records.reset();
+        self.fpi.reset();
+        self.bytes.reset();
+        self.buffers_full.reset();
     }
 
     fn enabled_by_default(&self) -> bool {

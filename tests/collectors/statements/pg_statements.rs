@@ -524,6 +524,114 @@ async fn test_pg_statements_exports_top_temp_writers_outside_time_top_n() -> Res
     Ok(())
 }
 
+/// Every `queryid` label the collector currently exports.
+fn exported_queryids(registry: &Registry) -> Vec<String> {
+    registry
+        .gather()
+        .iter()
+        .find(|family| family.name() == "postgres_pg_stat_statements_calls_total")
+        .map(|family| {
+            family
+                .get_metric()
+                .iter()
+                .filter_map(|metric| {
+                    metric
+                        .get_label()
+                        .iter()
+                        .find(|label| label.name() == "queryid")
+                        .map(|label| label.value().to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `pg_stat_statements` is keyed by `(userid, dbid, queryid, toplevel)`, so with
+/// `track = all` a statement run both directly and from inside a function has two
+/// entries sharing `(userid, dbid, queryid)`. The exported label set has no `toplevel`
+/// component, so both would collapse onto one series and one would silently overwrite
+/// the other — and each duplicate would also consume a slot of the `2 * top_n` budget.
+/// The scrape query therefore restricts itself to top-level entries.
+#[tokio::test]
+async fn test_pg_statements_excludes_nested_statements() -> Result<()> {
+    let Some(test_db) = setup_pg_statements_test_db().await? else {
+        println!("pg_stat_statements extension not installed, skipping test");
+        return Ok(());
+    };
+    let pool = test_db.pool();
+
+    let track: String = sqlx::query_scalar("SHOW pg_stat_statements.track")
+        .fetch_one(pool)
+        .await?;
+    if track != "all" {
+        println!("pg_stat_statements.track is {track}, not all - skipping test");
+        test_db.cleanup().await?;
+        return Ok(());
+    }
+
+    common::reset_pg_stat_statements_current_database(pool).await?;
+
+    // The marker comment does not change the queryid but is stored verbatim in the
+    // query text, which is what lets the nested entry be found again below.
+    sqlx::query(
+        "CREATE FUNCTION nested_probe() RETURNS bigint LANGUAGE plpgsql AS $$
+         DECLARE result bigint;
+         BEGIN
+             SELECT COUNT(*)::bigint /* nested-toplevel-probe */
+             INTO result FROM generate_series(1, 5000) g;
+             RETURN result;
+         END $$",
+    )
+    .execute(pool)
+    .await?;
+
+    for _ in 0..5 {
+        let _ = sqlx::query("SELECT nested_probe()").fetch_one(pool).await?;
+    }
+
+    // The nested entry must exist *and* have accrued execution time, otherwise the
+    // `total_exec_time > 0` pre-filter would exclude it anyway and the assertion below
+    // would pass without proving anything about the toplevel filter.
+    let nested: Vec<i64> = sqlx::query_scalar(
+        "SELECT queryid
+         FROM pg_stat_statements
+         WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+           AND NOT toplevel
+           AND total_exec_time > 0
+           AND query LIKE '%nested-toplevel-probe%'",
+    )
+    .fetch_all(pool)
+    .await?;
+    assert!(
+        !nested.is_empty(),
+        "expected a nested pg_stat_statements entry with accrued execution time"
+    );
+
+    let collector = PgStatementsCollector::with_config(25, None);
+    let registry = Registry::new();
+    collector.register_metrics(&registry)?;
+    collector.collect(pool).await?;
+
+    let exported = exported_queryids(&registry);
+    assert!(
+        !exported.is_empty(),
+        "expected top-level statements to still be exported"
+    );
+    for queryid in nested {
+        assert!(
+            !exported.contains(&queryid.to_string()),
+            "nested statement {queryid} must not be exported; it shares its label set \
+             with the top-level entry and would overwrite it"
+        );
+    }
+
+    sqlx::query("DROP FUNCTION nested_probe()")
+        .execute(pool)
+        .await?;
+    test_db.cleanup().await?;
+    Ok(())
+}
+
 /// With text lookups disabled the collector still exports metrics, just without SQL text.
 #[tokio::test]
 async fn test_pg_statements_without_query_text_lookups() -> Result<()> {

@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-use crate::collectors::{Collector, util::get_excluded_databases};
+use crate::collectors::{Collected, Collector, util::get_excluded_databases};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{IntGauge, Opts, Registry};
@@ -63,7 +63,7 @@ impl Collector for PostmasterCollector {
         err,
         fields(collector="postmaster", otel.kind="internal")
     )]
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             let q_span = info_span!(
                 "db.query",
@@ -82,8 +82,14 @@ impl Collector for PostmasterCollector {
             .await?;
 
             self.start_time_epoch_seconds.set(epoch_seconds);
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// No-op: this collector has no skip path, so it is never settled, and its
+    /// metrics are scalars that cannot be removed while registered.
+    fn reset_metrics(&self) {
+        // Nothing to remove.
     }
 
     fn enabled_by_default(&self) -> bool {

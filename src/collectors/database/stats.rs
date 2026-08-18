@@ -1,5 +1,4 @@
-use crate::collectors::{
-    Collector, i64_to_f64,
+use crate::collectors::{Collected, Collector, i64_to_f64,
     util::{MS_TO_SEC, get_excluded_databases},
 };
 use anyhow::Result;
@@ -327,7 +326,7 @@ impl Collector for DatabaseStatCollector {
         err,
         fields(collector="database_stats", otel.kind="internal")
     )]
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             // Version check for fields added to `pg_stat_database` in newer `PostgreSQL`.
             let vrow = sqlx::query(r"SELECT current_setting('server_version_num')::int AS v")
@@ -588,7 +587,37 @@ impl Collector for DatabaseStatCollector {
                 debug!(%datid, %datname, "updated pg_stat_database metrics");
             }
 
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// Removes every labeled series this collector owns.
+    fn reset_metrics(&self) {
+        self.numbackends.reset();
+        self.xact_commit.reset();
+        self.xact_rollback.reset();
+        self.blks_read.reset();
+        self.blks_hit.reset();
+        self.tup_returned.reset();
+        self.tup_fetched.reset();
+        self.tup_inserted.reset();
+        self.tup_updated.reset();
+        self.tup_deleted.reset();
+        self.conflicts.reset();
+        self.temp_files.reset();
+        self.temp_bytes.reset();
+        self.deadlocks.reset();
+        self.blk_read_time.reset();
+        self.blk_write_time.reset();
+        self.stats_reset.reset();
+        self.active_time_seconds_total.reset();
+        self.sessions_total.reset();
+        self.sessions_abandoned_total.reset();
+        self.sessions_fatal_total.reset();
+        self.sessions_killed_total.reset();
+        self.session_time_seconds_total.reset();
+        self.checksum_failures_total.reset();
+        self.checksum_last_failure_timestamp_seconds.reset();
+        self.blks_hit_ratio.reset();
     }
 }

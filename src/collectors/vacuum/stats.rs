@@ -1,4 +1,4 @@
-use crate::collectors::{Collector, util::get_excluded_databases};
+use crate::collectors::{Collected, Collector, util::get_excluded_databases};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{IntGauge, IntGaugeVec, Opts, Registry};
@@ -106,7 +106,7 @@ impl Collector for VacuumStatsCollector {
         err,
         fields(collector="vacuum_stats", otel.kind="internal")
     )]
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             let excluded: Vec<String> = get_excluded_databases().to_vec();
 
@@ -254,7 +254,14 @@ impl Collector for VacuumStatsCollector {
                     .set(workers);
             }
 
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// Removes every labeled series this collector owns.
+    fn reset_metrics(&self) {
+        self.db_freeze_age_xids.reset();
+        self.db_freeze_age_pct_of_max.reset();
+        self.autovac_workers.reset();
     }
 }

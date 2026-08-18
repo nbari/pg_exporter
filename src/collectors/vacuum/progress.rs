@@ -1,5 +1,4 @@
-use crate::collectors::{
-    i64_to_f64,
+use crate::collectors::{Collected, i64_to_f64,
     util::{
         acquire_db_query_permit, get_default_database, get_excluded_databases, open_db_connection,
     },
@@ -260,7 +259,7 @@ impl Collector for VacuumProgressCollector {
         err,
         fields(collector="vacuum_progress", otel.kind="internal")
     )]
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             let excluded: Vec<String> = get_excluded_databases().to_vec();
 
@@ -359,8 +358,13 @@ impl Collector for VacuumProgressCollector {
                 }
             }
 
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// Delegates to the existing full reset.
+    fn reset_metrics(&self) {
+        self.reset_progress_metrics();
     }
 }
 

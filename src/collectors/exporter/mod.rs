@@ -117,7 +117,7 @@ mod scraper;
 pub use process::ProcessCollector;
 pub use scraper::{ScrapeTimer, ScraperCollector};
 
-use crate::collectors::Collector;
+use crate::collectors::{Collected, Collector};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -200,7 +200,7 @@ impl Collector for ExporterCollector {
     }
 
     #[instrument(skip(self, pool), level = "info", err, fields(collector = "exporter", otel.kind = "internal"))]
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             let mut tasks = FuturesUnordered::new();
 
@@ -213,8 +213,17 @@ impl Collector for ExporterCollector {
                 res?;
             }
 
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// Fans out to the sub-collectors; this umbrella owns no metrics itself.
+    /// Each sub already settles via the safe `collect`, so this exists only so a
+    /// caller holding the umbrella has something to call.
+    fn reset_metrics(&self) {
+        for sub in &self.subs {
+            sub.reset_metrics();
+        }
     }
 
     fn enabled_by_default(&self) -> bool {

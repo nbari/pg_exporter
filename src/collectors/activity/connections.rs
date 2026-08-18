@@ -1,4 +1,4 @@
-use crate::collectors::{Collector, i64_to_f64, util::get_excluded_databases};
+use crate::collectors::{Collected, Collector, i64_to_f64, util::get_excluded_databases};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{Gauge, IntGauge, IntGaugeVec, Opts, Registry};
@@ -230,7 +230,7 @@ impl Collector for ConnectionsCollector {
         err,
         fields(collector="connections", otel.kind="internal")
         )]
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             // 0) Reset all metrics to clear stale data (e.g. dropped databases, inactive applications)
             self.reset_label_metrics();
@@ -546,8 +546,13 @@ impl Collector for ConnectionsCollector {
                     .set(*cnt);
             }
 
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// Delegates to the existing full reset.
+    fn reset_metrics(&self) {
+        self.reset_label_metrics();
     }
 }
 

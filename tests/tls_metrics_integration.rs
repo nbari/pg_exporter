@@ -45,13 +45,14 @@ async fn test_tls_metrics_endpoint_returns_ssl_metrics() -> Result<()> {
 
     let body = response.text().await?;
 
-    // Verify TLS metrics are present (or at least registered)
-    let expected_metrics = vec![
-        "pg_ssl_enabled",
-        "pg_ssl_certificate_expiry_seconds",
-        "pg_ssl_certificate_valid",
-        "pg_ssl_connections_total",
-    ];
+    // Metrics the TLS collector publishes on any server, configured or not.
+    //
+    // The pg_ssl_certificate_* family is deliberately absent here: those metrics are
+    // zero-label vectors and this server has no ssl_cert_file, so the collector publishes
+    // nothing for them rather than a zeroed snapshot. A zeroed pg_ssl_certificate_valid
+    // would read as "certificate invalid" — asserting on their presence is what made the
+    // earlier version of this test pass on registration side-effects alone.
+    let expected_metrics = vec!["pg_ssl_enabled", "pg_ssl_connections_total"];
 
     for metric_name in expected_metrics {
         assert!(

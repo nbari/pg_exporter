@@ -5,8 +5,7 @@
 //! resolved only when the row belongs to the connected database; rows for other
 //! databases fall back to the numeric relation OID label.
 
-use crate::collectors::{
-    Collector,
+use crate::collectors::{Collected, Collector,
     util::{get_pg_version, is_pg_version_at_least},
 };
 use anyhow::Result;
@@ -288,7 +287,7 @@ impl Collector for CreateIndexProgressCollector {
         err,
         fields(collector = "create_index_progress", otel.kind = "internal")
     )]
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             let (version_num, support) = resolve_create_index_progress_support(pool).await?;
             if support == CreateIndexProgressSupport::Unsupported {
@@ -299,7 +298,7 @@ impl Collector for CreateIndexProgressCollector {
                     );
                 }
                 debug!("skipping create index progress metrics on unsupported PostgreSQL version");
-                return Ok(());
+                return Ok(Collected::Skipped);
             }
 
             let query_span = info_span!(
@@ -324,8 +323,13 @@ impl Collector for CreateIndexProgressCollector {
             }
 
             debug!(rows = samples.len(), "updated create index progress metrics");
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// Delegates to the existing full reset.
+    fn reset_metrics(&self) {
+        self.reset_all();
     }
 }
 

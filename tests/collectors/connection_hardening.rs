@@ -23,7 +23,7 @@ use sqlx::postgres::{PgConnectOptions, PgConnection};
 use sqlx::{Connection, Executor};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
-use testcontainers_modules::testcontainers::{
+use testcontainers::{
     ContainerAsync, GenericImage, ImageExt,
     core::{IntoContainerPort, WaitFor},
     runners::AsyncRunner,

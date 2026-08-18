@@ -1,4 +1,4 @@
-use crate::collectors::{Collector, i64_to_f64, util::get_excluded_databases};
+use crate::collectors::{Collected, Collector, i64_to_f64, util::get_excluded_databases};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, Opts, Registry};
@@ -73,7 +73,7 @@ impl Collector for DatabaseSubCollector {
         err,
         fields(collector="pg_database", otel.kind="internal")
     )]
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             // 0) Reset all metrics to clear stale data (e.g. dropped databases)
             self.size_bytes.reset();
@@ -137,7 +137,13 @@ impl Collector for DatabaseSubCollector {
                 );
             }
 
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// Removes every labeled series this collector owns.
+    fn reset_metrics(&self) {
+        self.size_bytes.reset();
+        self.connection_limit.reset();
     }
 }

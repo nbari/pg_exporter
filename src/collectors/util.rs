@@ -7,8 +7,8 @@
 use anyhow::{Result, anyhow};
 use once_cell::sync::OnceCell;
 use secrecy::{ExposeSecret, SecretString};
-use sqlx::Connection;
 use sqlx::postgres::{PgConnectOptions, PgConnection};
+use sqlx::{Connection, PgPool, Row};
 use std::{str::FromStr, sync::Arc, time::Duration};
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore},
@@ -384,6 +384,81 @@ pub fn get_pg_version() -> i32 {
 #[must_use]
 pub fn is_pg_version_at_least(min_version: i32) -> bool {
     get_pg_version() >= min_version
+}
+
+/// How a failed collector query should be treated.
+///
+/// See [`crate::collectors::Collector::collect_once`] for the contract. The distinction
+/// matters because a skip **clears** the collector's metrics while an error preserves them:
+/// misfiling a transient fault as a skip destroys the last good snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryFailure {
+    /// The view, function or setting does not exist here (`42P01`, `42883`, `42704`).
+    Absent,
+    /// The role may not read it (`42501`). Worth warning about once — it is a
+    /// configuration problem, not a version difference.
+    Denied,
+    /// Anything else: a genuine fault, which must propagate so the previous snapshot is
+    /// preserved rather than cleared.
+    Fault,
+}
+
+/// Shared `SQLSTATE` constants.
+///
+/// The *strings* are centralized so they cannot drift, but the *classification* stays with
+/// each query: a view read should accept `42P01`, a function call `42883`, and neither should
+/// silently accept the other. [`classify_query_error`] collapses all three absence codes into
+/// one answer, so use it only where they are genuinely equivalent.
+///
+/// `SQLSTATE` for a missing table or view.
+pub const UNDEFINED_TABLE: &str = "42P01";
+/// `SQLSTATE` for a missing function.
+pub const UNDEFINED_FUNCTION: &str = "42883";
+/// `SQLSTATE` for a missing object, including an unrecognised configuration parameter.
+pub const UNDEFINED_OBJECT: &str = "42704";
+/// `SQLSTATE` for a permission failure.
+pub const INSUFFICIENT_PRIVILEGE: &str = "42501";
+
+/// Classifies a failed query so a collector can tell "not available here" from "broke".
+///
+/// Deliberately keyed on `SQLSTATE` rather than the error message: matching a view name in
+/// the message text reads a permission error as an absent view, because the name appears in
+/// both.
+#[must_use]
+pub fn classify_query_error(error: &sqlx::Error) -> QueryFailure {
+    let code = match error {
+        sqlx::Error::Database(db_error) => db_error.code().map(|code| code.to_string()),
+        _ => None,
+    };
+
+    match code.as_deref() {
+        Some(UNDEFINED_TABLE | UNDEFINED_FUNCTION | UNDEFINED_OBJECT) => QueryFailure::Absent,
+        Some(INSUFFICIENT_PRIVILEGE) => QueryFailure::Denied,
+        _ => QueryFailure::Fault,
+    }
+}
+
+/// Resolves `server_version_num`, preferring the value cached at startup and falling
+/// back to a direct query.
+///
+/// [`is_pg_version_at_least`] is not a substitute: it reads only the process-wide cache
+/// and reports `false` when that cache is unset, which silently disables every
+/// version-gated collector when one is driven outside the normal startup path (a test,
+/// or a collector exercised on its own). The fallback query is the point.
+///
+/// # Errors
+///
+/// Returns an error when the cache is unset *and* the fallback query fails.
+pub async fn resolve_server_version(pool: &PgPool) -> Result<i32> {
+    let cached = get_pg_version();
+    if cached > 0 {
+        return Ok(cached);
+    }
+
+    let row = sqlx::query("SELECT current_setting('server_version_num')::int AS v")
+        .fetch_one(pool)
+        .await?;
+    Ok(row.try_get::<i32, _>("v")?)
 }
 
 /// Set the max per-database collection concurrency. Call this once at startup from

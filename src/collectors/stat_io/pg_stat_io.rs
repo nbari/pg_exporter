@@ -31,8 +31,7 @@
 //! `track_io_timing` is enabled; WAL timing on `PostgreSQL` 18+ additionally
 //! depends on `track_wal_io_timing`.
 
-use crate::collectors::{
-    Collector,
+use crate::collectors::{Collected, Collector,
     util::{MS_TO_SEC, get_pg_version},
 };
 use anyhow::Result;
@@ -398,7 +397,7 @@ impl Collector for PgStatIoCollector {
         err,
         fields(collector = "pg_stat_io", otel.kind = "internal")
     )]
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             let version_num = resolve_server_version(pool).await?;
 
@@ -412,7 +411,7 @@ impl Collector for PgStatIoCollector {
                         );
                     }
                     debug!("Skipping pg_stat_io metrics (requires PostgreSQL 16+)");
-                    return Ok(());
+                    return Ok(Collected::Skipped);
                 }
                 StatIoSupport::Supported { native_bytes } => native_bytes,
             };
@@ -441,8 +440,13 @@ impl Collector for PgStatIoCollector {
 
             debug!(rows = rows.len(), "updated pg_stat_io metrics");
 
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// Delegates to the existing full reset.
+    fn reset_metrics(&self) {
+        self.reset_all();
     }
 
     fn enabled_by_default(&self) -> bool {

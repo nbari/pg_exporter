@@ -1,7 +1,7 @@
 use crate::collectors::util::{
     acquire_db_query_permit, get_default_database, get_excluded_databases, open_db_connection,
 };
-use crate::collectors::{Collector, all_databases_failed};
+use crate::collectors::{Collected, Collector, all_databases_failed};
 use anyhow::{Result, anyhow};
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, Opts, Registry};
@@ -87,7 +87,7 @@ impl PgSequencesCollector {
         collector
     }
 
-    fn reset_metrics(&self) {
+    fn reset_all(&self) {
         self.used_ratio.reset();
     }
 
@@ -123,7 +123,7 @@ impl Collector for PgSequencesCollector {
         err,
         fields(collector = "pg_sequences", otel.kind = "internal")
     )]
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             let excluded = get_excluded_databases().to_vec();
             let db_list_span = info_span!(
@@ -241,7 +241,7 @@ impl Collector for PgSequencesCollector {
                 );
             }
 
-            self.reset_metrics();
+            self.reset_all();
 
             for sample in &all_samples {
                 if sample.used_ratio >= self.min_ratio {
@@ -264,8 +264,13 @@ impl Collector for PgSequencesCollector {
                 }
             }
 
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// Delegates to the existing full reset.
+    fn reset_metrics(&self) {
+        self.reset_all();
     }
 
     fn enabled_by_default(&self) -> bool {

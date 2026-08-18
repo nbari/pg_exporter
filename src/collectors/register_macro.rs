@@ -36,10 +36,20 @@ macro_rules! register_collectors {
                 }
             }
 
-            fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+            fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
                 match self {
                     $(
-                        CollectorType::$collector_type(c) => c.collect(pool),
+                        CollectorType::$collector_type(c) => c.collect_once(pool),
+                    )*
+                }
+            }
+
+            fn reset_metrics(&self) {
+                match self {
+                    $(
+                        // UFCS: belt-and-braces so an inherent method of the same name on
+                        // some future collector cannot silently shadow the trait one.
+                        CollectorType::$collector_type(c) => Collector::reset_metrics(c),
                     )*
                 }
             }

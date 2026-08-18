@@ -1,10 +1,15 @@
-use crate::collectors::{util::is_pg_version_at_least, Collector, i64_to_f64};
+use crate::collectors::util::{QueryFailure, classify_query_error};
+use crate::collectors::{Collected, Collector, NO_LABELS, i64_to_f64};
 use anyhow::Result;
 use futures::future::BoxFuture;
-use prometheus::{Gauge, GaugeVec, Opts, Registry};
+use prometheus::{GaugeVec, Opts, Registry};
 use sqlx::PgPool;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::collections::HashMap;
-use tracing::{info_span, warn};
+use tracing::{debug, info_span, warn};
 use tracing_futures::Instrument;
 
 /// Collector for active `PostgreSQL` connection SSL/TLS statistics
@@ -12,10 +17,12 @@ use tracing_futures::Instrument;
 #[derive(Clone)]
 #[allow(clippy::struct_field_names)]
 pub struct ConnectionTlsCollector {
-    pg_ssl_connections_total: Gauge,
+    pg_ssl_connections_total: GaugeVec,
     pg_ssl_connections_by_version: GaugeVec,
     pg_ssl_connections_by_cipher: GaugeVec,
-    pg_ssl_connection_bits_avg: Gauge,
+    pg_ssl_connection_bits_avg: GaugeVec,
+    /// Ensures the missing-privilege warning is logged at most once per process.
+    denied_warned: Arc<AtomicBool>,
 }
 
 impl ConnectionTlsCollector {
@@ -29,10 +36,10 @@ impl ConnectionTlsCollector {
     #[allow(clippy::new_without_default)]
     #[allow(clippy::expect_used)]
     pub fn new() -> Self {
-        let pg_ssl_connections_total = Gauge::with_opts(Opts::new(
+        let pg_ssl_connections_total = GaugeVec::new(Opts::new(
             "pg_ssl_connections_total",
             "Total number of connections using SSL/TLS",
-        ))
+        ), &[])
         .expect("Failed to create pg_ssl_connections_total metric");
 
         let pg_ssl_connections_by_version = GaugeVec::new(
@@ -53,13 +60,14 @@ impl ConnectionTlsCollector {
         )
         .expect("Failed to create pg_ssl_connections_by_cipher metric");
 
-        let pg_ssl_connection_bits_avg = Gauge::with_opts(Opts::new(
+        let pg_ssl_connection_bits_avg = GaugeVec::new(Opts::new(
             "pg_ssl_connection_bits_avg",
             "Average number of bits in SSL/TLS connections",
-        ))
+        ), &[])
         .expect("Failed to create pg_ssl_connection_bits_avg metric");
 
         Self {
+            denied_warned: Arc::new(AtomicBool::new(false)),
             pg_ssl_connections_total,
             pg_ssl_connections_by_version,
             pg_ssl_connections_by_cipher,
@@ -81,16 +89,13 @@ impl Collector for ConnectionTlsCollector {
         Ok(())
     }
 
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
-            // pg_stat_ssl is available on all supported PostgreSQL versions (14+)
-            if !is_pg_version_at_least(90_500) {
-                warn!(
-                    "pg_stat_ssl view requires PostgreSQL 14+, skipping connection TLS stats"
-                );
-                return Ok(());
-            }
-
+            // No version gate: pg_stat_ssl exists on every supported server (14+). The
+            // gate here compared against PostgreSQL 9.5 and read the process-wide version
+            // cache, which reports 0 when unset — so it skipped the whole collector
+            // unconditionally outside the normal startup path. SQLSTATE classification
+            // below is the defensive fallback instead.
             let span = info_span!(
                 "db.query",
                 db.system = "postgresql",
@@ -116,20 +121,20 @@ impl Collector for ConnectionTlsCollector {
             {
                 Ok(rows) => {
                     // Reset metrics
-                    self.pg_ssl_connections_total.set(0.0);
+                    self.pg_ssl_connections_total.with_label_values(&NO_LABELS).set(0.0);
                     self.pg_ssl_connections_by_version.reset();
                     self.pg_ssl_connections_by_cipher.reset();
-                    self.pg_ssl_connection_bits_avg.set(0.0);
+                    self.pg_ssl_connection_bits_avg.with_label_values(&NO_LABELS).set(0.0);
 
                     if rows.is_empty() {
                         // No SSL connections
-                        return Ok(());
+                        return Ok(Collected::Fresh);
                     }
 
                     #[allow(clippy::cast_precision_loss)]
                     {
                         let total = rows.len() as f64;
-                        self.pg_ssl_connections_total.set(total);
+                        self.pg_ssl_connections_total.with_label_values(&NO_LABELS).set(total);
                     }
 
                     // Aggregate by version
@@ -170,16 +175,45 @@ impl Collector for ConnectionTlsCollector {
                     // Set average bits
                     if bits_count > 0 {
                         let avg = i64_to_f64(total_bits) / f64::from(bits_count);
-                        self.pg_ssl_connection_bits_avg.set(avg);
+                        self.pg_ssl_connection_bits_avg.with_label_values(&NO_LABELS).set(avg);
                     }
                 }
-                Err(e) => {
-                    warn!("Failed to query pg_stat_ssl: {e}");
+                Err(error) => {
+                    // This used to warn and return success with the reset living only in the
+                    // Ok arm, so a failed query kept serving the last snapshot as current.
+                    //
+                    // A missing or unreadable view is a skip, which clears. Anything else is
+                    // a fault and propagates, so the previous snapshot is preserved for the
+                    // next scrape instead of being destroyed by a transient error.
+                    match classify_query_error(&error) {
+                        QueryFailure::Absent => {
+                            debug!("Skipping connection TLS stats (pg_stat_ssl absent): {error}");
+                            return Ok(Collected::Skipped);
+                        }
+                        QueryFailure::Denied => {
+                            if !self.denied_warned.swap(true, Ordering::Relaxed) {
+                                warn!(
+                                    "the exporter role may not read pg_stat_ssl; connection \
+                                     TLS statistics will not be published"
+                                );
+                            }
+                            return Ok(Collected::Skipped);
+                        }
+                        QueryFailure::Fault => return Err(error.into()),
+                    }
                 }
             }
 
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// Removes every connection-TLS series.
+    fn reset_metrics(&self) {
+        self.pg_ssl_connections_total.reset();
+        self.pg_ssl_connections_by_version.reset();
+        self.pg_ssl_connections_by_cipher.reset();
+        self.pg_ssl_connection_bits_avg.reset();
     }
 
     fn enabled_by_default(&self) -> bool {

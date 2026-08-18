@@ -1,4 +1,4 @@
-use crate::collectors::Collector;
+use crate::collectors::{Collected, Collector};
 use anyhow::{Result, anyhow};
 use futures::future::BoxFuture;
 use prometheus::{IntGaugeVec, Opts, Registry};
@@ -182,7 +182,7 @@ impl Collector for VersionCollector {
     }
 
     #[instrument(skip(self, pool), level = "info", err, fields(collector = "version", otel.kind = "internal"))]
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             // version()
             let span = info_span!(
@@ -235,8 +235,14 @@ impl Collector for VersionCollector {
                 .with_label_values(&[&server_label])
                 .set(server_version_num);
 
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// Removes every labeled series this collector owns.
+    fn reset_metrics(&self) {
+        self.pg_version_info.reset();
+        self.pg_settings_server_version_num.reset();
     }
 
     fn enabled_by_default(&self) -> bool {

@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.18.0] - 2026-08-17
 
+### Changed - action may be required
+
+- **A collector that publishes nothing now removes its series instead of serving the last value.** Previously a collector could finish a scrape successfully without publishing anything — an unsupported server version, a missing view, a revoked privilege, an absent certificate file — and its previous values stayed in the registry, served as though current. Only the `temp` collector cleared them. The `Collector` trait now requires every collector to declare what a skip means for it, and the shared entry point clears the metrics after one. Exposition is **unchanged** whenever a value is present.
+
+  **This is alerting-breaking, not just cosmetic.** A threshold alert stops firing when its series disappears, because there is no longer a value to compare. Affected series, previously `0` or stale, now absent:
+
+  | Series | When it is now absent |
+  | --- | --- |
+  | `pg_stat_checkpointer_*` | PostgreSQL 14-16 (the view is 17+) |
+  | `pg_ssl_certificate_*` | no `ssl_cert_file`, or the file is unreadable from the exporter |
+  | `pg_ssl_enabled` | the `ssl` setting is absent, or the role may not read it |
+  | `pg_ssl_connections_*` | `pg_stat_ssl` is absent, or the role may not read it |
+  | `pg_stat_archiver_*`, `pg_stat_wal_*` | the view is missing or the role lacks privileges |
+  | `pg_stat_archiver_last_archived_age_seconds` | **nothing has been archived yet** (`last_archived_time IS NULL`), which is the normal state when `archive_mode = off` |
+  | `pg_stat_archiver_last_failed_age_seconds` | **no archive attempt has failed yet** (`last_failed_time IS NULL`) |
+  | `pg_last_checkpoint_age_seconds`, `pg_wal_bytes_since_last_checkpoint` | `pg_control_checkpoint()` unavailable or denied |
+  | `pg_wal_bytes_since_last_checkpoint` | a standby that has not replayed any WAL yet (`pg_last_wal_replay_lsn()` is NULL) |
+  | `pg_stat_io_*`, `pg_stat_slru_*`, `pg_stat_replication_slots_*`, `pg_sequence_used_ratio`, `pg_temp_files_*`, `pg_stat_statements_*`, vacuum progress | the collector's version/extension gate is not satisfied |
+
+  Any series listed above is also absent until the first successful collection, rather than reading `0` from registration.
+
+  Two rows above will affect most installations rather than a minority: the archiver *age*
+  series disappear unless WAL archiving has actually run, because `0` there asserted
+  "archived 0 seconds ago" and could hide an archiver that had never worked. If you graph or
+  alert on archive age, expect those series to be absent until the first archive, and guard
+  with `absent()`.
+
+  Only **known absence** clears a series: the object does not exist (`42P01`, `42883`,
+  `42704`) or the role may not read it (`42501`). A genuine failure — anything else,
+  including a connection dropping mid-scrape — is reported as an error instead, which
+  **preserves registry state**: the retained values are not deleted, so the next successful
+  scrape continues the series. Note the errored scrape itself publishes no metric samples — it
+  returns 503 with an error-only body (`# Error collecting metrics: ...`), so that interval has
+  no sample either way. The difference is whether the series resumes afterwards or has been
+  cleared.
+
+  Guard threshold alerts with `absent()` so a vanished series pages instead of going quiet:
+
+  ```promql
+  # Fires when the certificate is close to expiry OR the exporter stopped reporting it
+  pg_ssl_certificate_expiry_seconds < 7 * 24 * 3600
+    or absent(pg_ssl_certificate_expiry_seconds)
+
+  # "TLS is off" and "we could not determine whether TLS is on" are different problems
+  pg_ssl_enabled == 0 or absent(pg_ssl_enabled)
+  ```
+
+  Equality alerts on a value that used to be a placeholder zero (for example
+  `pg_stat_checkpointer_timed_total == 0` on PostgreSQL 14-16) were reading a fabricated
+  number and should be removed rather than rewritten.
+
+- **Source-incompatible for custom `Collector` implementations.** `Collector::collect` is now a provided method; implementors write `collect_once(..) -> Result<Collected>` and a required `reset_metrics(&self)`, and `collect` carries a `where Self: Sync` bound. Callers are unaffected: `collect(..) -> Result<()>` keeps its name and signature, and calling it is what settles a skip. In-tree collectors, the registry and every existing test needed no call-site changes.
+
 ### Added
 - **Live temporary-file disk pressure** ([#32](https://github.com/nbari/pg_exporter/issues/32)): New opt-in `temp` collector (`--collector.temp`) exposing `pg_temp_files_current_bytes`, `pg_temp_files_current_count`, and `pg_temp_files_oldest_age_seconds`, labeled by `tablespace`, from `pg_ls_tmpdir()` (PostgreSQL 12+). `pg_stat_database_temp_bytes` and the `pg_stat_statements` temp counters are cumulative and only update once a statement *finishes*, so a query that is still spilling is invisible to them; these gauges report what is on disk right now and return to zero once PostgreSQL removes the files. Cluster-wide, so it reads only the shared pool. A missing `pg_monitor` grant, a missing function, or a pre-12 server degrades to a warn-once no-op without failing the scrape or `pg_up`. Adds a **Temp Disk Pressure** dashboard row and a diagnostics guide section with alert examples.
 - **Temp-file safeguards in the settings collector** ([#32](https://github.com/nbari/pg_exporter/issues/32)): `pg_settings_temp_file_limit_bytes`, `pg_settings_log_temp_files_bytes`, and `pg_settings_block_size_bytes`. The `-1` sentinels (unlimited / disabled) are preserved through the kB-to-bytes conversion instead of being scaled to `-1024`. `temp_file_limit` is documented as a per-process limit that parallel workers and concurrent sessions can each consume.
@@ -14,6 +67,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`--statements.query-text-refresh`** (`PG_EXPORTER_STATEMENTS_QUERY_TEXT_REFRESH`, seconds, default `900`): minimum delay between `pg_stat_statements` query-text lookups; `0` disables them entirely. Lookups run in a detached background task, so scrapes never block on one, and a single-flight guard keeps overlapping scrapes from starting more than one at a time.
 
 ### Fixed
+- **A missing `GRANT` on `pg_stat_archiver` / `pg_stat_wal` looked like an old PostgreSQL.** Both collectors decided "this view does not exist" by matching the view name in the error *message*, and the name appears in a permission error too — so an under-privileged role silently produced no WAL-archiving or WAL-generation metrics, with nothing in the log to explain it. Both now classify by `SQLSTATE`: `42P01` skips quietly, `42501` warns once naming the missing grant, and anything else is a real error.
+- **`pg_ssl_enabled` reported `0` ("TLS is disabled") when the server could not be asked.** A failed `SHOW ssl` published a definite "off" for an unknown state — a security-relevant false negative on a dashboard. It now removes the series instead, and a genuine fault propagates rather than being silently absorbed.
+- **The connection-TLS collector served stale counts after a failed query.** A failed `pg_stat_ssl` read logged a warning and returned success, and its reset only ran on the success path, so the previous connection counts kept being published as current. A missing or denied view now clears them; any other failure propagates.
+- **Archiver ages could stay pinned forever.** `pg_stat_archiver_last_archived_age_seconds` and `..._last_failed_age_seconds` were only written when PostgreSQL reported a timestamp, so after `pg_stat_reset_shared('archiver')` they kept their last value indefinitely and age-based alerts read a stale number.
+- **Two version gates never fired as intended outside normal startup.** `checkpointer` tested `is_pg_version_at_least(170_000)` and `tls`'s connection statistics tested `is_pg_version_at_least(90_500)` — PostgreSQL 9.5, on a project supporting 14+. Both read only the process-wide version cache, which reports `0` when unset, so in any process that had not run the exporter's startup path they skipped unconditionally. A normally started exporter was unaffected because the registry populates the cache first, but the test suite never exercised either collector's real path. Both now resolve the version with a live fallback.
+- **`just` and the setup scripts could hang waiting for `q`.** `scripts/setup-local-test-db.sh` finished its work and then appeared to stall: psql's pager defaults to on and pages on output *width* as well as height, so the "Top 5 queries" table (~90 characters) went through `less`. The shared psql wrapper now disables the pager, which covers every script that uses it.
 - **The statements collector no longer spills temporary files on every scrape** ([#33](https://github.com/nbari/pg_exporter/issues/33)): The per-scrape query read `pg_stat_statements` with `showtext = true`, which makes PostgreSQL load the entire query-text file into backend memory and materialize every row, text included, into a `work_mem`-bounded tuplestore *before* any filter, join or `LIMIT` runs. On busy instances that wrote a multi-megabyte file into `base/pgsql_tmp` on every scrape. The collector now reads `pg_stat_statements(false)` and resolves `query_short` from a separate, rate-limited, cached lookup. Measured on a seeded instance (9002 entries, 8365 kB of query text, `work_mem = 4MB`): 1506 temp blocks / 38.8 ms before, 0 temp blocks / 7.8 ms after. Moving the ranking into a CTE — the originally proposed fix — was measured at 3012 temp blocks / 56.9 ms, because the materialization happens below every planner node. The rate-limited text lookup still has to call `pg_stat_statements(true)`, so it now runs inside a transaction with `SET LOCAL work_mem`, which keeps the tuplestore in memory: measured on a 9.4 MB corpus at the server's `work_mem = 4MB`, the lookup wrote 1391 temp blocks / 29.7 ms; with the raised setting it writes 0 blocks and is ~25% faster. If the server rejects the `SET` (for example a role without permission), the lookup falls back to running without it rather than failing the scrape, and warns once so the residual is visible. Finally, the lookup no longer runs *during* a scrape at all: it is dispatched as a detached background task, so a scrape can never wait on it. Statements published before their text resolves are labeled `<unknown>` and pick up the real text on a later scrape.
 - **The temp collector could publish a stale footprint indefinitely** ([#32](https://github.com/nbari/pg_exporter/issues/32)): The graceful skip paths — `insufficient_privilege`, a missing `pg_ls_tmpdir()`, and the pre-12 version gate — returned success without touching the gauges. If `pg_monitor` was revoked, or a failover moved the exporter to a server without the function, the last successful reading stayed exposed and looked current forever. All three paths now clear the gauges.
 - **High-temp statements could disappear from the metrics** ([#32](https://github.com/nbari/pg_exporter/issues/32)): Statements were selected by `total_exec_time` only, so a query writing gigabytes of temporary files vanished from the temp metrics whenever it was not also one of the slowest. The collector now exports the deduplicated union of the top N by execution time and the top N by `temp_blks_written`, bounded at `2 x --statements.top-n` series per metric.
@@ -23,7 +82,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Grafana row layout normalized**: `Exporter Self-Monitoring` is pinned to the bottom, the new `Temp Disk Pressure` row sits above it, and every collapsed row now anchors its panels at `row_y + 1` with the panel array sorted by position, matching the convention Grafana itself writes.
 - **Self-exclusion in the statements collector is now text-free**: on PostgreSQL 14+ the scrape query reads its own in-flight `pg_stat_activity.query_id` — which equals the `queryid` `pg_stat_statements` records for it — instead of matching a query-text prefix, so the collector keeps excluding itself even with `--statements.query-text-refresh=0`. PostgreSQL 12 and 13 have no `query_id` and fall back to learning it from the marker comment during the text lookup. Self-identification matches the exact marker-comment prefix rather than the bare marker, so a user statement that merely mentions `pg_exporter:statements` is no longer mistaken for the exporter's own query and dropped from the metrics. The now-obsolete regex-vs-prefix self-filter benchmark was removed.
 - **`query_short` reports `<unknown>` instead of `<utility>`** for statements PostgreSQL has no text for. Query texts are now resolved by a separate lookup, so the label also reads `<unknown>` in the window before a newly ranked statement is resolved. Dashboards or alerts matching `query_short="<utility>"` must be updated. Missing texts are never cached, so a statement that gains a text later is picked up by a subsequent lookup instead of being pinned to an empty label forever.
-- **Dependencies**: `ulid` 2 -> 3 (`Ulid::r#gen()` -> `Ulid::generate()`) and `base64` 0.22 -> 0.23. `testcontainers` stays at 0.27 because the latest `testcontainers-modules` requires `^0.27`.
+- **Only top-level statements are exported**: `pg_stat_statements` is keyed by `(userid, dbid, queryid, toplevel)`, so with `pg_stat_statements.track = all` a statement executed both directly and from inside a function has two entries sharing `(userid, dbid, queryid)` and carrying different counters. The exported label set has no `toplevel` component, so both collapsed onto one series where the row order decided which counters survived, and each duplicate also consumed a slot of the `2 x --statements.top-n` budget. The scrape query now filters to `toplevel` entries, gated on a catalog probe because the column arrived in `pg_stat_statements` 1.9 (PostgreSQL 14). Under `track = all` a statement only ever called from inside a function is no longer exported on its own; its cost is still counted in the top-level statement that invoked it. Under the default `track = top` nothing changes.
+- **`<insufficient privilege>` is no longer cached as a query text**: a role without `pg_read_all_stats` receives that placeholder instead of another role's query text. Caching it pinned the label until the text cache happened to be pruned, so a later `GRANT pg_read_all_stats` did not take effect. It is now treated like a missing text and retried on the next lookup window.
+- **Dependencies**: `ulid` 2 -> 3 (`Ulid::r#gen()` -> `Ulid::generate()`) and `base64` 0.22 -> 0.23. `testcontainers` 0.27 -> 0.28 (dev-only), which also moves `bollard` 0.20 -> 0.21. The `testcontainers-modules` dev-dependency is **dropped**: nothing used it, since every container test builds its image with `GenericImage::new` directly, and it was the only thing holding `testcontainers` back to 0.27.
 
 ## [0.17.2] - 2026-07-15
 

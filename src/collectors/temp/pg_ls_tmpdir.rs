@@ -26,7 +26,8 @@
 //! `pg_ls_tmpdir()` was introduced in `PostgreSQL` 12. On older servers the
 //! collector skips cleanly and logs a single warning.
 
-use crate::collectors::{Collector, util::get_pg_version};
+use crate::collectors::{Collected, Collector, util::resolve_server_version};
+use crate::collectors::util::{INSUFFICIENT_PRIVILEGE, UNDEFINED_FUNCTION};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, IntGaugeVec, Opts, Registry};
@@ -43,12 +44,6 @@ const MIN_PG_LS_TMPDIR_VERSION: i32 = 120_000;
 
 /// Labels shared by every temp-footprint metric.
 const TEMP_LABELS: [&str; 1] = ["tablespace"];
-
-/// `SQLSTATE` returned when the exporter role may not call `pg_ls_tmpdir()`.
-const INSUFFICIENT_PRIVILEGE: &str = "42501";
-
-/// `SQLSTATE` returned when `pg_ls_tmpdir()` does not exist on this server.
-const UNDEFINED_FUNCTION: &str = "42883";
 
 /// Per-tablespace aggregate of the temporary-file directory.
 ///
@@ -233,7 +228,7 @@ impl PgLsTmpdirCollector {
     /// publishing the last observed footprint as if it were current, which is exactly
     /// wrong when the privilege is revoked or a failover moves the exporter to a server
     /// that lacks the function.
-    fn handle_query_error(&self, error: sqlx::Error) -> Result<()> {
+    fn handle_query_error(&self, error: sqlx::Error) -> Result<Collected> {
         let code = match &error {
             sqlx::Error::Database(db_error) => db_error.code().map(|code| code.to_string()),
             _ => None,
@@ -249,8 +244,7 @@ impl PgLsTmpdirCollector {
                     );
                 }
                 debug!("Skipping pg_ls_tmpdir metrics (insufficient privilege)");
-                self.reset_all();
-                Ok(())
+                                Ok(Collected::Skipped)
             }
             Some(UNDEFINED_FUNCTION) => {
                 if !self.unsupported_warned.swap(true, Ordering::Relaxed) {
@@ -260,26 +254,11 @@ impl PgLsTmpdirCollector {
                     );
                 }
                 debug!("Skipping pg_ls_tmpdir metrics (function not available)");
-                self.reset_all();
-                Ok(())
+                                Ok(Collected::Skipped)
             }
             _ => Err(error.into()),
         }
     }
-}
-
-/// Resolves the server version, preferring the cached value set at startup and
-/// falling back to a direct query.
-async fn resolve_server_version(pool: &PgPool) -> Result<i32> {
-    let cached = get_pg_version();
-    if cached > 0 {
-        return Ok(cached);
-    }
-
-    let row = sqlx::query("SELECT current_setting('server_version_num')::int AS v")
-        .fetch_one(pool)
-        .await?;
-    Ok(row.try_get::<i32, _>("v")?)
 }
 
 impl Collector for PgLsTmpdirCollector {
@@ -301,7 +280,7 @@ impl Collector for PgLsTmpdirCollector {
         err,
         fields(collector = "pg_ls_tmpdir", otel.kind = "internal")
     )]
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             let version_num = resolve_server_version(pool).await?;
 
@@ -314,8 +293,7 @@ impl Collector for PgLsTmpdirCollector {
                     );
                 }
                 debug!("Skipping pg_ls_tmpdir metrics (requires PostgreSQL 12+)");
-                self.reset_all();
-                return Ok(());
+                                return Ok(Collected::Skipped);
             }
 
             let query_span = info_span!(
@@ -347,8 +325,13 @@ impl Collector for PgLsTmpdirCollector {
 
             debug!(tablespaces = rows.len(), "updated pg_ls_tmpdir metrics");
 
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// Delegates to the existing full reset.
+    fn reset_metrics(&self) {
+        self.reset_all();
     }
 
     fn enabled_by_default(&self) -> bool {
@@ -506,19 +489,35 @@ mod tests {
         assert!(PG_LS_TMPDIR_QUERY.contains(")::double precision AS oldest_age_seconds"));
     }
 
+    /// A `GaugeVec` with no samples is not gathered at all, so asserting on a freshly
+    /// registered collector proves nothing. Apply a row first, then require exactly the
+    /// three documented families — that is what a rename or a dropped `register` call
+    /// would break.
     #[test]
     fn test_registers_all_metrics() -> Result<()> {
         let registry = Registry::new();
-        PgLsTmpdirCollector::new().register_metrics(&registry)?;
+        let collector = PgLsTmpdirCollector::new();
+        collector.register_metrics(&registry)?;
+        collector.apply_values(
+            "pg_default",
+            TempRowValues::new(Some(4096), Some(1), Some(1.0)),
+        );
 
-        let names: Vec<String> = registry
+        let mut names: Vec<String> = registry
             .gather()
             .iter()
             .map(|family| family.name().to_string())
             .collect();
-        // Gauges without samples are not gathered yet; registration succeeding
-        // without a duplicate-name error is what matters here.
-        assert!(names.is_empty() || names.len() == 3);
+        names.sort();
+
+        assert_eq!(
+            names,
+            vec![
+                "pg_temp_files_current_bytes",
+                "pg_temp_files_current_count",
+                "pg_temp_files_oldest_age_seconds",
+            ]
+        );
         Ok(())
     }
 }

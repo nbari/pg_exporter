@@ -4,7 +4,7 @@
 //! `pg_replication_slots` through the shared pool only. These views are
 //! cluster-wide, so no per-database fan-out is needed.
 
-use crate::collectors::Collector;
+use crate::collectors::{Collected, Collector};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{Gauge, IntGauge, IntGaugeVec, Opts, Registry};
@@ -187,7 +187,7 @@ impl Collector for VacuumBlockersCollector {
         err,
         fields(collector = "vacuum_blockers", otel.kind = "internal")
     )]
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             let backend_span = info_span!(
                 "db.query",
@@ -282,8 +282,14 @@ impl Collector for VacuumBlockersCollector {
                 "updated vacuum blocker metrics"
             );
 
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// Removes every labeled series this collector owns.
+    fn reset_metrics(&self) {
+        self.xmin_horizon_age_xids.reset();
+        self.xmin_horizon_holder_age_xids.reset();
     }
 }
 

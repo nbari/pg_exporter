@@ -2,7 +2,7 @@ pub mod certificate;
 pub mod connection_stats;
 pub mod server_config;
 
-use crate::collectors::Collector;
+use crate::collectors::{Collected, Collector};
 use anyhow::Result;
 use certificate::CertificateCollector;
 use connection_stats::ConnectionTlsCollector;
@@ -66,7 +66,7 @@ impl Collector for TlsCollector {
         Ok(())
     }
 
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             let mut tasks = FuturesUnordered::new();
 
@@ -86,8 +86,17 @@ impl Collector for TlsCollector {
                 }
             }
 
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// Fans out to the sub-collectors; this umbrella owns no metrics itself.
+    /// Each sub already settles via the safe `collect`, so this exists only so a
+    /// caller holding the umbrella has something to call.
+    fn reset_metrics(&self) {
+        for sub in &self.subs {
+            sub.reset_metrics();
+        }
     }
 
     fn enabled_by_default(&self) -> bool {

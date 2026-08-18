@@ -9,7 +9,7 @@
 //! skips cleanly, exports no series, and logs a single warning so operators know
 //! why the `pg_stat_replication_slots_*` metrics are absent.
 
-use crate::collectors::{Collector, util::get_pg_version};
+use crate::collectors::{Collected, Collector, util::get_pg_version};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{IntGaugeVec, Opts, Registry};
@@ -289,7 +289,7 @@ impl Collector for StatReplicationSlotsCollector {
         err,
         fields(collector = "stat_replication_slots", otel.kind = "internal")
     )]
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             let version_num = resolve_server_version(pool).await?;
             if !supports_stat_replication_slots(version_num) {
@@ -302,7 +302,7 @@ impl Collector for StatReplicationSlotsCollector {
                     );
                 }
                 debug!("Skipping pg_stat_replication_slots metrics (requires PostgreSQL 14+)");
-                return Ok(());
+                return Ok(Collected::Skipped);
             }
 
             let query_span = info_span!(
@@ -327,8 +327,13 @@ impl Collector for StatReplicationSlotsCollector {
 
             debug!(rows = rows.len(), "updated pg_stat_replication_slots metrics");
 
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// Delegates to the existing full reset.
+    fn reset_metrics(&self) {
+        self.reset_all();
     }
 }
 

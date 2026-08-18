@@ -509,3 +509,94 @@ async fn test_wal_collector_all_counters_valid_after_activity() -> Result<()> {
     pool.close().await;
     Ok(())
 }
+
+/// A `42501` on `pg_stat_wal` must clear the metrics and still succeed, not fail the scrape.
+///
+/// This is the Stage 1 regression scenario: the collector used to decide "view does not
+/// exist" by matching the view name in the error *message*, which reads a permission error
+/// as an absent view — a missing GRANT was indistinguishable from an old server, and
+/// WAL generation metrics vanished with no explanation. Classifying by `SQLSTATE` separates them,
+/// and a denied read clears rather than leaving the last values on display.
+///
+/// Grants on `pg_catalog` views are per-database, so the REVOKE below is confined to this
+/// isolated database and cannot disturb a sibling test.
+#[tokio::test]
+async fn test_wal_clears_metrics_when_the_role_may_not_read_the_view() -> Result<()> {
+    let test_db = common::IsolatedTestDatabase::new("wal_denied").await?;
+    let pool = test_db.pool();
+
+    let is_superuser: bool =
+        sqlx::query_scalar("SELECT usesuper FROM pg_user WHERE usename = current_user")
+            .fetch_optional(pool)
+            .await?
+            .unwrap_or(false);
+    if !is_superuser {
+        println!("not superuser, cannot revoke a catalog grant - skipping");
+        test_db.cleanup().await?;
+        return Ok(());
+    }
+
+    let role = format!("exporter_wal_denied_{}", std::process::id());
+    let _ = sqlx::query(sqlx::AssertSqlSafe(format!("DROP ROLE IF EXISTS {role}")))
+        .execute(pool)
+        .await;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE ROLE {role} LOGIN PASSWORD 'denied_probe' NOSUPERUSER"
+    )))
+    .execute(pool)
+    .await?;
+
+    let outcome = async {
+        let collector = WalCollector::new();
+        let registry = Registry::new();
+        collector.register_metrics(&registry)?;
+
+        // Seed from the privileged pool, or a cleared registry proves nothing.
+        collector.collect(pool).await?;
+        let seeded = registry
+            .gather()
+            .iter()
+            .any(|f| f.name().starts_with("pg_stat_wal_") && !f.get_metric().is_empty());
+        assert!(seeded, "the privileged scrape must publish series first");
+
+        sqlx::query("REVOKE SELECT ON pg_stat_wal FROM PUBLIC")
+            .execute(pool)
+            .await?;
+
+        let denied_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(5))
+            .connect(&test_db.dsn_for_role(&role, "denied_probe")?)
+            .await?;
+
+        let result = collector.collect(&denied_pool).await;
+        assert!(
+            result.is_ok(),
+            "a denied read is a skip, not a scrape failure: {result:?}"
+        );
+
+        for family in registry.gather() {
+            if family.name().starts_with("pg_stat_wal_") {
+                assert!(
+                    family.get_metric().is_empty(),
+                    "{} must be cleared after a denied read, {} samples remain",
+                    family.name(),
+                    family.get_metric().len()
+                );
+            }
+        }
+
+        denied_pool.close().await;
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+
+    let _ = sqlx::query("GRANT SELECT ON pg_stat_wal TO PUBLIC")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query(sqlx::AssertSqlSafe(format!("DROP ROLE IF EXISTS {role}")))
+        .execute(pool)
+        .await;
+    test_db.cleanup().await?;
+    outcome
+}

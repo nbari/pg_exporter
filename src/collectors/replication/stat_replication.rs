@@ -1,4 +1,4 @@
-use crate::collectors::{Collector, i64_to_f64};
+use crate::collectors::{Collected, Collector, i64_to_f64};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, Opts, Registry};
@@ -111,7 +111,7 @@ impl Collector for StatReplicationCollector {
         err,
         fields(collector="stat_replication", otel.kind="internal")
     )]
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             let query_span = info_span!(
                 "db.query",
@@ -205,8 +205,16 @@ impl Collector for StatReplicationCollector {
                 "collected stat_replication metrics"
             );
 
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// Removes every labeled series this collector owns.
+    fn reset_metrics(&self) {
+        self.current_wal_lsn_bytes.reset();
+        self.wal_lsn_diff.reset();
+        self.reply_time.reset();
+        self.slots.reset();
     }
 }
 

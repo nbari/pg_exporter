@@ -1,5 +1,4 @@
-use crate::collectors::{
-    Collector, i64_to_f64,
+use crate::collectors::{Collected, Collector, i64_to_f64,
     config::DEFAULT_STATEMENTS_QUERY_TEXT_REFRESH,
     util::{MS_TO_SEC, TEMPLATE0, TEMPLATE1},
 };
@@ -101,6 +100,11 @@ pub struct PgStatementsCollector {
     /// that self-exclusion does not depend on some other component having initialised
     /// that global first.
     query_id_state: Arc<AtomicU8>,
+
+    /// Cached `pg_stat_statements.toplevel` probe, see [`query_id_support`] for the
+    /// shared state encoding and [`PgStatementsCollector::supports_toplevel`] for why
+    /// the column is gated.
+    toplevel_state: Arc<AtomicU8>,
 }
 
 /// Cached query texts and self-identification state.
@@ -162,6 +166,10 @@ const QUERY_SHORT_MAX_LEN: usize = 80;
 /// Label value used while a statement's text has not been resolved yet, or when text
 /// lookups are disabled.
 const UNRESOLVED_QUERY_SHORT: &str = "<unknown>";
+
+/// Placeholder `PostgreSQL` substitutes for the query text of *another* role's statement
+/// when the reading role is neither a superuser nor a member of `pg_read_all_stats`.
+const PG_INSUFFICIENT_PRIVILEGE_TEXT: &str = "<insufficient privilege>";
 
 /// Smallest number of cached query texts kept before pruning kicks in.
 const MIN_TEXT_CACHE_ENTRIES: usize = 1024;
@@ -311,6 +319,7 @@ impl PgStatementsCollector {
             work_mem_refusal_warned: Arc::new(AtomicBool::new(false)),
             extension_state: Arc::new(Mutex::new(ExtensionState::Unknown)),
             query_id_state: Arc::new(AtomicU8::new(query_id_support::UNKNOWN)),
+            toplevel_state: Arc::new(AtomicU8::new(query_id_support::UNKNOWN)),
         }
     }
 
@@ -343,7 +352,6 @@ impl PgStatementsCollector {
     /// files stays invisible whenever it is not also one of the slowest statements.
     ///
     /// `$1` carries this collector's own `queryid`s, `$2` the per-ranking limit.
-    /// Builds the scrape-path query.
     ///
     /// `supports_query_id` enables a text-free self-exclusion: on `PostgreSQL` 14+ a
     /// backend can read its own `pg_stat_activity.query_id` *while that very query is
@@ -351,11 +359,20 @@ impl PgStatementsCollector {
     /// makes self-exclusion work on every scrape without reading any query text — in
     /// particular when `--statements.query-text-refresh=0` disables the text lookup that
     /// would otherwise be the only way to learn the collector's own queryid.
-    fn build_pg_statements_query(supports_query_id: bool) -> String {
+    ///
+    /// `supports_toplevel` restricts the scan to top-level statements. See
+    /// [`Self::supports_toplevel`] for why that matters and what it costs.
+    fn build_pg_statements_query(supports_query_id: bool, supports_toplevel: bool) -> String {
         // A NULL query_id (compute_query_id off) makes IS DISTINCT FROM true for every
         // row, so this degrades to "exclude nothing" rather than dropping the scrape.
         let self_exclusion = if supports_query_id {
             "AND s.queryid IS DISTINCT FROM (SELECT a.query_id FROM pg_stat_activity a WHERE a.pid = pg_backend_pid())"
+        } else {
+            ""
+        };
+
+        let toplevel_only = if supports_toplevel {
+            "AND s.toplevel"
         } else {
             ""
         };
@@ -390,6 +407,7 @@ impl PgStatementsCollector {
                   AND s.total_exec_time > 0
                   AND d.datname NOT IN ('{TEMPLATE0}', '{TEMPLATE1}')
                   AND s.queryid <> ALL($1::bigint[])
+                  {toplevel_only}
                   {self_exclusion}
             ),
             top_by_time AS (
@@ -617,6 +635,64 @@ impl PgStatementsCollector {
         supported
     }
 
+    /// Probes once whether `pg_stat_statements` exposes `toplevel`
+    /// (`pg_stat_statements` 1.9, shipped with `PostgreSQL` 14).
+    ///
+    /// `pg_stat_statements` is keyed by `(userid, dbid, queryid, toplevel)`. With
+    /// `pg_stat_statements.track = all` a statement executed both directly and from
+    /// inside a function has **two** entries with the same `(userid, dbid, queryid)` and
+    /// different counters. Both survive the `UNION`, then collapse onto one
+    /// `{queryid, datname, usename, query_short}` label set, so one silently overwrites
+    /// the other and each duplicate also consumes a slot of the `2 * top_n` budget.
+    /// Restricting the scan to `s.toplevel` makes the key unambiguous.
+    ///
+    /// The cost is that under `track = all` a statement *only* ever called from inside a
+    /// function is no longer exported. Under the default `track = top` nothing changes,
+    /// because nested statements are never recorded in the first place.
+    ///
+    /// The catalog is asked directly instead of comparing the server version, for the
+    /// same reason as [`Self::supports_query_id`]: the version global is initialised by
+    /// the exporter/registry and would be unset when a collector is driven on its own.
+    /// The view is defined as `SELECT * FROM pg_stat_statements(true)`, so its columns
+    /// mirror the function the scrape query actually reads. A failed probe is treated as
+    /// "unsupported" and retried on the next scrape rather than failing the collection.
+    async fn supports_toplevel(&self, pool: &PgPool) -> bool {
+        match self.toplevel_state.load(Ordering::Relaxed) {
+            query_id_support::SUPPORTED => return true,
+            query_id_support::UNSUPPORTED => return false,
+            _ => {}
+        }
+
+        let supported: Option<bool> = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM pg_attribute
+                 WHERE attrelid = 'pg_stat_statements'::regclass
+                   AND attname = 'toplevel'
+                   AND NOT attisdropped
+             )",
+        )
+        .fetch_optional(pool)
+        .await
+        .unwrap_or_default()
+        .flatten();
+
+        let Some(supported) = supported else {
+            debug!("could not probe pg_stat_statements.toplevel, retrying next scrape");
+            return false;
+        };
+
+        self.toplevel_state.store(
+            if supported {
+                query_id_support::SUPPORTED
+            } else {
+                query_id_support::UNSUPPORTED
+            },
+            Ordering::Relaxed,
+        );
+        supported
+    }
+
     /// Decides whether a looked-up query text is worth caching.
     ///
     /// `pg_stat_statements` returns NULL when it has no text for an entry, for
@@ -624,9 +700,15 @@ impl PgStatementsCollector {
     /// resulting empty string would pin `query_short=""` on that series forever,
     /// because a cached `queryid` is never looked up again. Leaving it unresolved
     /// labels it `<unknown>` and retries on the next lookup window.
+    ///
+    /// [`PG_INSUFFICIENT_PRIVILEGE_TEXT`] is rejected for the same reason: it is not a
+    /// query text but a statement about the *reader's* privileges, which can change. A
+    /// later `GRANT pg_read_all_stats` must be picked up by the next lookup instead of
+    /// leaving the placeholder pinned until the cache happens to be pruned.
     fn cacheable_text(text: Option<&str>) -> Option<String> {
         let text = text?;
-        if text.trim().is_empty() {
+        let trimmed = text.trim();
+        if trimmed.is_empty() || trimmed == PG_INSUFFICIENT_PRIVILEGE_TEXT {
             return None;
         }
         Some(Self::truncate_query(text, QUERY_SHORT_MAX_LEN))
@@ -976,14 +1058,19 @@ impl Collector for PgStatementsCollector {
         Ok(())
     }
 
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(
             async move {
                 if !self.pg_statements_available(pool).await? {
-                    return Ok(());
+                    // Nothing is published without the extension, so the previous
+                    // snapshot must not keep being served.
+                    return Ok(Collected::Skipped);
                 }
 
-                let query = Self::build_pg_statements_query(self.supports_query_id(pool).await);
+                let query = Self::build_pg_statements_query(
+                    self.supports_query_id(pool).await,
+                    self.supports_toplevel(pool).await,
+                );
                 let top_n = i64::try_from(self.top_n).unwrap_or(i64::MAX);
                 let rows: Vec<PgRow> = sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
                     .bind(self.self_queryids())
@@ -1047,10 +1134,32 @@ impl Collector for PgStatementsCollector {
                     "collected pg_stat_statements metrics"
                 );
 
-                Ok(())
+                Ok(Collected::Fresh)
             }
             .instrument(info_span!("pg_statements.collect")),
         )
+    }
+
+    /// Removes every labeled series this collector owns.
+    fn reset_metrics(&self) {
+        self.total_exec_time.reset();
+        self.mean_exec_time.reset();
+        self.max_exec_time.reset();
+        self.stddev_exec_time.reset();
+        self.calls.reset();
+        self.rows.reset();
+        self.shared_blks_hit.reset();
+        self.shared_blks_read.reset();
+        self.shared_blks_dirtied.reset();
+        self.shared_blks_written.reset();
+        self.local_blks_hit.reset();
+        self.local_blks_read.reset();
+        self.local_blks_dirtied.reset();
+        self.local_blks_written.reset();
+        self.temp_blks_read.reset();
+        self.temp_blks_written.reset();
+        self.wal_bytes.reset();
+        self.cache_hit_ratio.reset();
     }
 
     fn enabled_by_default(&self) -> bool {
@@ -1102,7 +1211,7 @@ mod tests {
 
     #[test]
     fn test_build_pg_statements_query_uses_roles_left_join() {
-        let query = PgStatementsCollector::build_pg_statements_query(true);
+        let query = PgStatementsCollector::build_pg_statements_query(true, true);
 
         assert!(query.contains("LEFT JOIN pg_roles r ON r.oid = sel.userid"));
         assert!(query.contains("COALESCE(r.rolname, '<unknown>') AS usename"));
@@ -1110,7 +1219,7 @@ mod tests {
 
     #[test]
     fn test_scrape_query_never_reads_query_texts() {
-        let query = PgStatementsCollector::build_pg_statements_query(true);
+        let query = PgStatementsCollector::build_pg_statements_query(true, true);
 
         // Reading pg_stat_statements with showtext = true makes PostgreSQL load the
         // whole query-text file and materialize every row into a work_mem-bounded
@@ -1127,7 +1236,7 @@ mod tests {
 
     #[test]
     fn test_scrape_query_excludes_self_by_queryid() {
-        let query = PgStatementsCollector::build_pg_statements_query(true);
+        let query = PgStatementsCollector::build_pg_statements_query(true, true);
 
         assert!(query.contains("AND s.queryid <> ALL($1::bigint[])"));
         assert!(!query.contains("NOT LIKE"));
@@ -1135,7 +1244,7 @@ mod tests {
 
     #[test]
     fn test_scrape_query_carries_the_self_marker_after_the_first_keyword() {
-        let query = PgStatementsCollector::build_pg_statements_query(true);
+        let query = PgStatementsCollector::build_pg_statements_query(true, true);
 
         // PostgreSQL stores statement text from its first token onwards, so a leading
         // comment would be dropped and the marker lost.
@@ -1146,7 +1255,7 @@ mod tests {
 
     #[test]
     fn test_scrape_query_unions_time_and_temp_rankings() {
-        let query = PgStatementsCollector::build_pg_statements_query(true);
+        let query = PgStatementsCollector::build_pg_statements_query(true, true);
 
         assert!(query.contains("ORDER BY total_exec_time_sec DESC LIMIT $2"));
         assert!(query.contains("WHERE temp_blks_written > 0"));
@@ -1158,7 +1267,7 @@ mod tests {
 
     #[test]
     fn test_scrape_query_casts_numeric_columns() {
-        let query = PgStatementsCollector::build_pg_statements_query(true);
+        let query = PgStatementsCollector::build_pg_statements_query(true, true);
 
         for column in [
             "calls",
@@ -1268,6 +1377,26 @@ mod tests {
         );
     }
 
+    /// `<insufficient privilege>` describes the *reader*, not the statement, and the
+    /// privilege can be granted later. Caching it would pin the placeholder on that
+    /// series until the cache happens to be pruned.
+    #[test]
+    fn test_insufficient_privilege_text_is_not_cacheable() {
+        assert_eq!(
+            PgStatementsCollector::cacheable_text(Some(PG_INSUFFICIENT_PRIVILEGE_TEXT)),
+            None
+        );
+        assert_eq!(
+            PgStatementsCollector::cacheable_text(Some("  <insufficient privilege>  ")),
+            None
+        );
+        // A real statement that merely mentions the placeholder is still cacheable.
+        assert_eq!(
+            PgStatementsCollector::cacheable_text(Some("SELECT '<insufficient privilege>'")),
+            Some("SELECT '<insufficient privilege>'".to_string())
+        );
+    }
+
     /// Long texts are still truncated to the label budget on the way into the cache.
     #[test]
     fn test_cacheable_text_truncates_to_label_budget() {
@@ -1301,8 +1430,8 @@ mod tests {
         }
 
         for query in [
-            PgStatementsCollector::build_pg_statements_query(true),
-            PgStatementsCollector::build_pg_statements_query(false),
+            PgStatementsCollector::build_pg_statements_query(true, true),
+            PgStatementsCollector::build_pg_statements_query(false, true),
             PgStatementsCollector::build_query_text_lookup(true),
         ] {
             assert!(
@@ -1330,7 +1459,7 @@ mod tests {
     /// so that `--statements.query-text-refresh=0` still keeps it out of the metrics.
     #[test]
     fn test_query_id_self_exclusion_is_text_free_and_version_gated() {
-        let modern = PgStatementsCollector::build_pg_statements_query(true);
+        let modern = PgStatementsCollector::build_pg_statements_query(true, true);
         assert!(modern.contains("pg_backend_pid()"));
         assert!(modern.contains("a.query_id"));
         assert!(
@@ -1342,10 +1471,28 @@ mod tests {
             "self-exclusion must not reintroduce a full text read"
         );
 
-        let legacy = PgStatementsCollector::build_pg_statements_query(false);
+        let legacy = PgStatementsCollector::build_pg_statements_query(false, true);
         assert!(!legacy.contains("pg_backend_pid()"));
         assert!(!legacy.contains("query_id"));
         assert!(legacy.contains("s.queryid <> ALL($1::bigint[])"));
+    }
+
+    /// `toplevel` arrived in `pg_stat_statements` 1.9 (`PostgreSQL` 14). Emitting the
+    /// filter unconditionally would fail on 12/13 with `column does not exist`, taking
+    /// the whole collector down instead of degrading.
+    #[test]
+    fn test_toplevel_filter_is_version_gated() {
+        let modern = PgStatementsCollector::build_pg_statements_query(true, true);
+        assert!(
+            modern.contains("AND s.toplevel"),
+            "track = all must not collapse a nested and a top-level entry onto one series"
+        );
+
+        let legacy = PgStatementsCollector::build_pg_statements_query(true, false);
+        assert!(!legacy.contains("toplevel"));
+        // Dropping the filter must not disturb the rest of the predicate.
+        assert!(legacy.contains("AND s.queryid <> ALL($1::bigint[])"));
+        assert!(legacy.contains("FROM pg_stat_statements(false) s"));
     }
 
     /// The text lookup must anchor its self-match instead of scanning for the bare

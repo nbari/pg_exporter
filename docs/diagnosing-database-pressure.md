@@ -12,6 +12,8 @@ common "the database is oversaturated" scenarios — especially on instances tha
 6. [Sequence exhaustion](#6-sequence-exhaustion)
 7. [SLRU cache pressure](#7-slru-cache-pressure)
 8. [Session churn, checksum failures, and logical slot spill](#8-session-churn-checksum-failures-and-logical-slot-spill)
+9. [Temporary-file disk pressure](#9-temporary-file-disk-pressure)
+10. [An absent series is not a zero](#10-an-absent-series-is-not-a-zero)
 
 The matching Grafana panels ship in `grafana/dashboard.json` (rows **CPU Pressure**,
 **Locks & Blocking**, and **Table Statistics**).
@@ -641,3 +643,72 @@ pg_settings_block_size_bytes{job="$job", instance="$instance"}
 Everything above is plotted in the Grafana **Temp Disk Pressure** row. Requires
 `--collector.temp` (plus `--collector.database` and `--collector.statements` for the
 attribution panels).
+
+---
+
+## 10. An absent series is not a zero
+
+A collector can succeed while publishing nothing: the view belongs to a newer PostgreSQL,
+the extension is not installed, the role lacks a privilege, the certificate file is not
+readable from where the exporter runs. In that case `pg_exporter` **removes** the affected
+series rather than leaving the last value on display or substituting a zero.
+
+That is deliberate. A zero is a claim, and for several metrics it is a false one:
+
+| Zeroed value | What it would assert | Truth |
+| --- | --- | --- |
+| `pg_ssl_enabled 0` | TLS is disabled | the setting could not be read |
+| `pg_ssl_certificate_valid 0` | the certificate is invalid | the file could not be read |
+| `pg_ssl_certificate_expiry_seconds 0` | it expires now | unknown |
+| `pg_stat_checkpointer_timed_total 0` | no checkpoint has ever run | the view needs PostgreSQL 17 |
+| `pg_last_checkpoint_age_seconds 0` | a checkpoint just completed | `pg_control_checkpoint()` is unavailable |
+| `pg_stat_archiver_last_archived_age_seconds 0` | WAL was archived a moment ago | nothing has ever been archived |
+
+The archiver row is the one most installations will notice. With `archive_mode = off` — the
+default — `last_archived_time` is NULL forever, so `pg_stat_archiver_last_archived_age_seconds`
+is now **absent** rather than sitting at `0`. That `0` was the dangerous reading: it said
+"archived a moment ago" about a cluster that had never archived at all, so an
+`age > threshold` alert could never fire and a dashboard looked healthy. If you alert on
+archive age, pair it with `absent()` as below.
+
+### A gap and a 503 mean different things
+
+Only **known absence** removes a series: the view, function or setting does not exist here,
+or the role may not read it. A *genuine* failure — a dropped connection, a statement
+timeout, an unexpected error — is not treated as absence. It fails that one scrape with a
+503 and **preserves registry state**, so the retained values are not deleted.
+
+Be precise about what that does and does not buy you. The errored scrape publishes no metric
+samples — it returns 503 with an error-only body, `# Error collecting metrics: ...`, which is
+worth reading because it names the collector that failed — so that interval has no sample
+regardless. What preservation gives you is that the series *resumes* on the next successful
+scrape instead of having been cleared. A single failed scrape therefore reads as a
+one-interval gap, not as a series that ended.
+
+So when you see a persistent gap, look for a version difference or a missing `GRANT`. When
+you see a 503 on `/metrics`, look for a fault.
+
+### Guard threshold alerts with `absent()`
+
+The consequence for alerting is that **a threshold alert goes quiet instead of firing**,
+because there is no value left to compare. Pair any such rule with `absent()`:
+
+```promql
+# Expiring soon OR no longer reported — both need attention
+pg_ssl_certificate_expiry_seconds < 7 * 24 * 3600
+  or absent(pg_ssl_certificate_expiry_seconds)
+
+# Distinguish "TLS is off" from "we cannot tell"
+pg_ssl_enabled == 0 or absent(pg_ssl_enabled)
+
+# Checkpoint age stopped being reported at all
+absent(pg_last_checkpoint_age_seconds)
+```
+
+Rate and delta expressions need no change: `rate()` over a series that disappears and
+later returns is handled by Prometheus staleness, whereas a counter that was zeroed and
+then restored to its true value would have produced a fabricated spike.
+
+If a panel shows a gap where it used to show a flat zero, the flat zero was the bug. Check
+the exporter log — every skip that is a configuration problem rather than a version
+difference warns once, naming the missing grant or setting.

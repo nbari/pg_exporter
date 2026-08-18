@@ -114,7 +114,130 @@ const CONDITIONAL_METRICS: &[(&str, &str)] = &[
         "pg_vacuum_heap_progress",
         "requires a VACUUM running at scrape time",
     ),
+    // These four are zero-label vectors, so with no certificate configured the collector
+    // publishes nothing at all rather than a zeroed snapshot. A zeroed
+    // pg_ssl_certificate_valid would read as "certificate invalid", which is why absence is
+    // the intended behaviour here and not a gap to be papered over.
+    (
+        "pg_ssl_certificate_expiry_seconds",
+        "requires a TLS certificate configured on the server (ssl_cert_file)",
+    ),
+    (
+        "pg_ssl_certificate_valid",
+        "requires a TLS certificate configured on the server (ssl_cert_file)",
+    ),
+    (
+        "pg_ssl_certificate_not_before_timestamp",
+        "requires a TLS certificate configured on the server (ssl_cert_file)",
+    ),
+    (
+        "pg_ssl_certificate_not_after_timestamp",
+        "requires a TLS certificate configured on the server (ssl_cert_file)",
+    ),
 ];
+
+/// Metric name prefixes that only exist from a given `server_version_num` onward.
+///
+/// `CONDITIONAL_METRICS` is a flat list and cannot express "absent on 14/15, required on
+/// 16+": putting a version-gated metric there would stop the live check from ever
+/// verifying it, including on the versions that do support it. Entries here are skipped
+/// only on servers below their minimum and are fully required above it, so the CI matrix
+/// still exercises them on every version that has them.
+const VERSION_GATED_PREFIXES: &[(&str, i32, &str)] = &[
+    (
+        "pg_stat_io_",
+        160_000,
+        "pg_stat_io was introduced in PostgreSQL 16",
+    ),
+    (
+        "pg_stat_checkpointer_",
+        170_000,
+        "pg_stat_checkpointer was introduced in PostgreSQL 17",
+    ),
+];
+
+/// Fixtures the live scrape needs before it can observe a metric.
+///
+/// Several collectors are correctly silent on an idle database: `pg_stat_user_tables`
+/// has no rows without a user table, and the `sequences` collector deliberately exports
+/// only sequences at or above `--sequences.min-ratio`. A scrape of a lived-in
+/// development database therefore passes while a fresh CI container fails, which is
+/// exactly the false green this test exists to prevent. Seeding makes the check
+/// hermetic.
+///
+/// Only the *presence* of a series matters here, not its value, so a single table with a
+/// little activity is enough to give all 22 `pg_stat_user_tables_*` families a row.
+const SEED_TABLE: &str = "dashboard_contract_seed";
+const SEED_SEQUENCE: &str = "dashboard_contract_seed_seq";
+
+async fn seed_scrape_fixtures(pool: &sqlx::PgPool) -> Result<()> {
+    for statement in [
+        format!("DROP TABLE IF EXISTS {SEED_TABLE}"),
+        format!("DROP SEQUENCE IF EXISTS {SEED_SEQUENCE}"),
+        format!("CREATE TABLE {SEED_TABLE} (id integer PRIMARY KEY, payload text)"),
+        format!(
+            "INSERT INTO {SEED_TABLE} SELECT g, repeat('x', 64) FROM generate_series(1, 500) g"
+        ),
+        // An UPDATE and a DELETE give n_tup_upd / n_tup_hot_upd / n_tup_del and the dead
+        // tuples that back the bloat and autovacuum-threshold ratios.
+        format!("UPDATE {SEED_TABLE} SET payload = repeat('y', 64) WHERE id % 3 = 0"),
+        format!("DELETE FROM {SEED_TABLE} WHERE id % 7 = 0"),
+        // A primary-key lookup populates idx_scan / idx_tup_fetch and the idx_blks_*
+        // counters; a sequential scan populates seq_scan / seq_tup_read.
+        format!("SELECT payload FROM {SEED_TABLE} WHERE id = 42"),
+        format!("SELECT count(*) FROM {SEED_TABLE}"),
+        format!("ANALYZE {SEED_TABLE}"),
+        // max_value is deliberately small so one setval pushes the used ratio past the
+        // 0.5 default of --sequences.min-ratio.
+        format!("CREATE SEQUENCE {SEED_SEQUENCE} MAXVALUE 100"),
+        format!("SELECT setval('{SEED_SEQUENCE}', 75)"),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(statement))
+            .execute(pool)
+            .await?;
+    }
+
+    // Table statistics are accumulated per backend and flushed on a timer, so the seeded
+    // activity is not necessarily visible to the very next scrape. pg_stat_force_next_flush()
+    // makes it immediate, but it only exists from PostgreSQL 15 (the shared-memory stats
+    // rework), so it is best-effort and the poll below is what actually guarantees
+    // visibility on every supported version.
+    let _ = sqlx::query("SELECT pg_stat_force_next_flush()")
+        .execute(pool)
+        .await;
+
+    for _ in 0..100 {
+        let visible: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_user_tables WHERE relname = $1)",
+        )
+        .bind(SEED_TABLE)
+        .fetch_one(pool)
+        .await?;
+
+        if visible {
+            return Ok(());
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    anyhow::bail!("seeded table {SEED_TABLE} never became visible in pg_stat_user_tables")
+}
+
+async fn drop_scrape_fixtures(pool: &sqlx::PgPool) -> Result<()> {
+    // Left in place these would leak into every other test sharing this database, and a
+    // stale sequence would keep pg_sequence_used_ratio green even if seeding broke.
+    for statement in [
+        format!("DROP TABLE IF EXISTS {SEED_TABLE}"),
+        format!("DROP SEQUENCE IF EXISTS {SEED_SEQUENCE}"),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(statement))
+            .execute(pool)
+            .await?;
+    }
+
+    Ok(())
+}
 
 /// Panel queries reference metrics by name; label matchers are stripped first so
 /// that regex label *values* are never mistaken for metric names.
@@ -166,6 +289,30 @@ async fn scrape_with(collectors: &[String]) -> Result<String> {
     Ok(payload)
 }
 
+/// Scrapes with every collector enabled, having first seeded the fixtures the
+/// otherwise-silent collectors need. Returns the exported names and the server version
+/// so version-gated metrics can be excluded.
+async fn scrape_all_with_fixtures() -> Result<(BTreeSet<String>, i32)> {
+    let pool = common::create_test_pool().await?;
+    let version: i32 = sqlx::query_scalar("SELECT current_setting('server_version_num')::int")
+        .fetch_one(&pool)
+        .await?;
+
+    seed_scrape_fixtures(&pool).await?;
+
+    let all: Vec<String> = COLLECTOR_NAMES.iter().map(|n| (*n).to_string()).collect();
+    let config = CollectorConfig::new(25).with_enabled(&all);
+    let scraped = CollectorRegistry::new(&config).collect_all(&pool).await;
+
+    // Drop the fixtures even if the scrape failed, so a failure here cannot leave the
+    // shared database polluted for every other test.
+    let cleanup = drop_scrape_fixtures(&pool).await;
+    pool.close().await;
+    cleanup?;
+
+    Ok((exposed_metric_names(&scraped?), version))
+}
+
 /// Cheap, no-database guard: a panel must not reference a metric name that does
 /// not exist anywhere in the source. Catches typos and renames immediately.
 #[test]
@@ -212,21 +359,50 @@ fn dashboard_metrics_are_declared_in_source() -> Result<()> {
 /// with all collectors enabled, not merely exist as a string in the source.
 #[tokio::test]
 async fn dashboard_metrics_are_exported_by_collectors() -> Result<()> {
-    let all: Vec<String> = COLLECTOR_NAMES.iter().map(|n| (*n).to_string()).collect();
-    let exported = exposed_metric_names(&scrape_with(&all).await?);
+    let (exported, version) = scrape_all_with_fixtures().await?;
     let conditional: BTreeSet<&str> = CONDITIONAL_METRICS.iter().map(|(m, _)| *m).collect();
+
+    let unsupported_here = |name: &str| {
+        VERSION_GATED_PREFIXES
+            .iter()
+            .any(|(prefix, min_version, _)| name.starts_with(prefix) && version < *min_version)
+    };
 
     let missing: Vec<String> = dashboard_metric_names()?
         .into_iter()
-        .filter(|name| !exported.contains(name) && !conditional.contains(name.as_str()))
+        .filter(|name| {
+            !exported.contains(name)
+                && !conditional.contains(name.as_str())
+                && !unsupported_here(name)
+        })
         .collect();
 
     assert!(
         missing.is_empty(),
-        "dashboard queries reference metrics that a full scrape does not export: {missing:#?}\n\
-         If the metric genuinely needs conditions this test cannot create, add it to \
-         CONDITIONAL_METRICS with a reason."
+        "dashboard queries reference metrics that a full scrape does not export \
+         (server_version_num {version}): {missing:#?}\n\
+         If the metric needs workload state, seed it in seed_scrape_fixtures. If it only \
+         exists from a newer PostgreSQL, add it to VERSION_GATED_PREFIXES. If it genuinely \
+         needs conditions this test cannot create, add it to CONDITIONAL_METRICS with a reason."
     );
+
+    // Keep VERSION_GATED_PREFIXES honest in the other direction: on a server that *does*
+    // support a gated metric it must really be exported, otherwise the gate would mask a
+    // broken collector on every version. Asserted from the same scrape rather than a
+    // second test, because both would seed the same fixtures concurrently.
+    for (prefix, min_version, reason) in VERSION_GATED_PREFIXES {
+        if version < *min_version {
+            println!("skipping {prefix}* on server_version_num {version}: {reason}");
+            continue;
+        }
+
+        assert!(
+            exported.iter().any(|name| name.starts_with(prefix)),
+            "server_version_num {version} supports {prefix}* ({reason}) but the scrape \
+             exported none"
+        );
+    }
+
     Ok(())
 }
 

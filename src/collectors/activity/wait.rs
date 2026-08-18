@@ -1,4 +1,4 @@
-use crate::collectors::{Collector, i64_to_f64, util::get_excluded_databases};
+use crate::collectors::{Collected, Collector, i64_to_f64, util::get_excluded_databases};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, Opts, Registry};
@@ -76,7 +76,7 @@ impl Collector for WaitEventsCollector {
         err,
         fields(collector="wait_events", otel.kind="internal")
     )]
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             // Reset existing label sets (span for reset + update phase)
             let reset_span = info_span!("wait_events.reset_metrics");
@@ -156,7 +156,13 @@ impl Collector for WaitEventsCollector {
             }
 
             info!("Collected wait events: {}", rows.len());
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// Removes every labeled series this collector owns.
+    fn reset_metrics(&self) {
+        self.wait_event_type.reset();
+        self.wait_event.reset();
     }
 }

@@ -1,4 +1,4 @@
-use crate::collectors::Collector;
+use crate::collectors::{Collected, Collector};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{IntGauge, Opts, Registry};
@@ -274,7 +274,7 @@ impl Collector for SettingsCollector {
     }
 
     #[instrument(skip(self, pool), level = "info", err, fields(collector = "settings", otel.kind = "internal"))]
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             // Fetch settings (child span inside fetch_settings)
             let settings = self.fetch_settings(pool).await?;
@@ -294,8 +294,14 @@ impl Collector for SettingsCollector {
                 }
             }
 
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// No-op: this collector has no skip path, so it is never settled, and its
+    /// metrics are scalars that cannot be removed while registered.
+    fn reset_metrics(&self) {
+        // Nothing to remove.
     }
 
     fn enabled_by_default(&self) -> bool {

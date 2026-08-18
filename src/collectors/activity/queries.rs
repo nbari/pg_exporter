@@ -1,4 +1,4 @@
-use crate::collectors::{Collector, i64_to_f64, util::get_excluded_databases};
+use crate::collectors::{Collected, Collector, i64_to_f64, util::get_excluded_databases};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{Gauge, GaugeVec, IntGauge, IntGaugeVec, Opts, Registry};
@@ -150,7 +150,7 @@ impl QueriesCollector {
         }
     }
 
-    fn reset_metrics(&self) {
+    fn reset_all(&self) {
         self.queries_over_5m.reset();
         self.queries_over_15m.reset();
         self.queries_over_1h.reset();
@@ -193,7 +193,7 @@ impl Collector for QueriesCollector {
         err,
         fields(collector="queries", otel.kind="internal")
     )]
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             let excluded: Vec<String> = get_excluded_databases().to_vec();
 
@@ -232,7 +232,7 @@ impl Collector for QueriesCollector {
 
             // Point-in-time collector semantics:
             // clear previous label sets only after the replacement snapshot is ready.
-            self.reset_metrics();
+            self.reset_all();
 
             // Track metrics per database
             let mut db_counts_5m: HashMap<String, i64> = HashMap::new();
@@ -339,8 +339,13 @@ impl Collector for QueriesCollector {
                 "updated long-running query metrics"
             );
 
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// Delegates to the existing full reset.
+    fn reset_metrics(&self) {
+        self.reset_all();
     }
 }
 
@@ -356,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reset_metrics_clears_previous_long_running_series() {
+    fn test_reset_all_clears_previous_long_running_series() {
         let collector = QueriesCollector::new();
 
         collector.queries_over_5m.with_label_values(&["postgres"]).set(1);
@@ -375,7 +380,7 @@ mod tests {
         collector.oldest_query_age.set(601.0);
         collector.total_long_running.set(1);
 
-        collector.reset_metrics();
+        collector.reset_all();
 
         assert_eq!(collected_metric_count(&collector.queries_over_5m.collect()), 0);
         assert_eq!(

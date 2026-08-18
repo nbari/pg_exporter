@@ -161,13 +161,42 @@ these tests tie every panel query back to a metric the exporter actually produce
 Metric names are extracted from every `targets[].expr`, with label matchers stripped
 first so a regex label *value* is never mistaken for a metric name.
 
+`dashboard_metrics_are_exported_by_collectors` **seeds its own fixtures** before scraping
+(`seed_scrape_fixtures`): a small table with insert/update/delete/index-scan/`ANALYZE`
+activity, and a sequence pushed past `--sequences.min-ratio`. Without them the scrape is
+correctly silent — `pg_stat_user_tables` has no rows on a database with no user tables,
+and the `sequences` collector deliberately exports nothing below the ratio. That is what
+made this test pass on a lived-in development database and fail on every clean CI
+container. Only the *presence* of a series is asserted, not its value, so one seeded table
+is enough for all 22 `pg_stat_user_tables_*` families. The fixtures are dropped even when
+the scrape fails, so a failure cannot pollute the shared database.
+
 ### Adding a panel
 
 If a new panel queries a metric that a local single-node instance cannot produce, the
-live test will fail. Add it to `CONDITIONAL_METRICS` **with a reason** — that list is
-for metrics needing a connected replica, a blocked session, an in-flight
-`VACUUM`/`ANALYZE`/`CREATE INDEX`, TLS clients, or a co-located host. If the metric can
-be observed locally, it does not belong there; fix the collector instead.
+live test will fail. Pick the mechanism that matches *why* it is absent:
+
+| Situation | Where it goes |
+| --- | --- |
+| Needs workload state (a table, rows, an advanced sequence) | seed it in `seed_scrape_fixtures` |
+| Only exists from a newer PostgreSQL | `VERSION_GATED_PREFIXES`, with a minimum `server_version_num` |
+| Genuinely cannot be created here (replica, blocked session, in-flight `VACUUM`, TLS clients, co-located host) | `CONDITIONAL_METRICS`, **with a reason** |
+
+`CONDITIONAL_METRICS` is a flat list, so it cannot express "absent on 14/15, required on
+16+" — putting a version-gated metric there would stop the live check from verifying it on
+the versions that *do* have it. `VERSION_GATED_PREFIXES` is enforced in both directions:
+skipped below the minimum, and required above it.
+
+Verify a change against a **clean** database, not your development one, or you will
+reproduce exactly the false green this test exists to prevent:
+
+```sh
+podman run -d --name pgclean -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=postgres -p 55416:5432 postgres:16 \
+  -c shared_preload_libraries=pg_stat_statements
+podman exec pgclean psql -U postgres -c 'CREATE EXTENSION pg_stat_statements'
+PG_EXPORTER_DSN=postgresql://postgres:postgres@localhost:55416/postgres cargo test --test dashboard
+```
 
 `scripts/validate-dashboard.sh` (`just validate-dashboard`) remains as a quick manual
 check. It also verifies JSON validity, the `job`/`instance`/`database` template

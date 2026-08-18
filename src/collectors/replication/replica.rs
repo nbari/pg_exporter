@@ -1,4 +1,4 @@
-use crate::collectors::Collector;
+use crate::collectors::{Collected, Collector};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{Gauge, Opts, Registry};
@@ -85,7 +85,7 @@ impl Collector for ReplicaCollector {
         err,
         fields(collector="replication_replica", otel.kind="internal")
     )]
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             let query_span = info_span!(
                 "db.query",
@@ -143,8 +143,14 @@ impl Collector for ReplicaCollector {
                 "collected replication replica metrics"
             );
 
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// No-op: this collector has no skip path, so it is never settled, and its
+    /// metrics are scalars that cannot be removed while registered.
+    fn reset_metrics(&self) {
+        // Nothing to remove.
     }
 }
 

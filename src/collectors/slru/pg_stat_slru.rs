@@ -17,7 +17,7 @@
 //! collector skips cleanly (no error, no populated series) and logs a single
 //! warning that `PostgreSQL` 13+ is required.
 
-use crate::collectors::{Collector, util::get_pg_version};
+use crate::collectors::{Collected, Collector, util::resolve_server_version};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{IntGaugeVec, Opts, Registry};
@@ -216,20 +216,6 @@ impl PgStatSlruCollector {
     }
 }
 
-/// Resolves the server version, preferring the cached value set at startup and
-/// falling back to a direct query.
-async fn resolve_server_version(pool: &PgPool) -> Result<i32> {
-    let cached = get_pg_version();
-    if cached > 0 {
-        return Ok(cached);
-    }
-
-    let row = sqlx::query("SELECT current_setting('server_version_num')::int AS v")
-        .fetch_one(pool)
-        .await?;
-    Ok(row.try_get::<i32, _>("v")?)
-}
-
 impl Collector for PgStatSlruCollector {
     fn name(&self) -> &'static str {
         "pg_stat_slru"
@@ -253,7 +239,7 @@ impl Collector for PgStatSlruCollector {
         err,
         fields(collector = "pg_stat_slru", otel.kind = "internal")
     )]
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             let version_num = resolve_server_version(pool).await?;
 
@@ -266,7 +252,7 @@ impl Collector for PgStatSlruCollector {
                     );
                 }
                 debug!("Skipping pg_stat_slru metrics (requires PostgreSQL 13+)");
-                return Ok(());
+                return Ok(Collected::Skipped);
             }
 
             let query_span = info_span!(
@@ -291,8 +277,13 @@ impl Collector for PgStatSlruCollector {
 
             debug!(rows = rows.len(), "updated pg_stat_slru metrics");
 
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// Delegates to the existing full reset.
+    fn reset_metrics(&self) {
+        self.reset_all();
     }
 
     fn enabled_by_default(&self) -> bool {

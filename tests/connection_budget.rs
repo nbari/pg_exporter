@@ -18,7 +18,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicI64, Ordering},
 };
 use std::time::{Duration, Instant};
-use testcontainers_modules::testcontainers::{
+use testcontainers::{
     ContainerAsync, GenericImage, ImageExt,
     core::{IntoContainerPort, WaitFor},
     runners::AsyncRunner,

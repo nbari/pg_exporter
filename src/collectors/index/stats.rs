@@ -1,7 +1,7 @@
 use crate::collectors::util::{
     acquire_db_query_permit, get_default_database, get_excluded_databases, open_db_connection,
 };
-use crate::collectors::{Collector, all_databases_failed, i64_to_f64};
+use crate::collectors::{Collected, Collector, all_databases_failed, i64_to_f64};
 use anyhow::{Result, anyhow};
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, Opts, Registry};
@@ -154,7 +154,7 @@ impl IndexStatsCollector {
         }
     }
 
-    fn reset_metrics(&self) {
+    fn reset_all(&self) {
         self.scans.reset();
         self.tuples_read.reset();
         self.tuples_fetched.reset();
@@ -202,7 +202,7 @@ impl Collector for IndexStatsCollector {
         err,
         fields(collector = "index_stats", otel.kind = "internal")
     )]
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             // 1) Discover connectable, non-excluded databases via the shared pool.
             let excluded = get_excluded_databases().to_vec();
@@ -325,7 +325,7 @@ impl Collector for IndexStatsCollector {
                 );
             }
 
-            self.reset_metrics();
+            self.reset_all();
 
             for sample in &all_samples {
                 let labels = [sample.datname.as_str()];
@@ -359,8 +359,13 @@ impl Collector for IndexStatsCollector {
                 );
             }
 
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// Delegates to the existing full reset.
+    fn reset_metrics(&self) {
+        self.reset_all();
     }
 
     fn enabled_by_default(&self) -> bool {

@@ -24,7 +24,7 @@
 //! Like the rest of `--collector.system` this only makes sense when the exporter
 //! is co-located with `PostgreSQL` and never touches the database.
 
-use crate::collectors::Collector;
+use crate::collectors::{Collected, Collector};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{CounterVec, IntGaugeVec, Opts, Registry};
@@ -355,11 +355,18 @@ impl Collector for ProcessGroupCollector {
     }
 
     #[instrument(skip(self, _pool), level = "debug")]
-    fn collect<'a>(&'a self, _pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, _pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             self.collect_stats();
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// Removes every labeled series this collector owns.
+    fn reset_metrics(&self) {
+        self.cpu_seconds.reset();
+        self.memory_bytes.reset();
+        self.proc_count.reset();
     }
 
     fn enabled_by_default(&self) -> bool {

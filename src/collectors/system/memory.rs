@@ -18,7 +18,7 @@
 //! reclaimable memory; there, prefer `used`/`free` and treat the `available`
 //! series as a conservative floor.
 
-use crate::collectors::Collector;
+use crate::collectors::{Collected, Collector};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{IntGauge, Opts, Registry};
@@ -177,11 +177,17 @@ impl Collector for MemoryCollector {
     }
 
     #[instrument(skip(self, _pool), level = "debug")]
-    fn collect<'a>(&'a self, _pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, _pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             self.collect_stats();
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// No-op: this collector has no skip path, so it is never settled, and its
+    /// metrics are scalars that cannot be removed while registered.
+    fn reset_metrics(&self) {
+        // Nothing to remove.
     }
 
     fn enabled_by_default(&self) -> bool {

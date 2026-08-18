@@ -2,6 +2,38 @@ use super::super::common;
 use anyhow::Result;
 use pg_exporter::collectors::{Collector, default::archiver::ArchiverCollector};
 use prometheus::Registry;
+use sqlx::{PgPool, Row};
+
+/// The two age metrics the collector publishes only when there is an age to report.
+const AGE_METRICS: [&str; 2] = [
+    "pg_stat_archiver_last_archived_age_seconds",
+    "pg_stat_archiver_last_failed_age_seconds",
+];
+
+/// Which age metrics this server can actually report.
+///
+/// `pg_stat_archiver.last_archived_time` / `last_failed_time` are NULL until the first
+/// successful or failed archive. The collector removes the corresponding series in that case
+/// rather than publishing `0`, which would assert "archived 0 seconds ago" and could mask an
+/// archiver that has never worked. A test that requires the series must check first.
+async fn available_age_metrics(pool: &PgPool) -> Result<Vec<&'static str>> {
+    let row = sqlx::query(
+        "SELECT last_archived_time IS NOT NULL AS archived,
+                last_failed_time IS NOT NULL AS failed
+         FROM pg_stat_archiver",
+    )
+    .fetch_one(pool)
+    .await?;
+
+    let mut available = Vec::new();
+    if row.try_get::<bool, _>("archived").unwrap_or(false) {
+        available.push(AGE_METRICS[0]);
+    }
+    if row.try_get::<bool, _>("failed").unwrap_or(false) {
+        available.push(AGE_METRICS[1]);
+    }
+    Ok(available)
+}
 
 #[tokio::test]
 async fn test_archiver_collector_registers_without_error() -> Result<()> {
@@ -25,8 +57,6 @@ async fn test_archiver_collector_has_all_metrics() -> Result<()> {
     let expected_metrics = vec![
         "pg_stat_archiver_archived_total",
         "pg_stat_archiver_failed_total",
-        "pg_stat_archiver_last_archived_age_seconds",
-        "pg_stat_archiver_last_failed_age_seconds",
     ];
 
     for metric_name in expected_metrics {
@@ -107,10 +137,7 @@ async fn test_archiver_collector_counter_and_gauge_types() -> Result<()> {
     }
 
     // Gauge metrics
-    let gauge_metrics = vec![
-        "pg_stat_archiver_last_archived_age_seconds",
-        "pg_stat_archiver_last_failed_age_seconds",
-    ];
+    let gauge_metrics = available_age_metrics(&pool).await?;
 
     for metric_name in gauge_metrics {
         let metric_family = families
@@ -208,7 +235,6 @@ async fn test_archiver_collector_metric_help_text() -> Result<()> {
     let archiver_metrics = vec![
         "pg_stat_archiver_archived_total",
         "pg_stat_archiver_failed_total",
-        "pg_stat_archiver_last_archived_age_seconds",
     ];
 
     for metric_name in archiver_metrics {
@@ -217,6 +243,17 @@ async fn test_archiver_collector_metric_help_text() -> Result<()> {
             .find(|m| m.name() == metric_name)
             .unwrap_or_else(|| panic!("Metric {metric_name} should exist"));
 
+        assert!(
+            !metric_family.help().is_empty(),
+            "Metric {metric_name} should have help text"
+        );
+    }
+
+    for metric_name in available_age_metrics(&pool).await? {
+        let metric_family = families
+            .iter()
+            .find(|m| m.name() == metric_name)
+            .unwrap_or_else(|| panic!("Metric {metric_name} should exist"));
         assert!(
             !metric_family.help().is_empty(),
             "Metric {metric_name} should have help text"
@@ -331,10 +368,7 @@ async fn test_archiver_collector_age_metrics_reasonable() -> Result<()> {
     let families = registry.gather();
 
     // Age metrics should be reasonable (not millions of years)
-    let age_metrics = vec![
-        "pg_stat_archiver_last_archived_age_seconds",
-        "pg_stat_archiver_last_failed_age_seconds",
-    ];
+    let age_metrics = available_age_metrics(&pool).await?;
 
     for metric_name in age_metrics {
         let metric_family = families
@@ -445,18 +479,120 @@ async fn test_archiver_collector_all_counters_valid_after_activity() -> Result<(
     assert!(failed.get_metric()[0].get_counter().value() >= 0.0);
 
     // Age gauges should also be valid
-    let last_archived_age = families
-        .iter()
-        .find(|m| m.name() == "pg_stat_archiver_last_archived_age_seconds")
-        .expect("last_archived_age should exist");
-    assert!(last_archived_age.get_metric()[0].get_gauge().value() >= 0.0);
-
-    let last_failed_age = families
-        .iter()
-        .find(|m| m.name() == "pg_stat_archiver_last_failed_age_seconds")
-        .expect("last_failed_age should exist");
-    assert!(last_failed_age.get_metric()[0].get_gauge().value() >= 0.0);
-
+    let available = available_age_metrics(&pool).await?;
+    for metric_name in &available {
+        let family = families
+            .iter()
+            .find(|m| m.name() == *metric_name)
+            .unwrap_or_else(|| panic!("{metric_name} should exist when the server reports it"));
+        assert!(
+            family.get_metric()[0].get_gauge().value() >= 0.0,
+            "{metric_name} must not be negative"
+        );
+    }
+    // The server has never archived or failed to archive, so there is no age to publish and
+    // the series are absent rather than a fabricated 0.
+    for metric_name in AGE_METRICS {
+        if !available.contains(&metric_name) {
+            assert!(
+                !families
+                    .iter()
+                    .any(|m| m.name() == metric_name && !m.get_metric().is_empty()),
+                "{metric_name} must be absent, not 0, when the server has no age to report"
+            );
+        }
+    }
     pool.close().await;
     Ok(())
+}
+
+/// A `42501` on `pg_stat_archiver` must clear the metrics and still succeed, not fail the scrape.
+///
+/// This is the Stage 1 regression scenario: the collector used to decide "view does not
+/// exist" by matching the view name in the error *message*, which reads a permission error
+/// as an absent view — a missing GRANT was indistinguishable from an old server, and
+/// backup-critical WAL archiving metrics vanished with no explanation. Classifying by `SQLSTATE` separates them,
+/// and a denied read clears rather than leaving the last values on display.
+///
+/// Grants on `pg_catalog` views are per-database, so the REVOKE below is confined to this
+/// isolated database and cannot disturb a sibling test.
+#[tokio::test]
+async fn test_archiver_clears_metrics_when_the_role_may_not_read_the_view() -> Result<()> {
+    let test_db = common::IsolatedTestDatabase::new("archiver_denied").await?;
+    let pool = test_db.pool();
+
+    let is_superuser: bool =
+        sqlx::query_scalar("SELECT usesuper FROM pg_user WHERE usename = current_user")
+            .fetch_optional(pool)
+            .await?
+            .unwrap_or(false);
+    if !is_superuser {
+        println!("not superuser, cannot revoke a catalog grant - skipping");
+        test_db.cleanup().await?;
+        return Ok(());
+    }
+
+    let role = format!("exporter_archiver_denied_{}", std::process::id());
+    let _ = sqlx::query(sqlx::AssertSqlSafe(format!("DROP ROLE IF EXISTS {role}")))
+        .execute(pool)
+        .await;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE ROLE {role} LOGIN PASSWORD 'denied_probe' NOSUPERUSER"
+    )))
+    .execute(pool)
+    .await?;
+
+    let outcome = async {
+        let collector = ArchiverCollector::new();
+        let registry = Registry::new();
+        collector.register_metrics(&registry)?;
+
+        // Seed from the privileged pool, or a cleared registry proves nothing.
+        collector.collect(pool).await?;
+        let seeded = registry
+            .gather()
+            .iter()
+            .any(|f| f.name().starts_with("pg_stat_archiver_") && !f.get_metric().is_empty());
+        assert!(seeded, "the privileged scrape must publish series first");
+
+        sqlx::query("REVOKE SELECT ON pg_stat_archiver FROM PUBLIC")
+            .execute(pool)
+            .await?;
+
+        let denied_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(5))
+            .connect(&test_db.dsn_for_role(&role, "denied_probe")?)
+            .await?;
+
+        let result = collector.collect(&denied_pool).await;
+        assert!(
+            result.is_ok(),
+            "a denied read is a skip, not a scrape failure: {result:?}"
+        );
+
+        for family in registry.gather() {
+            if family.name().starts_with("pg_stat_archiver_") {
+                assert!(
+                    family.get_metric().is_empty(),
+                    "{} must be cleared after a denied read, {} samples remain",
+                    family.name(),
+                    family.get_metric().len()
+                );
+            }
+        }
+
+        denied_pool.close().await;
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+
+    let _ = sqlx::query("GRANT SELECT ON pg_stat_archiver TO PUBLIC")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query(sqlx::AssertSqlSafe(format!("DROP ROLE IF EXISTS {role}")))
+        .execute(pool)
+        .await;
+    test_db.cleanup().await?;
+    outcome
 }

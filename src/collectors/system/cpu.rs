@@ -36,7 +36,7 @@
 //! of 8 saturates 1 core but is ~25% of 32 cores). Load average
 //! (`pg_system_load1/5/15`) comes from `sysinfo`.
 
-use crate::collectors::Collector;
+use crate::collectors::{Collected, Collector};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{CounterVec, Gauge, IntGauge, Opts, Registry};
@@ -501,11 +501,16 @@ impl Collector for CpuCollector {
     }
 
     #[instrument(skip(self, _pool), level = "debug")]
-    fn collect<'a>(&'a self, _pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, _pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             self.collect_stats();
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// Removes every labeled series this collector owns.
+    fn reset_metrics(&self) {
+        self.cpu_seconds.reset();
     }
 
     fn enabled_by_default(&self) -> bool {

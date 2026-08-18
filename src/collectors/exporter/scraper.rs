@@ -1,3 +1,4 @@
+use crate::collectors::Collected;
 use anyhow::Result;
 use prometheus::{CounterVec, GaugeVec, HistogramVec, IntGauge, Opts, Registry};
 use std::time::Instant;
@@ -277,10 +278,18 @@ impl crate::collectors::Collector for ScraperCollector {
         self.register(registry)
     }
 
-    fn collect<'a>(&'a self, _pool: &'a sqlx::PgPool) -> futures::future::BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, _pool: &'a sqlx::PgPool) -> futures::future::BoxFuture<'a, Result<Collected>> {
         // ScraperCollector doesn't scrape from PostgreSQL
         // It's updated by other collectors via start_scrape(), update_metrics_count(), etc.
-        Box::pin(async move { Ok(()) })
+        Box::pin(async move { Ok(Collected::Fresh) })
+    }
+
+    /// Removes every labeled series this collector owns.
+    fn reset_metrics(&self) {
+        self.scrape_duration_seconds.reset();
+        self.scrape_errors_total.reset();
+        self.last_scrape_timestamp.reset();
+        self.last_scrape_success.reset();
     }
 
     fn enabled_by_default(&self) -> bool {

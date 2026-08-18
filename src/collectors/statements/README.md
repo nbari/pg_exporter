@@ -258,6 +258,26 @@ maximum.
 - Heavy spillers appear via the temp ranking, regardless of their execution time
 - Adjust `--statements.top-n` based on your query diversity and scrape budget
 
+#### Only top-level statements are exported
+
+`pg_stat_statements` is keyed by `(userid, dbid, queryid, toplevel)`. With
+`pg_stat_statements.track = all`, a statement executed both directly *and* from inside a
+function or procedure gets **two** entries that share `(userid, dbid, queryid)` and carry
+different counters. The exported label set — `{queryid, datname, usename, query_short}` —
+has no `toplevel` component, so both entries would collapse onto a single Prometheus
+series where one silently overwrites the other, and each duplicate would also consume a
+slot of the `2 x top-n` budget.
+
+The scrape query therefore selects only `toplevel` entries. The trade-off: under
+`track = all` a statement that is *only* ever called from inside a function is no longer
+exported on its own — its cost is still counted in the top-level statement that invoked
+it. Under the default `track = top` nothing changes, because nested statements are never
+recorded in the first place.
+
+The column arrived in `pg_stat_statements` 1.9 (PostgreSQL 14). On older extension
+versions the filter is omitted, since `track = all` there cannot produce the duplicate in
+the first place.
+
 Convert temp blocks to bytes with `pg_settings_block_size_bytes` (from
 `--collector.default`):
 

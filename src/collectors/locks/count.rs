@@ -1,4 +1,4 @@
-use crate::collectors::{util::get_excluded_databases, Collector};
+use crate::collectors::{Collected, util::get_excluded_databases, Collector};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, IntGaugeVec, Opts, Registry};
@@ -105,7 +105,7 @@ impl Collector for LocksSubCollector {
         err,
         fields(collector="locks", otel.kind="internal")
     )]
-    fn collect<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<()>> {
+    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
             // Build exclusion list from global OnceCell (set at startup via Clap/env).
             let excluded: Vec<String> = get_excluded_databases().to_vec();
@@ -298,7 +298,16 @@ impl Collector for LocksSubCollector {
                     .set(count);
             }
 
-            Ok(())
+            Ok(Collected::Fresh)
         })
+    }
+
+    /// Removes every labeled series this collector owns.
+    fn reset_metrics(&self) {
+        self.locks_count.reset();
+        self.blocked_sessions.reset();
+        self.blocking_sessions.reset();
+        self.longest_blocked_seconds.reset();
+        self.lock_waits.reset();
     }
 }
