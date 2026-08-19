@@ -2,11 +2,21 @@
 
 set -euo pipefail
 
+BENCH_RUST_SSH="${BENCH_RUST_SSH:-10.246.1.90}"
 BENCH_DB_SSH="${BENCH_DB_SSH:-10.246.1.92}"
 BENCH_METRICS_SSH="${BENCH_METRICS_SSH:-10.246.1.93}"
+BENCH_SSH_CONFIG="${BENCH_SSH_CONFIG:-}"
+PROM_JOB="${PROM_JOB:-pg_exporter_rust}"
+BENCH_RUST_DB_CLIENT_ADDR="${BENCH_RUST_DB_CLIENT_ADDR:-${BENCH_RUST_SSH}}"
+LOCAL_ARTIFACT_ROOT="${LOCAL_ARTIFACT_ROOT:-bench-artifacts/rust-soak}"
 RUN_ID=""
+FETCH_ARTIFACTS=false
 
-SSH_OPTS=(
+SSH_OPTS=()
+if [[ -n "${BENCH_SSH_CONFIG}" ]]; then
+    SSH_OPTS+=(-F "${BENCH_SSH_CONFIG}")
+fi
+SSH_OPTS+=(
     -o BatchMode=yes
     -o ConnectTimeout=10
     -o ControlMaster=no
@@ -22,6 +32,7 @@ Usage:
 
 Options:
   --run-id ID      Run id produced by run-rust-soak.sh
+  --fetch          Copy current logs and CSV files into the local artifact directory
   --help           Show this help
 USAGE
 }
@@ -43,6 +54,10 @@ parse_args() {
             RUN_ID="$2"
             shift 2
             ;;
+        --fetch)
+            FETCH_ARTIFACTS=true
+            shift
+            ;;
         --help|-h)
             usage
             exit 0
@@ -60,18 +75,61 @@ parse_args() {
         usage
         exit 1
     fi
+    if ! [[ "${RUN_ID}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        err "--run-id may contain only letters, numbers, dots, underscores, and dashes"
+        exit 1
+    fi
+}
+
+fetch_artifacts() {
+    local artifact_dir db_prefix sampler_prefix
+    artifact_dir="${LOCAL_ARTIFACT_ROOT}/${RUN_ID}"
+    db_prefix="/tmp/pg_exporter_rust_soak_${RUN_ID}"
+    sampler_prefix="/tmp/pg_exporter_rust_soak_sampler_${RUN_ID}"
+    mkdir -p "${artifact_dir}"
+
+    scp "${SSH_OPTS[@]}" "${BENCH_DB_SSH}:${db_prefix}.log" "${artifact_dir}/workload.log"
+    scp "${SSH_OPTS[@]}" "${BENCH_DB_SSH}:${db_prefix}_connections.csv" "${artifact_dir}/connections.csv"
+    scp "${SSH_OPTS[@]}" "${BENCH_DB_SSH}:${db_prefix}_state.env" "${artifact_dir}/state.env"
+    scp "${SSH_OPTS[@]}" "${BENCH_METRICS_SSH}:${sampler_prefix}.log" "${artifact_dir}/sampler.log"
+    scp "${SSH_OPTS[@]}" "${BENCH_METRICS_SSH}:${db_prefix}_prom.csv" "${artifact_dir}/prometheus-samples.csv"
+    ssh_run "${BENCH_RUST_SSH}" \
+        "sudo journalctl -u pg_exporter --since '25 hours ago' --no-pager" > "${artifact_dir}/pg-exporter-journal.log"
+    printf 'Artifacts copied to %s\n' "${artifact_dir}"
 }
 
 main() {
     parse_args "$@"
 
+    local overall_status=0
     local db_log="/tmp/pg_exporter_rust_soak_${RUN_ID}.log"
     local db_pid="/tmp/pg_exporter_rust_soak_${RUN_ID}.pid"
     local sampler_log="/tmp/pg_exporter_rust_soak_sampler_${RUN_ID}.log"
     local sampler_pid="/tmp/pg_exporter_rust_soak_sampler_${RUN_ID}.pid"
     local sampler_csv="/tmp/pg_exporter_rust_soak_${RUN_ID}_prom.csv"
     local connection_csv="/tmp/pg_exporter_rust_soak_${RUN_ID}_connections.csv"
+    local state_file="/tmp/pg_exporter_rust_soak_${RUN_ID}_state.env"
 
+    echo "== Run progress =="
+    ssh_run "${BENCH_DB_SSH}" \
+        "set -euo pipefail; \
+         if [ -f '${state_file}' ]; then \
+             cat '${state_file}'; \
+             end=\$(awk -F= '\$1 == \"phase_ends_epoch\" {print \$2}' '${state_file}'); \
+             now=\$(date +%s); \
+             if [ -n \"\${end}\" ] && [ \"\${end}\" -gt \"\${now}\" ]; then echo phase_remaining_seconds=\$((end - now)); else echo phase_remaining_seconds=0; fi; \
+         else echo 'state file not found'; fi"
+
+    echo ""
+    echo "== Exporter process =="
+    ssh_run "${BENCH_RUST_SSH}" \
+        "set -euo pipefail; \
+         systemctl is-active pg_exporter; \
+         /usr/local/bin/pg_exporter --version; \
+         pid=\$(systemctl show pg_exporter -p MainPID --value); \
+         ps -p \"\${pid}\" -o pid,etime,pcpu,pmem,rss,vsz,nlwp,cmd"
+
+    echo ""
     echo "== DB workload =="
     ssh_run "${BENCH_DB_SSH}" \
         "set -euo pipefail; \
@@ -80,7 +138,7 @@ main() {
 
     echo ""
     echo "== Exporter PostgreSQL connection budget =="
-    ssh_run "${BENCH_DB_SSH}" \
+    if ! ssh_run "${BENCH_DB_SSH}" \
         "set -euo pipefail; \
          if [ ! -f '${connection_csv}' ]; then echo 'connection sampler CSV not found'; exit 1; fi; \
          awk -F, 'NR > 1 { \
@@ -93,9 +151,11 @@ main() {
              exit(samples == 0 || over_budget > 0 || errors > 0) \
          }' '${connection_csv}'; \
          tail -n 5 '${connection_csv}'; \
-         current=\$(sudo -u postgres psql -d postgres -Atqc \"SELECT count(*)::bigint FROM pg_stat_activity WHERE application_name = 'pg_exporter'\"); \
+         current=\$(sudo -u postgres psql -d postgres -Atqc \"SELECT count(*)::bigint FROM pg_stat_activity WHERE application_name = 'pg_exporter' AND client_addr = inet '${BENCH_RUST_DB_CLIENT_ADDR}'\"); \
          echo current_connections=\${current}; \
-         test \"\${current}\" -le 5"
+         test \"\${current}\" -le 5"; then
+        overall_status=1
+    fi
 
     echo ""
     echo "== ACCESS EXCLUSIVE session =="
@@ -114,6 +174,49 @@ main() {
         "set -euo pipefail; \
          if [ -f '${sampler_pid}' ]; then pid=\$(cat '${sampler_pid}'); echo pid=\${pid}; ps -p \${pid} -o pid,etime,pcpu,pmem,cmd || true; else echo 'pid file not found'; fi; \
          if [ -f '${sampler_log}' ]; then tail -n 20 '${sampler_log}'; else echo 'log not found'; fi"
+
+    echo ""
+    echo "== Exporter resource trend =="
+    ssh_run "${BENCH_METRICS_SSH}" \
+        "set -euo pipefail; \
+         if [ ! -f '${sampler_csv}' ]; then echo 'sampler CSV not found'; exit 1; fi; \
+         awk -F, 'NR == 1 { next } { \
+             rows++; \
+             if (\$2 == \"\") exporter_missing++; else if (\$2 + 0 != 1) exporter_down++; \
+             if (\$3 == \"\") pg_missing++; else if (\$3 + 0 != 1) pg_down++; \
+             if (\$4 != \"\") { \
+                 rss_samples++; rss_last=\$4 + 0; rss_sum += \$4; \
+                 rss[rss_samples]=rss_last; \
+                 if (rss_samples == 1) { rss_first=rss_last; rss_min=rss_last } \
+                 if (rss_last < rss_min) rss_min=rss_last; \
+                 if (rss_last > rss_max) rss_max=rss_last \
+             } \
+             if (\$5 != \"\") { cpu_samples++; cpu_sum += \$5; if (\$5 + 0 > cpu_max) cpu_max=\$5 + 0 } \
+             if (\$6 != \"\") { \
+                 fd_samples++; fd_last=\$6 + 0; \
+                 if (fd_samples == 1) fd_first=fd_last; \
+                 if (fd_last > fd_max) fd_max=fd_last \
+             } \
+             if (\$7 != \"\") { scrape_samples++; scrape_sum += \$7; if (\$7 + 0 > scrape_max) scrape_max=\$7 + 0 } \
+             if (\$22 != \"\") elapsed=\$22 + 0; \
+             if (\$23 != \"\") remaining=\$23 + 0 \
+         } END { \
+             window = rss_samples < 60 ? rss_samples : 60; \
+             for (i = 1; i <= window; i++) rss_first_window_sum += rss[i]; \
+             for (i = rss_samples - window + 1; i <= rss_samples; i++) rss_last_window_sum += rss[i]; \
+             printf \"samples=%d elapsed_s=%d remaining_s=%d exporter_down=%d exporter_missing=%d pg_down=%d pg_missing=%d\\n\", \
+                 rows, elapsed, remaining, exporter_down, exporter_missing, pg_down, pg_missing; \
+             printf \"rss_mib first=%.2f last=%.2f delta=%.2f min=%.2f avg=%.2f max=%.2f\\n\", \
+                 rss_first / 1048576, rss_last / 1048576, (rss_last - rss_first) / 1048576, rss_min / 1048576, rss_samples ? rss_sum / rss_samples / 1048576 : 0, rss_max / 1048576; \
+             printf \"rss_window_mib samples=%d first_avg=%.2f last_avg=%.2f delta=%.2f\\n\", \
+                 window, window ? rss_first_window_sum / window / 1048576 : 0, window ? rss_last_window_sum / window / 1048576 : 0, \
+                 window ? (rss_last_window_sum - rss_first_window_sum) / window / 1048576 : 0; \
+             printf \"cpu_percent avg=%.2f max=%.2f fds first=%d last=%d max=%d\\n\", \
+                 cpu_samples ? cpu_sum / cpu_samples : 0, cpu_max, fd_first, fd_last, fd_max; \
+             printf \"scrape_duration_s avg=%.4f max=%.4f\\n\", \
+                 scrape_samples ? scrape_sum / scrape_samples : 0, scrape_max \
+         }' '${sampler_csv}'; \
+         tail -n 3 '${sampler_csv}'"
 
     echo ""
     echo "== Comparison signals =="
@@ -169,7 +272,7 @@ main() {
     echo "== Prometheus health =="
     ssh_run "${BENCH_METRICS_SSH}" \
         "set -euo pipefail; \
-         curl -fsS http://127.0.0.1:9090/api/v1/query --get --data-urlencode 'query=up{job=\"pg_exporter_rust\"}' | \
+         curl -fsS http://127.0.0.1:9090/api/v1/query --get --data-urlencode 'query=up{job=\"${PROM_JOB}\"}' | \
          jq -r '.data.result[] | [.metric.instance, .value[1]] | @tsv'"
 
     echo ""
@@ -191,6 +294,14 @@ main() {
          else \
              echo 'sampler CSV not found'; \
          fi"
+
+    if [[ "${FETCH_ARTIFACTS}" == true ]]; then
+        echo ""
+        echo "== Fetching artifacts =="
+        fetch_artifacts
+    fi
+
+    return "${overall_status}"
 }
 
 main "$@"

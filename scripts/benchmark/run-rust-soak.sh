@@ -8,6 +8,13 @@ DASHBOARD_JSON="${SCRIPT_DIR}/rust-soak-dashboard.json"
 BENCH_RUST_SSH="${BENCH_RUST_SSH:-10.246.1.90}"
 BENCH_DB_SSH="${BENCH_DB_SSH:-10.246.1.92}"
 BENCH_METRICS_SSH="${BENCH_METRICS_SSH:-10.246.1.93}"
+BENCH_SSH_CONFIG="${BENCH_SSH_CONFIG:-}"
+PROM_JOB="${PROM_JOB:-pg_exporter_rust}"
+BENCH_RUST_INSTANCE="${BENCH_RUST_INSTANCE:-${BENCH_RUST_SSH}:9432}"
+BENCH_DB_NODE_INSTANCE="${BENCH_DB_NODE_INSTANCE:-${BENCH_DB_SSH}:9100}"
+BENCH_GRAFANA_URL="${BENCH_GRAFANA_URL:-http://${BENCH_METRICS_SSH}:3000}"
+BENCH_RUST_METRICS_URL="${BENCH_RUST_METRICS_URL:-http://${BENCH_RUST_SSH}:9432/metrics}"
+BENCH_RUST_DB_CLIENT_ADDR="${BENCH_RUST_DB_CLIENT_ADDR:-${BENCH_RUST_SSH}}"
 
 DB_NAME="${DB_NAME:-pgbench_test}"
 DB_COUNT="${DB_COUNT:-1}"
@@ -15,10 +22,16 @@ DB_SCALE="${DB_SCALE:-20}"
 HOURS=24
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 LOCAL_ARTIFACT_ROOT="${LOCAL_ARTIFACT_ROOT:-bench-artifacts/rust-soak}"
+EXPECTED_EXPORTER_VERSION="${EXPECTED_EXPORTER_VERSION:-$(sed -n 's/^version = "\([^"]*\)"/\1/p' "${SCRIPT_DIR}/../../Cargo.toml" | head -n 1)}"
 DEPLOY_DASHBOARD=true
 CONFIGURE_EXPORTER=true
+PREFLIGHT_ONLY=false
 
-SSH_OPTS=(
+SSH_OPTS=()
+if [[ -n "${BENCH_SSH_CONFIG}" ]]; then
+    SSH_OPTS+=(-F "${BENCH_SSH_CONFIG}")
+fi
+SSH_OPTS+=(
     -o BatchMode=yes
     -o ConnectTimeout=10
     -o ControlMaster=no
@@ -38,9 +51,20 @@ Options:
   --db NAME                 Database name prefix (default: ${DB_NAME})
   --db-count N              Number of databases to create/benchmark (default: ${DB_COUNT})
   --scale N                 pgbench scale if init is needed (default: ${DB_SCALE})
+  --expected-version V      Required remote pg_exporter version (default: ${EXPECTED_EXPORTER_VERSION})
+  --preflight-only          Validate hosts, tools, version, and Prometheus, then exit
   --no-dashboard-deploy     Do not copy dashboard to metrics VM
   --no-exporter-config      Do not apply soak collector override on rust VM
   --help                    Show this help
+
+Prometheus label overrides:
+  PROM_JOB                  Scrape job (default: ${PROM_JOB})
+  BENCH_RUST_INSTANCE       Exporter target label (default: ${BENCH_RUST_INSTANCE})
+  BENCH_DB_NODE_INSTANCE    DB node_exporter label (default: ${BENCH_DB_NODE_INSTANCE})
+  BENCH_GRAFANA_URL         Browser-visible Grafana base URL (default: ${BENCH_GRAFANA_URL})
+  BENCH_RUST_METRICS_URL    Direct probe URL (default: ${BENCH_RUST_METRICS_URL})
+  BENCH_RUST_DB_CLIENT_ADDR PostgreSQL client address for the Rust exporter (default: ${BENCH_RUST_DB_CLIENT_ADDR})
+  BENCH_SSH_CONFIG          Optional ssh_config path for SSH and SCP
 USAGE
 }
 
@@ -81,6 +105,14 @@ parse_args() {
             DB_SCALE="$2"
             shift 2
             ;;
+        --expected-version)
+            EXPECTED_EXPORTER_VERSION="$2"
+            shift 2
+            ;;
+        --preflight-only)
+            PREFLIGHT_ONLY=true
+            shift
+            ;;
         --no-dashboard-deploy)
             DEPLOY_DASHBOARD=false
             shift
@@ -115,13 +147,45 @@ validate_inputs() {
         err "--scale must be a positive integer"
         exit 1
     fi
+    if ! [[ "${RUN_ID}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        err "--run-id may contain only letters, numbers, dots, underscores, and dashes"
+        exit 1
+    fi
+    if ! [[ "${DB_NAME}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+        err "--db must be a PostgreSQL identifier containing only letters, numbers, and underscores"
+        exit 1
+    fi
+    if [[ -z "${EXPECTED_EXPORTER_VERSION}" ]]; then
+        err "Could not determine the expected exporter version"
+        exit 1
+    fi
+    for label_value in "${PROM_JOB}" "${BENCH_RUST_INSTANCE}" "${BENCH_DB_NODE_INSTANCE}"; do
+        if [[ "${label_value}" == *\"* || "${label_value}" == *$'\n'* ]]; then
+            err "Prometheus job and instance labels must not contain quotes or newlines"
+            exit 1
+        fi
+    done
+    if [[ "${BENCH_RUST_METRICS_URL}" == *\'* || "${BENCH_RUST_METRICS_URL}" == *$'\n'* ]]; then
+        err "BENCH_RUST_METRICS_URL must not contain single quotes or newlines"
+        exit 1
+    fi
+    if ! [[ "${BENCH_RUST_DB_CLIENT_ADDR}" =~ ^[0-9A-Fa-f:.]+$ ]]; then
+        err "BENCH_RUST_DB_CLIENT_ADDR must be an IPv4 or IPv6 address"
+        exit 1
+    fi
     if [[ "${DEPLOY_DASHBOARD}" == true && ! -f "${DASHBOARD_JSON}" ]]; then
         err "Dashboard file not found: ${DASHBOARD_JSON}"
+        exit 1
+    fi
+    if [[ "${DEPLOY_DASHBOARD}" == true ]] && ! command -v jq >/dev/null; then
+        err "jq is required locally to prepare the Grafana dashboard"
         exit 1
     fi
 }
 
 preflight() {
+    local remote_version
+
     log "Checking SSH connectivity"
     ssh_run "${BENCH_RUST_SSH}" "echo rust_ok >/dev/null"
     ssh_run "${BENCH_DB_SSH}" "echo db_ok >/dev/null"
@@ -130,9 +194,40 @@ preflight() {
     log "Checking db tooling on ${BENCH_DB_SSH}"
     ssh_run "${BENCH_DB_SSH}" "command -v pgbench >/dev/null && command -v psql >/dev/null"
 
-    log "Checking Prometheus API on ${BENCH_METRICS_SSH}"
+    log "Checking exporter host tooling and release version on ${BENCH_RUST_SSH}"
+    ssh_run "${BENCH_RUST_SSH}" \
+        "command -v curl >/dev/null && command -v systemctl >/dev/null && test -x /usr/local/bin/pg_exporter"
+    remote_version=$(ssh_run "${BENCH_RUST_SSH}" \
+        "/usr/local/bin/pg_exporter --version | awk '{print \$2}'")
+    remote_version=$(printf '%s' "${remote_version}" | tr -d '\r\n')
+    if [[ "${remote_version}" != "${EXPECTED_EXPORTER_VERSION}" ]]; then
+        err "Exporter host is running binary version ${remote_version}; expected ${EXPECTED_EXPORTER_VERSION}"
+        err "Deploy the release binary before starting the soak"
+        exit 1
+    fi
+
+    log "Checking Prometheus and Grafana tooling on ${BENCH_METRICS_SSH}"
+    ssh_run "${BENCH_METRICS_SSH}" "command -v curl >/dev/null && command -v jq >/dev/null"
     ssh_run "${BENCH_METRICS_SSH}" \
         "curl -fsS http://127.0.0.1:9090/api/v1/query --get --data-urlencode query=up >/dev/null"
+    ssh_run "${BENCH_METRICS_SSH}" \
+        "set -euo pipefail; \
+         curl -fsS http://127.0.0.1:9090/api/v1/query --get \
+             --data-urlencode 'query=up{job=\"${PROM_JOB}\",instance=\"${BENCH_RUST_INSTANCE}\"}' | \
+             jq -e '.status == \"success\" and (.data.result | length == 1)' >/dev/null; \
+         curl -fsS http://127.0.0.1:9090/api/v1/query --get \
+             --data-urlencode 'query=node_memory_MemAvailable_bytes{instance=\"${BENCH_DB_NODE_INSTANCE}\"}' | \
+             jq -e '.status == \"success\" and (.data.result | length == 1)' >/dev/null; \
+         direct_ok=false; \
+         for attempt in 1 2 3 4 5; do \
+             http_code=\$(curl -sS -o /dev/null --connect-timeout 5 --max-time 20 -w '%{http_code}' '${BENCH_RUST_METRICS_URL}') || http_code=000; \
+             if [ \"\${http_code}\" = 200 ]; then direct_ok=true; break; fi; \
+             if [ \"\${http_code}\" != 503 ]; then echo \"direct metrics preflight failed with HTTP \${http_code}\" >&2; exit 1; fi; \
+             sleep 2; \
+         done; \
+         if [ \"\${direct_ok}\" != true ]; then echo 'direct metrics preflight remained busy after five attempts' >&2; exit 1; fi"
+
+    log "Preflight passed exporter_version=${remote_version} prometheus_job=${PROM_JOB} exporter_instance=${BENCH_RUST_INSTANCE} db_node_instance=${BENCH_DB_NODE_INSTANCE}"
 }
 
 deploy_dashboard() {
@@ -141,7 +236,11 @@ deploy_dashboard() {
     fi
 
     log "Deploying rust soak dashboard to ${BENCH_METRICS_SSH}"
-    cat "${DASHBOARD_JSON}" | ssh "${SSH_OPTS[@]}" "${BENCH_METRICS_SSH}" \
+    jq --arg instance "${BENCH_RUST_INSTANCE}" --arg job "${PROM_JOB}" \
+        --arg db_node_instance "${BENCH_DB_NODE_INSTANCE}" \
+        '((.. | strings) |= (gsub("pg_exporter_rust"; $job) | gsub("10\\.246\\.1\\.92:9100"; $db_node_instance))) |
+         (.templating.list[] | select(.name == "instance").current) = {text: $instance, value: $instance}' \
+        "${DASHBOARD_JSON}" | ssh "${SSH_OPTS[@]}" "${BENCH_METRICS_SSH}" \
         "set -euo pipefail; cat > /tmp/rust-soak-${RUN_ID}.json; \
          sudo install -d -m 0755 /var/lib/grafana/dashboards/pg-exporter-bakeoff; \
          sudo install -m 0644 /tmp/rust-soak-${RUN_ID}.json /var/lib/grafana/dashboards/pg-exporter-bakeoff/rust-soak.json; \
@@ -159,15 +258,22 @@ configure_exporter() {
 ExecStart=
 ExecStart=/usr/local/bin/pg_exporter \
     --listen 0.0.0.0 \
+    --collector.default \
     --collector.activity \
     --collector.vacuum \
     --collector.database \
     --collector.locks \
     --collector.stat \
+    --collector.stat_io \
+    --collector.slru \
+    --collector.temp \
+    --collector.system \
     --collector.replication \
     --collector.index \
+    --collector.sequences \
     --collector.statements \
     --collector.exporter \
+    --collector.tls \
     --collectors.max-db-concurrency 2 \
     --statements.top-n 25
 CFG
@@ -180,8 +286,41 @@ CFG
          sudo systemctl restart pg_exporter; \
          sleep 2; \
          systemctl is-active pg_exporter; \
-         curl -fsS http://127.0.0.1:9432/metrics | \
-         awk '/pg_stat_activity_count|pg_stat_user_tables_n_dead_tup|postgres_pg_stat_statements_calls_total|pg_exporter_collector_last_scrape_success/ {if (n < 8) print; n++} END {exit(n == 0)}'"
+         metrics_file=\$(mktemp); \
+         trap 'rm -f \"\${metrics_file}\"' EXIT; \
+         scrape_ok=false; \
+         for attempt in 1 2 3 4 5; do \
+             http_code=\$(curl -sS -o \"\${metrics_file}\" --connect-timeout 5 --max-time 20 -w '%{http_code}' http://127.0.0.1:9432/metrics) || http_code=000; \
+             if [ \"\${http_code}\" = 200 ]; then scrape_ok=true; break; fi; \
+             if [ \"\${http_code}\" != 503 ]; then echo \"collector validation scrape failed with HTTP \${http_code}\" >&2; exit 1; fi; \
+             sleep 2; \
+         done; \
+         if [ \"\${scrape_ok}\" != true ]; then echo 'collector validation scrape remained busy after five attempts' >&2; exit 1; fi; \
+         for collector in default vacuum activity locks database stat stat_io slru temp system replication index sequences statements exporter tls; do \
+             if ! grep -Eq \"^pg_exporter_collector_last_scrape_success\\{collector=\\\"\${collector}\\\"\\}[[:space:]]+1(\\.0+)?$\" \"\${metrics_file}\"; then \
+                 echo \"collector did not complete successfully: \${collector}\" >&2; \
+                 exit 1; \
+             fi; \
+         done; \
+         awk '/pg_exporter_build_info|pg_stat_activity_count|pg_stat_user_tables_n_dead_tup|postgres_pg_stat_statements_calls_total|pg_exporter_collector_last_scrape_success/ {if (n < 20) print; n++} END {exit(n == 0)}' \"\${metrics_file}\""
+}
+
+wait_for_prometheus_target() {
+    log "Waiting for Prometheus to record a successful ${EXPECTED_EXPORTER_VERSION} scrape"
+    ssh_run "${BENCH_METRICS_SSH}" \
+        "set -euo pipefail; \
+         for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do \
+             up_value=\$(curl -fsS http://127.0.0.1:9090/api/v1/query --get --data-urlencode 'query=up{job=\"${PROM_JOB}\",instance=\"${BENCH_RUST_INSTANCE}\"}' | jq -r '.data.result[0].value[1] // \"\"'); \
+             build_value=\$(curl -fsS http://127.0.0.1:9090/api/v1/query --get --data-urlencode 'query=pg_exporter_build_info{job=\"${PROM_JOB}\",instance=\"${BENCH_RUST_INSTANCE}\",version=\"${EXPECTED_EXPORTER_VERSION}\"}' | jq -r '.data.result[0].value[1] // \"\"'); \
+             rss_value=\$(curl -fsS http://127.0.0.1:9090/api/v1/query --get --data-urlencode 'query=pg_exporter_process_resident_memory_bytes{job=\"${PROM_JOB}\",instance=\"${BENCH_RUST_INSTANCE}\"}' | jq -r '.data.result[0].value[1] // \"\"'); \
+             if [ \"\${up_value}\" = 1 ] && [ \"\${build_value}\" = 1 ] && [ -n \"\${rss_value}\" ]; then \
+                 echo \"Prometheus target ready: up=\${up_value} version=${EXPECTED_EXPORTER_VERSION} rss_bytes=\${rss_value}\"; \
+                 exit 0; \
+             fi; \
+             sleep 2; \
+         done; \
+         echo 'Prometheus did not record a complete exporter scrape within 60 seconds' >&2; \
+         exit 1"
 }
 
 prepare_db() {
@@ -236,7 +375,9 @@ ACCESS_EXCLUSIVE_DB=""
 ACCESS_EXCLUSIVE_APP="pg_exporter_soak_table_lock_\${RUN_ID}"
 CONNECTION_MONITOR_PID=""
 CONNECTION_OUT="/tmp/pg_exporter_rust_soak_\${RUN_ID}_connections.csv"
+STATE_OUT="/tmp/pg_exporter_rust_soak_\${RUN_ID}_state.env"
 CONNECTION_BUDGET=5
+EXPORTER_DB_CLIENT_ADDR="${BENCH_RUST_DB_CLIENT_ADDR}"
 
 log() {
     printf '[%s] [soak:%s] %s\\n' "\$(date -u +%FT%TZ)" "\${RUN_ID}" "\$*"
@@ -404,7 +545,8 @@ monitor_exporter_connections() {
             "SELECT count(*)::bigint,
                     count(*) FILTER (WHERE wait_event_type = 'Lock')::bigint
              FROM pg_stat_activity
-             WHERE application_name = 'pg_exporter'")"; then
+             WHERE application_name = 'pg_exporter'
+               AND client_addr = inet '\${EXPORTER_DB_CLIENT_ADDR}'")"; then
             echo "\${ts},\${sample},0" >> "\${CONNECTION_OUT}"
         else
             echo "\${ts},,,1" >> "\${CONNECTION_OUT}"
@@ -420,16 +562,32 @@ stop_connection_monitor() {
     fi
 }
 
+restore_pgbench_reloptions() {
+    psql_exec "ALTER TABLE pgbench_accounts RESET (autovacuum_enabled, autovacuum_vacuum_scale_factor, autovacuum_vacuum_threshold, autovacuum_analyze_scale_factor, autovacuum_analyze_threshold);" || true
+}
+
 cleanup() {
+    local status=\$?
     stop_connection_monitor
     cleanup_access_exclusive_lock
+    restore_pgbench_reloptions
+    if (( status != 0 )); then
+        printf 'status=failed\nphase=failed\nphase_started_epoch=%s\nphase_ends_epoch=%s\n' \
+            "\$(date +%s)" "\$(date +%s)" > "\${STATE_OUT}"
+    fi
+    return "\${status}"
 }
 
 phase() {
     local name="\$1"
     local duration="\$2"
+    local started_at ends_at
     shift 2
 
+    started_at="\$(date +%s)"
+    ends_at=\$((started_at + duration))
+    printf 'status=running\nphase=%s\nphase_started_epoch=%s\nphase_ends_epoch=%s\n' \
+        "\${name}" "\${started_at}" "\${ends_at}" > "\${STATE_OUT}"
     log "PHASE_START name=\${name} duration_sec=\${duration}"
     "\$@"
     log "PHASE_END name=\${name}"
@@ -511,6 +669,8 @@ main() {
         log "ERROR exporter connection-budget validation failed"
         return 1
     fi
+    printf 'status=complete\nphase=complete\nphase_started_epoch=%s\nphase_ends_epoch=%s\n' \
+        "\$(date +%s)" "\$(date +%s)" > "\${STATE_OUT}"
     log "Soak finished"
 }
 
@@ -531,36 +691,46 @@ write_remote_sampler_script() {
 set -euo pipefail
 
 RUN_ID="${RUN_ID}"
-INSTANCE="10.246.1.90:9432"
-DB_NODE_INSTANCE="${BENCH_DB_SSH}:9100"
+PROM_JOB="${PROM_JOB}"
+INSTANCE="${BENCH_RUST_INSTANCE}"
+DB_NODE_INSTANCE="${BENCH_DB_NODE_INSTANCE}"
 PROM="http://127.0.0.1:9090/api/v1/query"
-METRICS_URL="http://\${INSTANCE}/metrics"
+METRICS_URL="${BENCH_RUST_METRICS_URL}"
 OUT="/tmp/pg_exporter_rust_soak_${RUN_ID}_prom.csv"
-STOP_AT=\$((\$(date +%s) + ${total_seconds}))
+STARTED_AT=\$(date +%s)
+WORKLOAD_SECONDS=$((HOURS * 3600))
+STOP_AT=\$((STARTED_AT + ${total_seconds}))
+SAMPLE_COUNT=0
 
 query_one() {
     local expr="\$1"
-    curl -fsS "\${PROM}" --get --data-urlencode "query=\${expr}" | jq -r '.data.result[0].value[1] // ""'
+    local response
+    if ! response="\$(curl -fsS "\${PROM}" --get --data-urlencode "query=\${expr}")"; then
+        printf '[%s] Prometheus query failed: %s\n' "\$(date -u +%FT%TZ)" "\${expr}" >&2
+        printf '\n'
+        return 0
+    fi
+    printf '%s' "\${response}" | jq -r '.data.result[0].value[1] // ""' 2>/dev/null || printf '\n'
 }
 
-echo "ts,exporter_up,pg_up,rss_bytes,cpu_percent,open_fds,scrape_duration_s,scrape_samples,dead_tup_max,locks_sum,long_query_age_s,autovacuum_ratio_max,direct_http_status,direct_scrape_duration_s,direct_curl_rc,statements_mean_duration_5m_s,statements_p95_duration_5m_s,statements_success,db_cpu_busy_ratio_5m,db_memory_available_bytes,db_load1" > "\${OUT}"
+echo "ts,exporter_up,pg_up,rss_bytes,cpu_percent,open_fds,scrape_duration_s,scrape_samples,dead_tup_max,locks_sum,long_query_age_s,autovacuum_ratio_max,direct_http_status,direct_scrape_duration_s,direct_curl_rc,statements_mean_duration_5m_s,statements_p95_duration_5m_s,statements_success,db_cpu_busy_ratio_5m,db_memory_available_bytes,db_load1,elapsed_seconds,remaining_seconds" > "\${OUT}"
 
 while (( \$(date +%s) < STOP_AT )); do
     ts="\$(date -u +%FT%TZ)"
-    exporter_up="\$(query_one "up{job=\"pg_exporter_rust\",instance=\"\${INSTANCE}\"}")"
-    pg_up="\$(query_one "pg_up{job=\"pg_exporter_rust\",instance=\"\${INSTANCE}\"}")"
-    rss_bytes="\$(query_one "pg_exporter_process_resident_memory_bytes{job=\"pg_exporter_rust\",instance=\"\${INSTANCE}\"}")"
-    cpu_percent="\$(query_one "pg_exporter_process_cpu_percent{job=\"pg_exporter_rust\",instance=\"\${INSTANCE}\"}")"
-    open_fds="\$(query_one "pg_exporter_process_open_fds{job=\"pg_exporter_rust\",instance=\"\${INSTANCE}\"}")"
-    scrape_duration="\$(query_one "scrape_duration_seconds{job=\"pg_exporter_rust\",instance=\"\${INSTANCE}\"}")"
-    scrape_samples="\$(query_one "scrape_samples_scraped{job=\"pg_exporter_rust\",instance=\"\${INSTANCE}\"}")"
-    dead_tup_max="\$(query_one "max(pg_stat_user_tables_n_dead_tup{job=\"pg_exporter_rust\",instance=\"\${INSTANCE}\"})")"
-    locks_sum="\$(query_one "sum(pg_locks_count{job=\"pg_exporter_rust\",instance=\"\${INSTANCE}\"})")"
-    long_query_age="\$(query_one "max(pg_stat_activity_oldest_query_age_seconds{job=\"pg_exporter_rust\",instance=\"\${INSTANCE}\"})")"
-    autovacuum_ratio_max="\$(query_one "max(pg_stat_user_tables_autovacuum_threshold_ratio{job=\"pg_exporter_rust\",instance=\"\${INSTANCE}\"})")"
-    statements_mean_duration="\$(query_one "sum(rate(pg_exporter_collector_scrape_duration_seconds_sum{job=\"pg_exporter_rust\",instance=\"\${INSTANCE}\",collector=\"statements\"}[5m])) / sum(rate(pg_exporter_collector_scrape_duration_seconds_count{job=\"pg_exporter_rust\",instance=\"\${INSTANCE}\",collector=\"statements\"}[5m]))")"
-    statements_p95_duration="\$(query_one "histogram_quantile(0.95, sum by (le) (rate(pg_exporter_collector_scrape_duration_seconds_bucket{job=\"pg_exporter_rust\",instance=\"\${INSTANCE}\",collector=\"statements\"}[5m])))")"
-    statements_success="\$(query_one "pg_exporter_collector_last_scrape_success{job=\"pg_exporter_rust\",instance=\"\${INSTANCE}\",collector=\"statements\"}")"
+    exporter_up="\$(query_one "up{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\"}")"
+    pg_up="\$(query_one "pg_up{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\"}")"
+    rss_bytes="\$(query_one "pg_exporter_process_resident_memory_bytes{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\"}")"
+    cpu_percent="\$(query_one "pg_exporter_process_cpu_percent{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\"}")"
+    open_fds="\$(query_one "pg_exporter_process_open_fds{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\"}")"
+    scrape_duration="\$(query_one "scrape_duration_seconds{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\"}")"
+    scrape_samples="\$(query_one "scrape_samples_scraped{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\"}")"
+    dead_tup_max="\$(query_one "max(pg_stat_user_tables_n_dead_tup{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\"})")"
+    locks_sum="\$(query_one "sum(pg_locks_count{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\"})")"
+    long_query_age="\$(query_one "max(pg_stat_activity_oldest_query_age_seconds{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\"})")"
+    autovacuum_ratio_max="\$(query_one "max(pg_stat_user_tables_autovacuum_threshold_ratio{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\"})")"
+    statements_mean_duration="\$(query_one "sum(rate(pg_exporter_collector_scrape_duration_seconds_sum{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\",collector=\"statements\"}[5m])) / sum(rate(pg_exporter_collector_scrape_duration_seconds_count{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\",collector=\"statements\"}[5m]))")"
+    statements_p95_duration="\$(query_one "histogram_quantile(0.95, sum by (le) (rate(pg_exporter_collector_scrape_duration_seconds_bucket{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\",collector=\"statements\"}[5m])))")"
+    statements_success="\$(query_one "pg_exporter_collector_last_scrape_success{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\",collector=\"statements\"}")"
     db_cpu_busy_ratio="\$(query_one "1 - avg(rate(node_cpu_seconds_total{instance=\"\${DB_NODE_INSTANCE}\",mode=\"idle\"}[5m]))")"
     db_memory_available="\$(query_one "node_memory_MemAvailable_bytes{instance=\"\${DB_NODE_INSTANCE}\"}")"
     db_load1="\$(query_one "node_load1{instance=\"\${DB_NODE_INSTANCE}\"}")"
@@ -578,7 +748,17 @@ while (( \$(date +%s) < STOP_AT )); do
             "\${ts}" "\${direct_http_status}" "\${direct_scrape_duration}" "\${direct_curl_rc}" >&2
     fi
 
-    echo "\${ts},\${exporter_up},\${pg_up},\${rss_bytes},\${cpu_percent},\${open_fds},\${scrape_duration},\${scrape_samples},\${dead_tup_max},\${locks_sum},\${long_query_age},\${autovacuum_ratio_max},\${direct_http_status},\${direct_scrape_duration},\${direct_curl_rc},\${statements_mean_duration},\${statements_p95_duration},\${statements_success},\${db_cpu_busy_ratio},\${db_memory_available},\${db_load1}" >> "\${OUT}"
+    now_epoch="\$(date +%s)"
+    elapsed_seconds=\$((now_epoch - STARTED_AT))
+    remaining_seconds=\$((WORKLOAD_SECONDS - elapsed_seconds))
+    if (( remaining_seconds < 0 )); then remaining_seconds=0; fi
+    echo "\${ts},\${exporter_up},\${pg_up},\${rss_bytes},\${cpu_percent},\${open_fds},\${scrape_duration},\${scrape_samples},\${dead_tup_max},\${locks_sum},\${long_query_age},\${autovacuum_ratio_max},\${direct_http_status},\${direct_scrape_duration},\${direct_curl_rc},\${statements_mean_duration},\${statements_p95_duration},\${statements_success},\${db_cpu_busy_ratio},\${db_memory_available},\${db_load1},\${elapsed_seconds},\${remaining_seconds}" >> "\${OUT}"
+    SAMPLE_COUNT=\$((SAMPLE_COUNT + 1))
+    if (( SAMPLE_COUNT % 15 == 0 )); then
+        printf '[%s] progress elapsed=%ss remaining=%ss exporter_cpu=%s%% exporter_rss=%sB exporter_fds=%s scrape=%ss direct_http=%s\n' \
+            "\${ts}" "\${elapsed_seconds}" "\${remaining_seconds}" "\${cpu_percent:-unknown}" \
+            "\${rss_bytes:-unknown}" "\${open_fds:-unknown}" "\${scrape_duration:-unknown}" "\${direct_http_status}"
+    fi
     sleep 60
 done
 EOF
@@ -587,7 +767,7 @@ EOF
 }
 
 start_remote_jobs() {
-    local workload_pid sampler_pid lock_database
+    local workload_pid sampler_pid lock_database source_commit dashboard_url
     lock_database="${DB_NAME}"
     if (( DB_COUNT > 1 )); then
         lock_database="${DB_NAME}_1"
@@ -599,6 +779,8 @@ start_remote_jobs() {
     local sampler_script="/tmp/pg_exporter_rust_soak_sampler_${RUN_ID}.sh"
     local sampler_log="/tmp/pg_exporter_rust_soak_sampler_${RUN_ID}.log"
     local sampler_pidfile="/tmp/pg_exporter_rust_soak_sampler_${RUN_ID}.pid"
+    source_commit=$(git -C "${SCRIPT_DIR}/../.." rev-parse HEAD)
+    dashboard_url="${BENCH_GRAFANA_URL}/d/pg-exp-soak-rust/pg-exporter-rust-soak-24h?orgId=1&from=now-6h&to=now&timezone=browser&refresh=30s"
 
     log "Starting phased workload on ${BENCH_DB_SSH}"
     workload_pid=$(ssh_run "${BENCH_DB_SSH}" \
@@ -632,6 +814,13 @@ db_scale=${DB_SCALE}
 bench_rust_ssh=${BENCH_RUST_SSH}
 bench_db_ssh=${BENCH_DB_SSH}
 bench_metrics_ssh=${BENCH_METRICS_SSH}
+prom_job=${PROM_JOB}
+bench_rust_instance=${BENCH_RUST_INSTANCE}
+bench_db_node_instance=${BENCH_DB_NODE_INSTANCE}
+bench_rust_metrics_url=${BENCH_RUST_METRICS_URL}
+bench_rust_db_client_addr=${BENCH_RUST_DB_CLIENT_ADDR}
+expected_exporter_version=${EXPECTED_EXPORTER_VERSION}
+source_commit=${source_commit}
 db_script=${db_script}
 db_log=${db_log}
 db_pid_file=${db_pid}
@@ -641,8 +830,9 @@ sampler_pid_file=${sampler_pidfile}
 lock_database=${lock_database}
 lock_application_name=pg_exporter_soak_table_lock_${RUN_ID}
 connection_sampler=/tmp/pg_exporter_rust_soak_${RUN_ID}_connections.csv
+state_file=/tmp/pg_exporter_rust_soak_${RUN_ID}_state.env
 connection_budget=5
-dashboard_url=http://10.246.1.93:3000/d/pg-exp-soak-rust/pg-exporter-rust-soak-24h?orgId=1&from=now-6h&to=now&timezone=browser&refresh=30s
+dashboard_url=${dashboard_url}
 started_at_utc=$(date -u +%FT%TZ)
 META
 
@@ -651,7 +841,7 @@ META
     echo "  Run ID: ${RUN_ID}"
     echo "  DB workload log: ssh ${BENCH_DB_SSH} 'tail -f ${db_log}'"
     echo "  Sampler log: ssh ${BENCH_METRICS_SSH} 'tail -f ${sampler_log}'"
-    echo "  Dashboard: http://10.246.1.93:3000/d/pg-exp-soak-rust/pg-exporter-rust-soak-24h?orgId=1&from=now-6h&to=now&timezone=browser&refresh=30s"
+    echo "  Dashboard: ${dashboard_url}"
     echo "  Metadata: ${LOCAL_ARTIFACT_ROOT}/${RUN_ID}/run-meta.txt"
     echo ""
 }
@@ -660,8 +850,13 @@ main() {
     parse_args "$@"
     validate_inputs
     preflight
+    if [[ "${PREFLIGHT_ONLY}" == true ]]; then
+        log "Preflight-only check complete; no remote state was changed"
+        return
+    fi
     deploy_dashboard
     configure_exporter
+    wait_for_prometheus_target
     prepare_db
     write_remote_workload_script
     write_remote_sampler_script

@@ -520,6 +520,64 @@
       ],
       "title": "Active Vacuum Progress",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-local"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "max": 1,
+          "min": 0,
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 52
+      },
+      "id": 17,
+      "targets": [
+        {
+          "expr": "1 - avg(rate(node_cpu_seconds_total{instance=\"10.246.1.92:9100\",mode=\"idle\"}[5m]))",
+          "legendFormat": "busy",
+          "refId": "A"
+        }
+      ],
+      "title": "Database Host CPU Busy",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-local"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 52
+      },
+      "id": 18,
+      "targets": [
+        {
+          "expr": "node_memory_MemAvailable_bytes{instance=\"10.246.1.92:9100\"}",
+          "legendFormat": "available",
+          "refId": "A"
+        }
+      ],
+      "title": "Database Host Available Memory",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",
