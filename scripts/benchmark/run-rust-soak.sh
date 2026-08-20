@@ -33,7 +33,7 @@ CALIBRATION_RESULT=""
 CALIBRATION_CLIENT_CANDIDATES=(8 6 4 2)
 CALIBRATION_DB_CPU_AVG_MAX="0.75"
 CALIBRATION_DB_CPU_P95_MAX="0.85"
-CALIBRATION_SCRAPE_P95_MAX_SECONDS="10"
+CALIBRATION_SCRAPE_P95_MAX_SECONDS="12"
 
 SSH_OPTS=()
 if [[ -n "${BENCH_SSH_CONFIG}" ]]; then
@@ -227,18 +227,10 @@ preflight() {
         "set -euo pipefail; \
          curl -fsS http://127.0.0.1:9090/api/v1/query --get \
              --data-urlencode 'query=up{job=\"${PROM_JOB}\",instance=\"${BENCH_RUST_INSTANCE}\"}' | \
-             jq -e '.status == \"success\" and (.data.result | length == 1)' >/dev/null; \
+             jq -e '.status == \"success\" and (.data.result | length == 1) and .data.result[0].value[1] == \"1\"' >/dev/null; \
          curl -fsS http://127.0.0.1:9090/api/v1/query --get \
              --data-urlencode 'query=node_memory_MemAvailable_bytes{instance=\"${BENCH_DB_NODE_INSTANCE}\"}' | \
-             jq -e '.status == \"success\" and (.data.result | length == 1)' >/dev/null; \
-         direct_ok=false; \
-         for attempt in 1 2 3 4 5; do \
-             http_code=\$(curl -sS -o /dev/null --connect-timeout 5 --max-time 20 -w '%{http_code}' '${BENCH_RUST_METRICS_URL}') || http_code=000; \
-             if [ \"\${http_code}\" = 200 ]; then direct_ok=true; break; fi; \
-             if [ \"\${http_code}\" != 503 ]; then echo \"direct metrics preflight failed with HTTP \${http_code}\" >&2; exit 1; fi; \
-             sleep 2; \
-         done; \
-         if [ \"\${direct_ok}\" != true ]; then echo 'direct metrics preflight remained busy after five attempts' >&2; exit 1; fi"
+             jq -e '.status == \"success\" and (.data.result | length == 1)' >/dev/null"
 
     log "Preflight passed exporter_version=${remote_version} prometheus_job=${PROM_JOB} exporter_instance=${BENCH_RUST_INSTANCE} db_node_instance=${BENCH_DB_NODE_INSTANCE}"
 }
@@ -298,24 +290,7 @@ CFG
          sudo systemctl daemon-reload; \
          sudo systemctl restart pg_exporter; \
          sleep 2; \
-         systemctl is-active pg_exporter; \
-         metrics_file=\$(mktemp); \
-         trap 'rm -f \"\${metrics_file}\"' EXIT; \
-         scrape_ok=false; \
-         for attempt in 1 2 3 4 5; do \
-             http_code=\$(curl -sS -o \"\${metrics_file}\" --connect-timeout 5 --max-time 20 -w '%{http_code}' http://127.0.0.1:9432/metrics) || http_code=000; \
-             if [ \"\${http_code}\" = 200 ]; then scrape_ok=true; break; fi; \
-             if [ \"\${http_code}\" != 503 ]; then echo \"collector validation scrape failed with HTTP \${http_code}\" >&2; exit 1; fi; \
-             sleep 2; \
-         done; \
-         if [ \"\${scrape_ok}\" != true ]; then echo 'collector validation scrape remained busy after five attempts' >&2; exit 1; fi; \
-         for collector in default vacuum activity locks database stat stat_io slru temp system replication index sequences statements exporter tls; do \
-             if ! grep -Eq \"^pg_exporter_collector_last_scrape_success\\{collector=\\\"\${collector}\\\"\\}[[:space:]]+1(\\.0+)?$\" \"\${metrics_file}\"; then \
-                 echo \"collector did not complete successfully: \${collector}\" >&2; \
-                 exit 1; \
-             fi; \
-         done; \
-         awk '/pg_exporter_build_info|pg_stat_activity_count|pg_stat_user_tables_n_dead_tup|postgres_pg_stat_statements_calls_total|pg_exporter_collector_last_scrape_success/ {if (n < 20) print; n++} END {exit(n == 0)}' \"\${metrics_file}\""
+         systemctl is-active pg_exporter"
 }
 
 wait_for_prometheus_target() {

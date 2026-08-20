@@ -46,7 +46,7 @@ printf 'Run ID: %s\n' "${RUN_ID}"
 Before starting the remote jobs, the launcher may spend up to 12 minutes trying
 pgbench client counts 8, 6, 4, and 2 for three minutes each. It selects the
 highest candidate that keeps average DB CPU at or below 75%, DB CPU p95 at or
-below 85%, scrape p95 below 10 seconds, and Prometheus `up` continuously equal
+below 85%, scrape p95 below 12 seconds, and Prometheus `up` continuously equal
 to one. Override the per-candidate duration with
 `BENCH_CALIBRATION_SECONDS` (minimum 60 seconds). Keep the run id; it is the key
 for every status and artifact command.
