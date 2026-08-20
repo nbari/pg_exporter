@@ -102,6 +102,12 @@ main() {
     parse_args "$@"
 
     local overall_status=0
+    local measurement_profile="legacy_adversarial"
+    local run_meta="${LOCAL_ARTIFACT_ROOT}/${RUN_ID}/run-meta.txt"
+    if [[ -f "${run_meta}" ]]; then
+        measurement_profile=$(sed -n 's/^measurement_profile=//p' "${run_meta}" | head -n 1)
+        measurement_profile="${measurement_profile:-legacy_adversarial}"
+    fi
     local db_log="/tmp/pg_exporter_rust_soak_${RUN_ID}.log"
     local db_pid="/tmp/pg_exporter_rust_soak_${RUN_ID}.pid"
     local sampler_log="/tmp/pg_exporter_rust_soak_sampler_${RUN_ID}.log"
@@ -158,15 +164,18 @@ main() {
     fi
 
     echo ""
-    echo "== ACCESS EXCLUSIVE session =="
-    ssh_run "${BENCH_DB_SSH}" \
+    echo "== Soak lock sessions =="
+    if ! ssh_run "${BENCH_DB_SSH}" \
         "set -euo pipefail; \
-         sudo -u postgres psql -d postgres -Atqc \"
-             SELECT datname, pid, state, COALESCE(wait_event_type, ''),
-                    floor(EXTRACT(EPOCH FROM (clock_timestamp() - xact_start)))::bigint
-             FROM pg_stat_activity
-             WHERE application_name = 'pg_exporter_soak_table_lock_${RUN_ID}'
-         \""
+         lock_count=\$(sudo -u postgres psql -d postgres -Atqc \"SELECT count(*)::bigint FROM pg_stat_activity WHERE application_name IN ('pg_exporter_soak_table_lock_${RUN_ID}', 'pg_exporter_soak_fault_${RUN_ID}')\"); \
+         if [ \"\${lock_count}\" -eq 0 ]; then \
+             echo none; \
+         else \
+             sudo -u postgres psql -d postgres -Atqc \"SELECT datname, pid, state, COALESCE(wait_event_type, ''), floor(EXTRACT(EPOCH FROM (clock_timestamp() - xact_start)))::bigint FROM pg_stat_activity WHERE application_name IN ('pg_exporter_soak_table_lock_${RUN_ID}', 'pg_exporter_soak_fault_${RUN_ID}')\"; \
+         fi; \
+         if [ '${measurement_profile}' = reliable_single_scraper_v2 ]; then test \"\${lock_count}\" -eq 0; fi"; then
+        overall_status=1
+    fi
 
     echo ""
     echo "== Metrics sampler =="
@@ -177,9 +186,10 @@ main() {
 
     echo ""
     echo "== Exporter resource trend =="
-    ssh_run "${BENCH_METRICS_SSH}" \
+    if ! ssh_run "${BENCH_METRICS_SSH}" \
         "set -euo pipefail; \
          if [ ! -f '${sampler_csv}' ]; then echo 'sampler CSV not found'; exit 1; fi; \
+         awk_status=0; \
          awk -F, 'NR == 1 { next } { \
              rows++; \
              if (\$2 == \"\") exporter_missing++; else if (\$2 + 0 != 1) exporter_down++; \
@@ -214,9 +224,13 @@ main() {
              printf \"cpu_percent avg=%.2f max=%.2f fds first=%d last=%d max=%d\\n\", \
                  cpu_samples ? cpu_sum / cpu_samples : 0, cpu_max, fd_first, fd_last, fd_max; \
              printf \"scrape_duration_s avg=%.4f max=%.4f\\n\", \
-                 scrape_samples ? scrape_sum / scrape_samples : 0, scrape_max \
-         }' '${sampler_csv}'; \
-         tail -n 3 '${sampler_csv}'"
+                 scrape_samples ? scrape_sum / scrape_samples : 0, scrape_max; \
+             exit(rows == 0 || exporter_down > 0 || exporter_missing > 0 || pg_down > 0 || pg_missing > 0) \
+         }' '${sampler_csv}' || awk_status=\$?; \
+         tail -n 3 '${sampler_csv}'; \
+         exit \"\${awk_status}\""; then
+        overall_status=1
+    fi
 
     echo ""
     echo "== Comparison signals =="
@@ -280,12 +294,16 @@ main() {
     ssh_run "${BENCH_METRICS_SSH}" \
         "set -euo pipefail; \
          if [ -f '${sampler_csv}' ]; then \
-             awk -F, 'NR > 1 { \
+             awk -F, 'NR > 1 && \$13 != \"\" { \
                  samples++; \
                  if (\$15 != 0 || \$13 == \"000\") failures++; \
                  if ((\$14 + 0) > max) max=\$14 + 0; \
                  status[\$13]++ \
              } END { \
+                 if (samples == 0) { \
+                     print \"disabled during measurement (Prometheus is the sole scraper)\"; \
+                     exit \
+                 } \
                  printf \"samples=%d timeouts=%d max_duration_s=%.3f statuses=\", samples, failures, max; \
                  for (code in status) printf \"%s:%d \", code, status[code]; \
                  print \"\" \

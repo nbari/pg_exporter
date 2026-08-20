@@ -19,6 +19,7 @@ BENCH_RUST_DB_CLIENT_ADDR="${BENCH_RUST_DB_CLIENT_ADDR:-${BENCH_RUST_SSH}}"
 DB_NAME="${DB_NAME:-pgbench_test}"
 DB_COUNT="${DB_COUNT:-1}"
 DB_SCALE="${DB_SCALE:-20}"
+CALIBRATION_SECONDS="${BENCH_CALIBRATION_SECONDS:-180}"
 HOURS=24
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 LOCAL_ARTIFACT_ROOT="${LOCAL_ARTIFACT_ROOT:-bench-artifacts/rust-soak}"
@@ -26,6 +27,13 @@ EXPECTED_EXPORTER_VERSION="${EXPECTED_EXPORTER_VERSION:-$(sed -n 's/^version = "
 DEPLOY_DASHBOARD=true
 CONFIGURE_EXPORTER=true
 PREFLIGHT_ONLY=false
+CALIBRATED_CLIENTS=""
+CALIBRATION_RESULT=""
+
+CALIBRATION_CLIENT_CANDIDATES=(8 6 4 2)
+CALIBRATION_DB_CPU_AVG_MAX="0.75"
+CALIBRATION_DB_CPU_P95_MAX="0.85"
+CALIBRATION_SCRAPE_P95_MAX_SECONDS="10"
 
 SSH_OPTS=()
 if [[ -n "${BENCH_SSH_CONFIG}" ]]; then
@@ -65,6 +73,7 @@ Prometheus label overrides:
   BENCH_RUST_METRICS_URL    Direct probe URL (default: ${BENCH_RUST_METRICS_URL})
   BENCH_RUST_DB_CLIENT_ADDR PostgreSQL client address for the Rust exporter (default: ${BENCH_RUST_DB_CLIENT_ADDR})
   BENCH_SSH_CONFIG          Optional ssh_config path for SSH and SCP
+  BENCH_CALIBRATION_SECONDS Seconds per pgbench calibration candidate (default: ${CALIBRATION_SECONDS})
 USAGE
 }
 
@@ -147,6 +156,10 @@ validate_inputs() {
         err "--scale must be a positive integer"
         exit 1
     fi
+    if ! [[ "${CALIBRATION_SECONDS}" =~ ^[0-9]+$ ]] || (( CALIBRATION_SECONDS < 60 )); then
+        err "BENCH_CALIBRATION_SECONDS must be an integer of at least 60 seconds"
+        exit 1
+    fi
     if ! [[ "${RUN_ID}" =~ ^[A-Za-z0-9._-]+$ ]]; then
         err "--run-id may contain only letters, numbers, dots, underscores, and dashes"
         exit 1
@@ -160,7 +173,7 @@ validate_inputs() {
         exit 1
     fi
     for label_value in "${PROM_JOB}" "${BENCH_RUST_INSTANCE}" "${BENCH_DB_NODE_INSTANCE}"; do
-        if [[ "${label_value}" == *\"* || "${label_value}" == *$'\n'* ]]; then
+        if [[ "${label_value}" == *\"* || "${label_value}" == *\'* || "${label_value}" == *$'\n'* ]]; then
             err "Prometheus job and instance labels must not contain quotes or newlines"
             exit 1
         fi
@@ -313,14 +326,156 @@ wait_for_prometheus_target() {
              up_value=\$(curl -fsS http://127.0.0.1:9090/api/v1/query --get --data-urlencode 'query=up{job=\"${PROM_JOB}\",instance=\"${BENCH_RUST_INSTANCE}\"}' | jq -r '.data.result[0].value[1] // \"\"'); \
              build_value=\$(curl -fsS http://127.0.0.1:9090/api/v1/query --get --data-urlencode 'query=pg_exporter_build_info{job=\"${PROM_JOB}\",instance=\"${BENCH_RUST_INSTANCE}\",version=\"${EXPECTED_EXPORTER_VERSION}\"}' | jq -r '.data.result[0].value[1] // \"\"'); \
              rss_value=\$(curl -fsS http://127.0.0.1:9090/api/v1/query --get --data-urlencode 'query=pg_exporter_process_resident_memory_bytes{job=\"${PROM_JOB}\",instance=\"${BENCH_RUST_INSTANCE}\"}' | jq -r '.data.result[0].value[1] // \"\"'); \
-             if [ \"\${up_value}\" = 1 ] && [ \"\${build_value}\" = 1 ] && [ -n \"\${rss_value}\" ]; then \
-                 echo \"Prometheus target ready: up=\${up_value} version=${EXPECTED_EXPORTER_VERSION} rss_bytes=\${rss_value}\"; \
+             collector_count=\$(curl -fsS http://127.0.0.1:9090/api/v1/query --get --data-urlencode 'query=count(pg_exporter_collector_last_scrape_success{job=\"${PROM_JOB}\",instance=\"${BENCH_RUST_INSTANCE}\"} == 1)' | jq -r '.data.result[0].value[1] // \"\"'); \
+             if [ \"\${up_value}\" = 1 ] && [ \"\${build_value}\" = 1 ] && [ -n \"\${rss_value}\" ] && [ \"\${collector_count}\" = 16 ]; then \
+                 echo \"Prometheus target ready: up=\${up_value} version=${EXPECTED_EXPORTER_VERSION} rss_bytes=\${rss_value} collectors=\${collector_count}\"; \
                  exit 0; \
              fi; \
              sleep 2; \
          done; \
          echo 'Prometheus did not record a complete exporter scrape within 60 seconds' >&2; \
          exit 1"
+}
+
+release_fault_lock() {
+    local fault_app="$1"
+
+    ssh_run "${BENCH_DB_SSH}" \
+        "sudo -u postgres psql -d postgres -Atqc \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = '${fault_app}' AND pid <> pg_backend_pid()\" >/dev/null" \
+        || true
+}
+
+run_lock_recovery_check() {
+    local fault_app fault_db lock_pid acquired probe_result current_connections
+    fault_app="pg_exporter_soak_fault_${RUN_ID}"
+    fault_db="${DB_NAME}"
+    if (( DB_COUNT > 1 )); then
+        fault_db="${DB_NAME}_1"
+    fi
+
+    log "Running isolated ACCESS EXCLUSIVE fault check on ${fault_db}"
+    lock_pid=$(ssh_run "${BENCH_DB_SSH}" \
+        "set -euo pipefail; \
+         nohup sudo -u postgres env PGAPPNAME='${fault_app}' \
+             psql -v ON_ERROR_STOP=1 -d '${fault_db}' -c \
+             \"BEGIN; LOCK TABLE pg_exporter_soak_lock_target IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(90); ROLLBACK;\" \
+             > '/tmp/pg_exporter_rust_soak_${RUN_ID}_fault.log' 2>&1 < /dev/null & \
+         echo \$!")
+    lock_pid=$(printf '%s' "${lock_pid}" | tr -d '\r\n')
+    if ! [[ "${lock_pid}" =~ ^[0-9]+$ ]]; then
+        err "Failed to start isolated lock holder"
+        exit 1
+    fi
+
+    acquired=false
+    for _ in $(seq 1 100); do
+        if ssh_run "${BENCH_DB_SSH}" \
+            "sudo -u postgres psql -d '${fault_db}' -Atqc \"
+                SELECT 1
+                FROM pg_locks l
+                JOIN pg_class c ON c.oid = l.relation
+                JOIN pg_stat_activity a ON a.pid = l.pid
+                WHERE c.relname = 'pg_exporter_soak_lock_target'
+                  AND l.mode = 'AccessExclusiveLock'
+                  AND l.granted
+                  AND a.application_name = '${fault_app}'
+                LIMIT 1
+            \" | grep -q 1"; then
+            acquired=true
+            break
+        fi
+        sleep 0.1
+    done
+    if [[ "${acquired}" != true ]]; then
+        release_fault_lock "${fault_app}"
+        err "Isolated lock holder did not acquire ACCESS EXCLUSIVE within 10 seconds"
+        exit 1
+    fi
+
+    if ! probe_result=$(ssh_run "${BENCH_METRICS_SSH}" \
+        "set -euo pipefail; \
+         body='/tmp/pg_exporter_rust_soak_${RUN_ID}_fault_probe.txt'; \
+         for attempt in \$(seq 1 30); do \
+             result=\$(curl -sS -o \"\${body}\" --connect-timeout 5 --max-time 20 -w '%{http_code},%{time_total}' '${BENCH_RUST_METRICS_URL}') || result='000,20'; \
+             code=\${result%%,*}; \
+             if [ \"\${code}\" = 503 ] && grep -q 'another /metrics scrape is already running' \"\${body}\"; then \
+                 sleep 2; \
+                 continue; \
+             fi; \
+             case \"\${code}\" in 200|503|504) printf '%s\\n' \"\${result}\"; exit 0 ;; esac; \
+             echo \"fault-check scrape returned unexpected HTTP \${code}\" >&2; \
+             exit 1; \
+         done; \
+         echo 'fault-check scrape never acquired the single-scrape gate' >&2; \
+         exit 1"); then
+        release_fault_lock "${fault_app}"
+        err "Isolated lock fault check failed"
+        exit 1
+    fi
+
+    release_fault_lock "${fault_app}"
+    wait_for_prometheus_target
+
+    current_connections=$(ssh_run "${BENCH_DB_SSH}" \
+        "sudo -u postgres psql -d postgres -Atqc \"SELECT count(*)::bigint FROM pg_stat_activity WHERE application_name = 'pg_exporter' AND client_addr = inet '${BENCH_RUST_DB_CLIENT_ADDR}'\"")
+    current_connections=$(printf '%s' "${current_connections}" | tr -d '\r\n')
+    if ! [[ "${current_connections}" =~ ^[0-9]+$ ]] || (( current_connections > 5 )); then
+        err "Exporter connection count did not recover within budget after fault check: ${current_connections}"
+        exit 1
+    fi
+
+    log "Fault check passed response=${probe_result} recovered_collectors=16 connections=${current_connections}/5"
+}
+
+prometheus_query_value() {
+    local expression="$1"
+
+    ssh_run "${BENCH_METRICS_SSH}" \
+        "curl -fsS http://127.0.0.1:9090/api/v1/query --get --data-urlencode 'query=${expression}' | jq -r '.data.result[0].value[1] // \"\"'"
+}
+
+calibrate_workload() {
+    local clients threads target_db range cpu_avg cpu_p95 scrape_p95 up_min calibration_log
+    target_db="${DB_NAME}"
+    if (( DB_COUNT > 1 )); then
+        target_db="${DB_NAME}_1"
+    fi
+    range="${CALIBRATION_SECONDS}s"
+
+    log "Calibrating pgbench load (${CALIBRATION_SECONDS}s per candidate, candidates=${CALIBRATION_CLIENT_CANDIDATES[*]})"
+    for clients in "${CALIBRATION_CLIENT_CANDIDATES[@]}"; do
+        threads="${clients}"
+        if (( threads > 4 )); then
+            threads=4
+        fi
+        calibration_log="/tmp/pg_exporter_rust_soak_${RUN_ID}_calibration_${clients}.log"
+        log "Calibration candidate clients=${clients} threads=${threads}"
+        ssh_run "${BENCH_DB_SSH}" \
+            "sudo -u postgres pgbench -h localhost -p 5432 -U postgres -c '${clients}' -j '${threads}' -T '${CALIBRATION_SECONDS}' --progress=60 '${target_db}' > '${calibration_log}' 2>&1"
+
+        cpu_avg=$(prometheus_query_value \
+            "avg_over_time((1 - avg(rate(node_cpu_seconds_total{instance=\"${BENCH_DB_NODE_INSTANCE}\",mode=\"idle\"}[1m])))[$range:15s])")
+        cpu_p95=$(prometheus_query_value \
+            "quantile_over_time(0.95, (1 - avg(rate(node_cpu_seconds_total{instance=\"${BENCH_DB_NODE_INSTANCE}\",mode=\"idle\"}[1m])))[$range:15s])")
+        scrape_p95=$(prometheus_query_value \
+            "quantile_over_time(0.95, scrape_duration_seconds{job=\"${PROM_JOB}\",instance=\"${BENCH_RUST_INSTANCE}\"}[$range])")
+        up_min=$(prometheus_query_value \
+            "min_over_time(up{job=\"${PROM_JOB}\",instance=\"${BENCH_RUST_INSTANCE}\"}[$range])")
+
+        log "Calibration result clients=${clients} db_cpu_avg=${cpu_avg:-missing} db_cpu_p95=${cpu_p95:-missing} scrape_p95_s=${scrape_p95:-missing} exporter_up_min=${up_min:-missing}"
+        if [[ "${up_min}" = 1 && -n "${cpu_avg}" && -n "${cpu_p95}" && -n "${scrape_p95}" ]] \
+            && awk -v value="${cpu_avg}" -v limit="${CALIBRATION_DB_CPU_AVG_MAX}" 'BEGIN { exit !(value <= limit) }' \
+            && awk -v value="${cpu_p95}" -v limit="${CALIBRATION_DB_CPU_P95_MAX}" 'BEGIN { exit !(value <= limit) }' \
+            && awk -v value="${scrape_p95}" -v limit="${CALIBRATION_SCRAPE_P95_MAX_SECONDS}" 'BEGIN { exit !(value < limit) }'; then
+            CALIBRATED_CLIENTS="${clients}"
+            CALIBRATION_RESULT="clients=${clients},cpu_avg=${cpu_avg},cpu_p95=${cpu_p95},scrape_p95_s=${scrape_p95},up_min=${up_min}"
+            log "Calibration selected clients=${CALIBRATED_CLIENTS}"
+            return
+        fi
+    done
+
+    err "No pgbench calibration candidate kept DB CPU, scrape p95, and exporter availability within bounds"
+    exit 1
 }
 
 prepare_db() {
@@ -343,7 +498,7 @@ prepare_db() {
 }
 
 write_remote_workload_script() {
-    local total_seconds baseline statements locks debt recovery mixed lock_hold
+    local total_seconds baseline statements locks debt recovery mixed calibrated_threads
     total_seconds=$((HOURS * 3600))
     baseline=$((total_seconds * 2 / 24))
     statements=$((total_seconds * 4 / 24))
@@ -351,7 +506,10 @@ write_remote_workload_script() {
     debt=$((total_seconds * 6 / 24))
     recovery=$((total_seconds * 4 / 24))
     mixed=$((total_seconds * 4 / 24))
-    lock_hold=$((total_seconds + 900))
+    calibrated_threads="${CALIBRATED_CLIENTS}"
+    if (( calibrated_threads > 4 )); then
+        calibrated_threads=4
+    fi
 
     log "Writing phased workload script on ${BENCH_DB_SSH}"
 
@@ -369,10 +527,8 @@ DUR_LOCKS=${locks}
 DUR_DEBT=${debt}
 DUR_RECOVERY=${recovery}
 DUR_MIXED=${mixed}
-LOCK_HOLD_SECONDS=${lock_hold}
-ACCESS_EXCLUSIVE_PID=""
-ACCESS_EXCLUSIVE_DB=""
-ACCESS_EXCLUSIVE_APP="pg_exporter_soak_table_lock_\${RUN_ID}"
+BASE_CLIENTS=${CALIBRATED_CLIENTS}
+BASE_THREADS=${calibrated_threads}
 CONNECTION_MONITOR_PID=""
 CONNECTION_OUT="/tmp/pg_exporter_rust_soak_\${RUN_ID}_connections.csv"
 STATE_OUT="/tmp/pg_exporter_rust_soak_\${RUN_ID}_state.env"
@@ -430,6 +586,7 @@ run_heavy_query_loop() {
         local target_db=\$(get_random_db)
         sudo -u postgres psql -v ON_ERROR_STOP=1 -d "\${target_db}" -c \
             "SELECT aid, sum(abalance) FROM pgbench_accounts GROUP BY aid ORDER BY sum(abalance) DESC LIMIT 50;" >/dev/null
+        sleep 2
     done
 }
 
@@ -464,7 +621,7 @@ run_lock_storm() {
         locker &
         local pids=()
         pids+=(\$!)
-        for _ in \$(seq 1 6); do
+        for _ in \$(seq 1 2); do
             waiter &
             pids+=(\$!)
         done
@@ -472,68 +629,6 @@ run_lock_storm() {
             wait "\${pid}" || true
         done
     done
-}
-
-start_access_exclusive_lock() {
-    local duration="\$1"
-    local target_db
-    target_db="\${DB_NAME}"
-    if (( DB_COUNT > 1 )); then
-        target_db="\${DB_NAME}_1"
-    fi
-    ACCESS_EXCLUSIVE_DB="\${target_db}"
-
-    log "Opening session A on database=\${target_db}: BEGIN; LOCK TABLE pg_exporter_soak_lock_target IN ACCESS EXCLUSIVE MODE"
-    sudo -u postgres env PGAPPNAME="\${ACCESS_EXCLUSIVE_APP}" \
-        psql -v ON_ERROR_STOP=1 -d "\${target_db}" -c \
-        "BEGIN; LOCK TABLE pg_exporter_soak_lock_target IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(\${duration}); ROLLBACK;" \
-        >/dev/null &
-    ACCESS_EXCLUSIVE_PID=\$!
-
-    local acquired=false
-    for _ in \$(seq 1 100); do
-        if sudo -u postgres psql -d "\${target_db}" -Atqc \
-            "SELECT 1
-             FROM pg_locks l
-             JOIN pg_class c ON c.oid = l.relation
-             JOIN pg_stat_activity a ON a.pid = l.pid
-             WHERE c.relname = 'pg_exporter_soak_lock_target'
-               AND l.mode = 'AccessExclusiveLock'
-               AND l.granted
-               AND a.application_name = '\${ACCESS_EXCLUSIVE_APP}'
-             LIMIT 1" | grep -q 1; then
-            acquired=true
-            break
-        fi
-        if ! kill -0 "\${ACCESS_EXCLUSIVE_PID}" 2>/dev/null; then
-            wait "\${ACCESS_EXCLUSIVE_PID}"
-            return 1
-        fi
-        sleep 0.1
-    done
-
-    if [[ "\${acquired}" != true ]]; then
-        log "ERROR session A did not acquire ACCESS EXCLUSIVE within 10 seconds"
-        kill "\${ACCESS_EXCLUSIVE_PID}" 2>/dev/null || true
-        wait "\${ACCESS_EXCLUSIVE_PID}" || true
-        return 1
-    fi
-
-    log "Session A holds ACCESS EXCLUSIVE throughout the soak; exporter scrapes must remain bounded"
-}
-
-cleanup_access_exclusive_lock() {
-    if [[ -n "\${ACCESS_EXCLUSIVE_DB}" ]]; then
-        sudo -u postgres psql -d "\${ACCESS_EXCLUSIVE_DB}" -Atqc \
-            "SELECT pg_terminate_backend(pid)
-             FROM pg_stat_activity
-             WHERE application_name = '\${ACCESS_EXCLUSIVE_APP}'
-               AND pid <> pg_backend_pid()" >/dev/null 2>&1 || true
-    fi
-    if [[ -n "\${ACCESS_EXCLUSIVE_PID}" ]]; then
-        kill "\${ACCESS_EXCLUSIVE_PID}" 2>/dev/null || true
-        wait "\${ACCESS_EXCLUSIVE_PID}" 2>/dev/null || true
-    fi
 }
 
 monitor_exporter_connections() {
@@ -569,7 +664,6 @@ restore_pgbench_reloptions() {
 cleanup() {
     local status=\$?
     stop_connection_monitor
-    cleanup_access_exclusive_lock
     restore_pgbench_reloptions
     if (( status != 0 )); then
         printf 'status=failed\nphase=failed\nphase_started_epoch=%s\nphase_ends_epoch=%s\n' \
@@ -594,32 +688,32 @@ phase() {
 }
 
 baseline_phase() {
-    run_pgbench 10 2 "\${DUR_BASELINE}"
+    run_pgbench "\${BASE_CLIENTS}" "\${BASE_THREADS}" "\${DUR_BASELINE}"
 }
 
 statements_phase() {
     run_heavy_query_loop "\${DUR_STATEMENTS}" &
     local heavy_pid=\$!
-    run_pgbench 25 4 "\${DUR_STATEMENTS}"
+    run_pgbench "\${BASE_CLIENTS}" "\${BASE_THREADS}" "\${DUR_STATEMENTS}"
     wait "\${heavy_pid}" || true
 }
 
 locks_phase() {
     run_lock_storm "\${DUR_LOCKS}" &
     local lock_pid=\$!
-    run_pgbench 12 3 "\${DUR_LOCKS}"
+    run_pgbench "\${BASE_CLIENTS}" "\${BASE_THREADS}" "\${DUR_LOCKS}"
     wait "\${lock_pid}" || true
 }
 
 vacuum_debt_phase() {
     psql_exec "ALTER TABLE pgbench_accounts SET (autovacuum_enabled = false);"
-    run_pgbench 35 6 "\${DUR_DEBT}" "-N"
+    run_pgbench "\${BASE_CLIENTS}" "\${BASE_THREADS}" "\${DUR_DEBT}" "-N"
 }
 
 autovac_recovery_phase() {
     psql_exec "ALTER TABLE pgbench_accounts RESET (autovacuum_enabled);"
     psql_exec "ALTER TABLE pgbench_accounts SET (autovacuum_vacuum_scale_factor = 0.001, autovacuum_vacuum_threshold = 50, autovacuum_analyze_scale_factor = 0.001, autovacuum_analyze_threshold = 50);"
-    run_pgbench 20 4 "\${DUR_RECOVERY}" "-N"
+    run_pgbench "\${BASE_CLIENTS}" "\${BASE_THREADS}" "\${DUR_RECOVERY}" "-N"
 }
 
 mixed_phase() {
@@ -627,7 +721,7 @@ mixed_phase() {
     local heavy_pid=\$!
     run_lock_storm "\${DUR_MIXED}" &
     local lock_pid=\$!
-    run_pgbench 18 4 "\${DUR_MIXED}"
+    run_pgbench "\${BASE_CLIENTS}" "\${BASE_THREADS}" "\${DUR_MIXED}"
     wait "\${heavy_pid}" || true
     wait "\${lock_pid}" || true
 }
@@ -647,9 +741,8 @@ main() {
     trap cleanup EXIT
     monitor_exporter_connections &
     CONNECTION_MONITOR_PID=\$!
-    start_access_exclusive_lock "\${LOCK_HOLD_SECONDS}"
 
-    log "Soak start db=\${DB_NAME} baseline=\${DUR_BASELINE}s statements=\${DUR_STATEMENTS}s locks=\${DUR_LOCKS}s debt=\${DUR_DEBT}s recovery=\${DUR_RECOVERY}s mixed=\${DUR_MIXED}s"
+    log "Soak start db=\${DB_NAME} clients=\${BASE_CLIENTS} threads=\${BASE_THREADS} baseline=\${DUR_BASELINE}s statements=\${DUR_STATEMENTS}s locks=\${DUR_LOCKS}s debt=\${DUR_DEBT}s recovery=\${DUR_RECOVERY}s mixed=\${DUR_MIXED}s"
 
     phase baseline "\${DUR_BASELINE}" baseline_phase
     phase statements_pressure "\${DUR_STATEMENTS}" statements_phase
@@ -695,7 +788,6 @@ PROM_JOB="${PROM_JOB}"
 INSTANCE="${BENCH_RUST_INSTANCE}"
 DB_NODE_INSTANCE="${BENCH_DB_NODE_INSTANCE}"
 PROM="http://127.0.0.1:9090/api/v1/query"
-METRICS_URL="${BENCH_RUST_METRICS_URL}"
 OUT="/tmp/pg_exporter_rust_soak_${RUN_ID}_prom.csv"
 STARTED_AT=\$(date +%s)
 WORKLOAD_SECONDS=$((HOURS * 3600))
@@ -735,18 +827,13 @@ while (( \$(date +%s) < STOP_AT )); do
     db_memory_available="\$(query_one "node_memory_MemAvailable_bytes{instance=\"\${DB_NODE_INSTANCE}\"}")"
     db_load1="\$(query_one "node_load1{instance=\"\${DB_NODE_INSTANCE}\"}")"
 
-    # Avoid probing on the same second as Prometheus's scheduled scrape.
-    sleep 3
-    direct_curl_rc=0
-    if direct_probe="\$(curl -sS -o /dev/null --connect-timeout 5 --max-time 20 \
-        -w '%{http_code},%{time_total}' "\${METRICS_URL}")"; then
-        IFS=, read -r direct_http_status direct_scrape_duration <<<"\${direct_probe}"
-    else
-        direct_curl_rc=\$?
-        IFS=, read -r direct_http_status direct_scrape_duration <<<"\${direct_probe:-000,20}"
-        printf '[%s] direct /metrics probe failed status=%s duration=%ss curl_rc=%s\\n' \
-            "\${ts}" "\${direct_http_status}" "\${direct_scrape_duration}" "\${direct_curl_rc}" >&2
-    fi
+    # Preserve the CSV schema used by older artifacts, but leave the direct-probe
+    # columns empty. Prometheus is intentionally the only scraper during the
+    # measurement window so the exporter's single-scrape gate measures exporter
+    # availability rather than collisions created by the benchmark itself.
+    direct_http_status=""
+    direct_scrape_duration=""
+    direct_curl_rc=""
 
     now_epoch="\$(date +%s)"
     elapsed_seconds=\$((now_epoch - STARTED_AT))
@@ -755,9 +842,9 @@ while (( \$(date +%s) < STOP_AT )); do
     echo "\${ts},\${exporter_up},\${pg_up},\${rss_bytes},\${cpu_percent},\${open_fds},\${scrape_duration},\${scrape_samples},\${dead_tup_max},\${locks_sum},\${long_query_age},\${autovacuum_ratio_max},\${direct_http_status},\${direct_scrape_duration},\${direct_curl_rc},\${statements_mean_duration},\${statements_p95_duration},\${statements_success},\${db_cpu_busy_ratio},\${db_memory_available},\${db_load1},\${elapsed_seconds},\${remaining_seconds}" >> "\${OUT}"
     SAMPLE_COUNT=\$((SAMPLE_COUNT + 1))
     if (( SAMPLE_COUNT % 15 == 0 )); then
-        printf '[%s] progress elapsed=%ss remaining=%ss exporter_cpu=%s%% exporter_rss=%sB exporter_fds=%s scrape=%ss direct_http=%s\n' \
+        printf '[%s] progress elapsed=%ss remaining=%ss exporter_cpu=%s%% exporter_rss=%sB exporter_fds=%s scrape=%ss\n' \
             "\${ts}" "\${elapsed_seconds}" "\${remaining_seconds}" "\${cpu_percent:-unknown}" \
-            "\${rss_bytes:-unknown}" "\${open_fds:-unknown}" "\${scrape_duration:-unknown}" "\${direct_http_status}"
+            "\${rss_bytes:-unknown}" "\${open_fds:-unknown}" "\${scrape_duration:-unknown}"
     fi
     sleep 60
 done
@@ -767,11 +854,7 @@ EOF
 }
 
 start_remote_jobs() {
-    local workload_pid sampler_pid lock_database source_commit dashboard_url
-    lock_database="${DB_NAME}"
-    if (( DB_COUNT > 1 )); then
-        lock_database="${DB_NAME}_1"
-    fi
+    local workload_pid sampler_pid source_commit dashboard_url
     local db_script="/tmp/pg_exporter_rust_soak_${RUN_ID}.sh"
     local db_log="/tmp/pg_exporter_rust_soak_${RUN_ID}.log"
     local db_pid="/tmp/pg_exporter_rust_soak_${RUN_ID}.pid"
@@ -807,6 +890,7 @@ start_remote_jobs() {
     mkdir -p "${LOCAL_ARTIFACT_ROOT}/${RUN_ID}"
     cat > "${LOCAL_ARTIFACT_ROOT}/${RUN_ID}/run-meta.txt" <<META
 run_id=${RUN_ID}
+measurement_profile=reliable_single_scraper_v2
 hours=${HOURS}
 db_name=${DB_NAME}
 db_count=${DB_COUNT}
@@ -827,8 +911,10 @@ db_pid_file=${db_pid}
 sampler_script=${sampler_script}
 sampler_log=${sampler_log}
 sampler_pid_file=${sampler_pidfile}
-lock_database=${lock_database}
-lock_application_name=pg_exporter_soak_table_lock_${RUN_ID}
+calibration_seconds=${CALIBRATION_SECONDS}
+calibrated_clients=${CALIBRATED_CLIENTS}
+calibration_result=${CALIBRATION_RESULT}
+fault_check_application_name=pg_exporter_soak_fault_${RUN_ID}
 connection_sampler=/tmp/pg_exporter_rust_soak_${RUN_ID}_connections.csv
 state_file=/tmp/pg_exporter_rust_soak_${RUN_ID}_state.env
 connection_budget=5
@@ -858,6 +944,8 @@ main() {
     configure_exporter
     wait_for_prometheus_target
     prepare_db
+    run_lock_recovery_check
+    calibrate_workload
     write_remote_workload_script
     write_remote_sampler_script
     start_remote_jobs

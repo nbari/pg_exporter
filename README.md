@@ -388,7 +388,13 @@ For long-running benchmark VM soak tests (Rust exporter only), use:
 
     ./scripts/benchmark/run-rust-soak.sh --hours 24
 
-This orchestrates a phased 24h workload (statements, locks/activity, vacuum debt, autovacuum recovery, mixed churn), deploys a dedicated Grafana soak dashboard, and starts a Prometheus sampler for post-run analysis.
+This first verifies recovery from a bounded lock fault and calibrates pgbench to
+leave database CPU and scrape headroom. It then orchestrates a phased 24h
+workload (statements, locks/activity, vacuum debt, autovacuum recovery, mixed
+churn), deploys a dedicated Grafana soak dashboard, and uses Prometheus as the
+sole continuous `/metrics` scraper. See
+[scripts/benchmark/README.md](scripts/benchmark/README.md) for the acceptance
+criteria and artifact workflow.
 
 For reclaiming physical space:
 
