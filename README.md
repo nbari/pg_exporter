@@ -116,14 +116,6 @@ includes `pg_read_all_settings`, `pg_read_all_stats`, and `pg_stat_scan_tables`;
 sensitive operational information such as other users' query text, so reserve the login for
 the exporter.
 
-On PostgreSQL versions that provide `pg_use_reserved_connections`, do not grant it to the
-exporter (and revoke it if necessary). A `NOSUPERUSER` role without that membership cannot
-consume `superuser_reserved_connections`:
-
-```sql
-REVOKE pg_use_reserved_connections FROM postgres_exporter;
-```
-
 Verify the effective role configuration:
 
 ```sql
@@ -144,6 +136,82 @@ SELECT pg_has_role('postgres_exporter', 'pg_monitor', 'USAGE') AS has_pg_monitor
 
 Expected results include `rolsuper = false`, `rolinherit = true`, `rolconnlimit = 5`, and
 `has_pg_monitor = true`.
+
+#### Connection exhaustion and reserved monitoring slots
+
+`CONNECTION LIMIT 5` is a ceiling for the exporter role; it does **not** reserve five
+cluster-wide connection slots. If ordinary clients consume all available slots, the exporter
+cannot connect either. The exporter remains reachable, but reports `pg_up 0` and cannot
+refresh database-derived metrics. See [Scrape Behavior](#scrape-behavior) for the exact HTTP
+and metric semantics.
+
+There are two valid policies:
+
+* **Capacity-first (conservative default).** Do not grant reserved-connection access. The
+  exporter competes for ordinary slots like an application client, so monitoring cannot use
+  capacity deliberately reserved for privileged operational roles. The tradeoff is that
+  connection exhaustion produces `pg_up 0` and hides the metrics that would help diagnose
+  the exhaustion.
+* **Observability-first (PostgreSQL 16+).** Reserve enough slots for the exporter and grant
+  it `pg_use_reserved_connections`. Collection can then continue after ordinary connection
+  slots are exhausted. This is a limited admission privilege, not `SUPERUSER`, but the
+  reserved slots reduce how much of `max_connections` ordinary roles can fill.
+
+PostgreSQL 16 added [`reserved_connections`](https://www.postgresql.org/docs/16/runtime-config-connection.html)
+as a second reserve tier alongside the existing `superuser_reserved_connections`. The new
+tier is available to superusers and roles with `pg_use_reserved_connections`; the final
+superuser tier remains available **only** to superusers, whether or not the exporter has the
+reserved-connection role. The conservative policy keeps monitoring out of the general
+operational reserve; it is not needed to protect the final superuser reserve, which
+PostgreSQL protects independently. The default `reserved_connections = 0` reserves no slots,
+so granting the role alone has no effect.
+
+For one exporter using the default connection budget (`3 + 2 = 5`), an
+observability-first configuration is:
+
+```ini
+# postgresql.conf or the managed-service parameter group
+reserved_connections = 5
+# Keep a separate nonzero emergency reserve for administrators (3 is the default).
+superuser_reserved_connections = 3
+```
+
+`reserved_connections` is a server-start setting, so apply the managed-service parameter
+group or configuration change and restart PostgreSQL. Ensure `max_connections` is greater
+than the sum of both reserve tiers. If a managed provider does not expose this setting or
+allow the predefined-role grant, use the capacity-first policy and preserve ordinary
+connection headroom instead. Otherwise, grant the predefined role:
+
+```sql
+GRANT pg_use_reserved_connections TO postgres_exporter;
+
+SELECT pg_has_role(
+    'postgres_exporter',
+    'pg_use_reserved_connections',
+    'USAGE'
+) AS can_use_reserved_connections;
+```
+
+Keep `CONNECTION LIMIT 5` as the exporter's upper bound. Reserved slots are shared by every
+role with `pg_use_reserved_connections`; they are not dedicated to one role. To make the five
+slots effectively available to one exporter, restrict membership accordingly. For multiple
+exporter processes or a different `--collectors.max-db-concurrency N`, size the protected
+capacity for their total peak (`3 + N` per process) and size the shared role connection limit
+consistently.
+
+To return to the capacity-first policy, revoke the membership; no restart is needed for the
+role change:
+
+```sql
+REVOKE pg_use_reserved_connections FROM postgres_exporter;
+```
+
+PostgreSQL 15 and older provide only `superuser_reserved_connections`. Do not make the
+exporter a superuser to use those slots. Instead, retain ordinary connection headroom and
+limit application pools (or use a connection pooler) so monitoring can still connect. See
+the PostgreSQL documentation for
+[`pg_use_reserved_connections`](https://www.postgresql.org/docs/16/predefined-roles.html)
+and the [PostgreSQL 15 connection settings](https://www.postgresql.org/docs/15/runtime-config-connection.html).
 
 For local socket authentication, prefer `peer` over `trust`. This requires a matching system
 user named `postgres_exporter`.
@@ -357,7 +425,9 @@ immediately with SQLSTATE `53300` (it does not queue and waits for nothing). Set
   its limit and can reject each other's logins even while each stays within its own budget.
 
 Either way, keep enough cluster-wide `max_connections` headroom; the role limit is a
-backstop, not a substitute for the exporter's own concurrency bound.
+backstop, not a substitute for the exporter's own concurrency bound. If monitoring must
+continue when ordinary slots are exhausted, see
+[Connection exhaustion and reserved monitoring slots](#connection-exhaustion-and-reserved-monitoring-slots).
 
 For comprehensive local observability testing with Prometheus and Grafana, run:
 
@@ -423,9 +493,14 @@ This collectors are enabled by default:
 `pg_exporter` keeps `/metrics` scrapeable across plain PostgreSQL outages, while failing
 visibly when the current collector data cannot be trusted:
 
-* **HTTP server availability** - The exporter can start and bind even if PostgreSQL is down.
-* **Database down** - `/metrics` returns `200` with `pg_up 0` and exporter-status metrics only.
-* **Successful database scrapes** - `/metrics` returns `200` after the current collector scrape completes.
+* **Exporter unavailable** - Prometheus cannot scrape the HTTP endpoint and records its own
+  target-level `up` metric as `0`; no `pg_up` sample is received.
+* **PostgreSQL unavailable to the exporter** - This includes a stopped server, network or
+  authentication failure, and exhausted connection slots. `/metrics` returns `200` with
+  `pg_up 0` and `pg_exporter_build_info` only, so Prometheus records target-level `up 1` while
+  `pg_up` is `0`.
+* **Successful database scrapes** - `/metrics` returns `200` with `pg_up 1` after the current
+  collector scrape completes.
 * **Failed collector scrapes** - concurrent scrapes, collector/query failures, and encoding failures return `503`; whole-scrape timeouts return `504`.
 * **No stale collector metrics** - failed collector scrapes return an error body, and database-down scrapes filter out any previous collector snapshot.
 
