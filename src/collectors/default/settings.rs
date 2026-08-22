@@ -106,13 +106,9 @@ impl SettingsCollector {
             let setting: String = row.try_get("setting")?;
             let unit: Option<String> = row.try_get("unit").ok();
 
-            let mut value: i64 = setting.parse::<i64>().map_or(
-                match setting.as_str() {
-                    "on" => 1,
-                    _ => 0,
-                },
-                |v| v,
-            );
+            let mut value: i64 = setting
+                .parse::<i64>()
+                .unwrap_or(i64::from(setting == "on"));
 
             // Convert memory settings to bytes based on their units.
             //

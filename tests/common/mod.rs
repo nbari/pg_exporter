@@ -574,12 +574,9 @@ pub fn container_runtime_available() -> bool {
 /// Whether a container runtime is required (CI or explicit opt-in) rather than optional.
 #[must_use]
 pub fn should_require_container_runtime() -> bool {
-    let in_ci = env::var("CI")
-        .ok()
-        .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+    let in_ci = env::var("CI").is_ok_and(|value| value.eq_ignore_ascii_case("true"));
     let force = env::var("PG_EXPORTER_REQUIRE_TESTCONTAINERS")
-        .ok()
-        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE"));
+        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE"));
 
     in_ci || force
 }

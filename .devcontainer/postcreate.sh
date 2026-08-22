@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # One-time provisioning for the pg_exporter dev container (DevPod postCreateCommand):
-# system deps, Rust components, and the mise-managed toolchain (just, postgres
-# client). The postgres service runs as a compose sibling and is reached over the
+# system deps, the latest stable Rust toolchain, and mise-managed tools (just,
+# postgres client). The postgres service runs as a compose sibling and is reached over the
 # network at postgres:5432 (see compose.yaml), so the app needs no container runtime
 # of its own.
 
@@ -67,14 +67,22 @@ if ! command -v just >/dev/null 2>&1; then
     exit 1
 fi
 
-# 4. Rust is provided by the base image (devcontainers/rust), not mise. Add the
-#    components the project needs (clippy/rustfmt/rust-analyzer) to the image
-#    toolchain. Use the image's rustup explicitly so this never hits a mise shim.
+# 4. Rust is provided by the base image (devcontainers/rust), not mise. Its bundled
+#    default toolchain can lag the current stable release, so update and select
+#    stable before adding the project components. Use the image's rustup explicitly
+#    so this never hits a mise shim.
 IMAGE_RUSTUP="$(command -v rustup || echo /usr/local/cargo/bin/rustup)"
 case "$IMAGE_RUSTUP" in
 */.local/share/mise/*) IMAGE_RUSTUP=/usr/local/cargo/bin/rustup ;;
 esac
-"$IMAGE_RUSTUP" component add rustfmt clippy rust-analyzer
+IMAGE_CARGO_HOME="$(dirname "$(dirname "$IMAGE_RUSTUP")")"
+# The app's CARGO_HOME points at a persistent cache volume, while the image's
+# rustup proxies live under /usr/local/cargo. Scope CARGO_HOME to the image path
+# for rustup itself so `rustup default` does not try to install a second rustup.
+CARGO_HOME="$IMAGE_CARGO_HOME" "$IMAGE_RUSTUP" update stable
+CARGO_HOME="$IMAGE_CARGO_HOME" "$IMAGE_RUSTUP" default stable
+CARGO_HOME="$IMAGE_CARGO_HOME" \
+    "$IMAGE_RUSTUP" component add --toolchain stable rustfmt clippy rust-analyzer
 
 # Make the mise shims available to login/non-login shells.
 sudo tee /etc/profile.d/mise.sh >/dev/null <<'EOF'

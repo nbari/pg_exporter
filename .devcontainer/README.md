@@ -47,19 +47,22 @@ toolbox, no `:Z`, and no `PGBENCH_INIT_STEPS` override.
 | `devcontainer.json` | Local compose-based devcontainer (`compose.yaml` + podman override). |
 | `devcontainer.portable.json` | Portable compose-based devcontainer (`compose.yaml` only). |
 | `init-db.sql` | First-boot SQL: `CREATE EXTENSION pg_stat_statements`. |
-| `postcreate.sh` | One-time provisioning: system deps, rustup components, `mise install`, dotfiles. |
+| `postcreate.sh` | One-time provisioning: latest stable Rust, system deps, `mise install`, dotfiles. |
 | `post-start.sh` | Every start: wait for postgres, seed the test DB. |
 | `../scripts/dev-ssh` | Host helper for entering or running commands in `/workspaces/pg_exporter`. |
 
 The host entrypoint `../scripts/dev-up` wraps `devpod up` with the right flags
 (`--ssh-config`, git identity forwarding, and `DEVPOD_DOTFILES`).
 
-The toolchain is declared in [`../mise.toml`](../mise.toml) (just, rust, cargo-edit,
-the [slick](https://github.com/nbari/slick) prompt, tree-sitter, and the postgres
-client task). Neovim is installed via a devcontainer feature, and `postcreate.sh`
-applies your dotfiles with [chezmoi](https://chezmoi.io) (repo from `DEVPOD_DOTFILES`,
-default `https://github.com/nbari/dotfiles-devpod.git`) so the shell, prompt, and
-nvim config match your host. `zsh` is the default shell.
+Rust comes from the `devcontainers/rust` base image. `postcreate.sh` explicitly
+updates and selects the latest stable toolchain whenever the workspace is created or
+recreated, instead of relying on the image-bundled default. The remaining developer
+tools are declared in [`../mise.toml`](../mise.toml) (just, cargo-edit, the
+[slick](https://github.com/nbari/slick) prompt, tree-sitter, and the postgres client
+task). Neovim is installed via a devcontainer feature, and `postcreate.sh` applies
+your dotfiles with [chezmoi](https://chezmoi.io) (repo from `DEVPOD_DOTFILES`, default
+`https://github.com/nbari/dotfiles-devpod.git`) so the shell, prompt, and nvim config
+match your host. `zsh` is the default shell.
 
 ## Usage
 
@@ -67,6 +70,7 @@ nvim config match your host. `zsh` is the default shell.
 
 ```bash
 scripts/dev-up               # build + start the stack, exec-ready
+scripts/dev-up --recreate    # recreate it and update Rust to latest stable
 scripts/dev-ssh              # shell in as vscode, in /workspaces/pg_exporter
 # inside the container:
 just test                    # runs against the postgres service (no host DB needed)
