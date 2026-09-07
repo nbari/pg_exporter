@@ -30,6 +30,7 @@ use std::sync::Arc;
 use tracing::{debug, info_span, instrument, warn};
 use tracing_futures::Instrument as _;
 
+pub mod blocking;
 pub mod cpu;
 pub mod memory;
 pub mod process;
@@ -37,6 +38,8 @@ pub mod process;
 use cpu::CpuCollector;
 use memory::MemoryCollector;
 use process::ProcessGroupCollector;
+
+pub use process::ProcessMemorySource;
 
 /// Host CPU and memory statistics for the machine running the exporter.
 ///
@@ -58,14 +61,21 @@ impl Default for SystemCollector {
 }
 
 impl SystemCollector {
-    /// Creates a new `SystemCollector`.
+    /// Creates a new `SystemCollector` with default options.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_config(ProcessMemorySource::default())
+    }
+
+    /// Creates a new `SystemCollector` reading process-group memory from
+    /// `process_memory` (`--system.process-memory`).
+    #[must_use]
+    pub fn with_config(process_memory: ProcessMemorySource) -> Self {
         Self {
             subs: vec![
                 Arc::new(CpuCollector::new()),
                 Arc::new(MemoryCollector::new()),
-                Arc::new(ProcessGroupCollector::new()),
+                Arc::new(ProcessGroupCollector::with_memory_source(process_memory)),
             ],
         }
     }

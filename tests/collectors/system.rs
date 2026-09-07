@@ -1,7 +1,13 @@
 use super::common;
 use anyhow::Result;
-use pg_exporter::collectors::{Collector, system::SystemCollector};
+use pg_exporter::collectors::{
+    Collector,
+    config::CollectorConfig,
+    system::{ProcessMemorySource, SystemCollector},
+};
 use prometheus::Registry;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Metric families the system collector exposes (host-wide, per-core CPU).
 const SYSTEM_METRICS: [&str; 10] = [
@@ -213,6 +219,77 @@ async fn test_system_metrics_have_no_database_label() -> Result<()> {
         }
     }
 
+    pool.close().await;
+    Ok(())
+}
+
+/// Issue #35 regression: the `system` collector must not run its blocking `/proc` walk
+/// on a Tokio worker thread.
+///
+/// Pinned to a single-threaded runtime so there is exactly one worker. A spinner task is
+/// left ready to run; if `collect` performs its OS reads inline in the async block — as
+/// it did in 0.18.0 — the future never yields, the spinner cannot be polled, and the
+/// counter cannot advance. In production that same monopolised worker stopped the `sqlx`
+/// pool's futures from being polled, so every *other* collector failed with a misleading
+/// `pool timed out while waiting for an open connection`.
+///
+/// This asserts the property (does the collector yield?) rather than a duration, so it
+/// catches the defect on a fast lab host where the raw syscall cost is negligible.
+#[tokio::test(flavor = "current_thread")]
+async fn test_system_collect_does_not_monopolise_the_runtime_worker() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+    let collector = SystemCollector::new();
+
+    let progress = Arc::new(AtomicUsize::new(0));
+    let ticker = Arc::clone(&progress);
+    let spinner = tokio::spawn(async move {
+        loop {
+            ticker.fetch_add(1, Ordering::Relaxed);
+            tokio::task::yield_now().await;
+        }
+    });
+
+    // Let the spinner reach its first yield point so it is queued and ready.
+    tokio::task::yield_now().await;
+    let before = progress.load(Ordering::Relaxed);
+
+    collector.collect(&pool).await?;
+
+    let after = progress.load(Ordering::Relaxed);
+    spinner.abort();
+    pool.close().await;
+
+    assert!(
+        after > before,
+        "no other task ran while the system collector was collecting ({before} -> {after}): \
+         its blocking /proc reads are executing on a runtime worker instead of the blocking \
+         pool, which starves every concurrent collector (issue #35)"
+    );
+    Ok(())
+}
+
+/// The expensive `smaps_rollup` PSS walk must be opt-in, and the CLI value must reach the
+/// collector rather than being silently dropped on the way.
+#[tokio::test]
+async fn test_system_process_memory_defaults_to_rss_and_is_configurable() -> Result<()> {
+    let config = CollectorConfig::new(25);
+    assert_eq!(
+        config.system.process_memory,
+        ProcessMemorySource::Rss,
+        "PSS costs O(processes x resident pages) and must never be the default (issue #35)"
+    );
+
+    let pss = CollectorConfig::new(25).with_system_process_memory(ProcessMemorySource::Pss);
+    assert_eq!(pss.system.process_memory, ProcessMemorySource::Pss);
+
+    // Both variants must build and collect without error.
+    let pool = common::create_test_pool().await?;
+    for source in [ProcessMemorySource::Rss, ProcessMemorySource::Pss] {
+        let registry = Registry::new();
+        let collector = SystemCollector::with_config(source);
+        collector.register_metrics(&registry)?;
+        collector.collect(&pool).await?;
+    }
     pool.close().await;
     Ok(())
 }

@@ -503,7 +503,9 @@ impl Collector for CpuCollector {
     #[instrument(skip(self, _pool), level = "debug")]
     fn collect_once<'a>(&'a self, _pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
-            self.collect_stats();
+            // Blocking /proc and sysctl reads: never run these on a runtime worker (issue #35).
+            let collector = self.clone();
+            super::blocking::offload("system.cpu", move || collector.collect_stats()).await?;
             Ok(Collected::Fresh)
         })
     }

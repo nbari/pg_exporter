@@ -1,4 +1,4 @@
-use crate::collectors::COLLECTOR_NAMES;
+use crate::collectors::{COLLECTOR_NAMES, system::ProcessMemorySource};
 use std::{collections::HashSet, time::Duration};
 
 /// Default minimum delay between two `pg_stat_statements` query-text lookups.
@@ -12,7 +12,7 @@ pub struct StatementsConfig {
     pub query_text_refresh: Option<Duration>,
 }
 
-/// Default minimum `pg_sequences` used-ratio required for a sequence to be exported.
+/// Default `pg_sequences` used-ratio required for a sequence to be exported.
 pub const DEFAULT_SEQUENCES_MIN_RATIO: f64 = 0.5;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -22,11 +22,19 @@ pub struct SequencesConfig {
     pub min_ratio: f64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SystemConfig {
+    /// Where `--collector.system` reads process-group memory from. Defaults to RSS
+    /// because PSS costs `O(processes × resident pages)`; see issue #35.
+    pub process_memory: ProcessMemorySource,
+}
+
 #[derive(Clone, Debug)]
 pub struct CollectorConfig {
     pub enabled_collectors: HashSet<String>,
     pub statements: StatementsConfig,
     pub sequences: SequencesConfig,
+    pub system: SystemConfig,
 }
 
 impl CollectorConfig {
@@ -42,7 +50,17 @@ impl CollectorConfig {
             sequences: SequencesConfig {
                 min_ratio: DEFAULT_SEQUENCES_MIN_RATIO,
             },
+            system: SystemConfig {
+                process_memory: ProcessMemorySource::default(),
+            },
         }
+    }
+
+    /// Set where `--collector.system` reads process-group memory from.
+    #[must_use]
+    pub const fn with_system_process_memory(mut self, source: ProcessMemorySource) -> Self {
+        self.system.process_memory = source;
+        self
     }
 
     /// Set the minimum delay between two `pg_stat_statements` query-text lookups.

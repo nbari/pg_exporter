@@ -180,6 +180,118 @@ fn statements_query_text_lookup_stays_detached_from_collect() -> Result<()> {
     Ok(())
 }
 
+/// Issue #35: the `system` collector reads the OS with blocking, synchronous APIs
+/// (`std::fs` on `/proc`, `sysctlbyname`, `sysinfo`). Running that inline in `collect_once`
+/// occupies a Tokio worker for the whole walk, which stops the `sqlx` pool's futures from
+/// being polled and makes unrelated collectors fail with bogus `pool timed out` errors.
+///
+/// Every `collect_once` in `src/collectors/system/` must therefore hand its sampling to
+/// `blocking::offload` instead of calling `collect_stats()` directly.
+#[test]
+fn system_collectors_do_not_block_the_runtime() -> Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let system_root = root.join("src").join("collectors").join("system");
+    let mut failures = Vec::new();
+
+    for path in rust_files_under(&system_root)? {
+        let source = std::fs::read_to_string(&path)?;
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or(source.as_str());
+        let relative = path.strip_prefix(root).unwrap_or(path.as_path());
+
+        // The umbrella only fans out to sub-collectors; it does no OS I/O itself.
+        if path.file_name().is_some_and(|name| name == "mod.rs") {
+            continue;
+        }
+
+        let Some(collect_once) = production_source.split("fn collect_once").nth(1) else {
+            continue;
+        };
+        // Bound the slice to the body of collect_once, which ends at the next item.
+        let body = collect_once
+            .split("\n    fn ")
+            .next()
+            .unwrap_or(collect_once);
+
+        if !body.contains("blocking::offload") {
+            failures.push(format!(
+                "{} runs collect_once without blocking::offload: synchronous OS reads must go \
+                 to the blocking pool, or a slow /proc walk starves every other collector \
+                 (issue #35)",
+                relative.display()
+            ));
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!(failures.join("\n")))
+    }
+}
+
+/// Issue #35: `/proc/<pid>/smaps_rollup` makes the kernel walk every page-table entry of
+/// every mapping, costing `O(processes x resident pages)` — 13.9s of a 15s scrape budget on
+/// a production primary. It must stay reachable only through the explicit
+/// `--system.process-memory=pss` opt-in, never from a default code path.
+#[test]
+fn smaps_rollup_stays_behind_the_pss_opt_in() -> Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let process_rs = root
+        .join("src")
+        .join("collectors")
+        .join("system")
+        .join("process.rs");
+    let source = std::fs::read_to_string(&process_rs)?;
+    let production_source = source
+        .split("#[cfg(test)]")
+        .next()
+        .unwrap_or(source.as_str());
+
+    // Only real code: doc comments discuss smaps_rollup at length by design.
+    let code_lines = || {
+        production_source
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//"))
+    };
+
+    let readers: Vec<&str> = code_lines()
+        .filter(|line| line.contains("/proc/{pid}/smaps_rollup"))
+        .collect();
+
+    if readers.len() != 1 {
+        return Err(anyhow!(
+            "expected exactly one /proc/<pid>/smaps_rollup read in process.rs (inside \
+             read_pss_bytes), found {}: {readers:?}",
+            readers.len()
+        ));
+    }
+
+    // read_pss_bytes must only be reachable from the Pss arm of the source dispatch.
+    for call in code_lines()
+        .filter(|line| line.contains("read_pss_bytes(") && !line.contains("fn read_pss_bytes"))
+    {
+        if !call.starts_with("read_pss_bytes(pid)") {
+            return Err(anyhow!(
+                "unexpected read_pss_bytes call site '{call}': PSS must only be reached via \
+                 --system.process-memory=pss (issue #35)"
+            ));
+        }
+    }
+
+    if !production_source.contains("ProcessMemorySource::Rss => read_rss_bytes") {
+        return Err(anyhow!(
+            "process.rs no longer dispatches the default RSS source to read_rss_bytes; PSS must \
+             not become the default again (issue #35)"
+        ));
+    }
+
+    Ok(())
+}
+
 /// Enforces the collector module layout: `src/collectors/<name>/mod.rs` must be
 /// a thin **entry point / umbrella** that wires up sub-collectors, not the place
 /// where metrics and SQL live. The real implementation belongs in a sibling file

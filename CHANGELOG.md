@@ -5,6 +5,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0] (unreleased)
+
+### Fixed
+
+- **`/metrics` no longer wedges at `503` forever after a scrape timeout** ([#34]).
+  The single-scrape gate handed its semaphore permit to the spawned scrape task.
+  On timeout the request dropped the `JoinHandle`, which in Tokio **detaches**
+  rather than cancels the task, so returning the permit depended entirely on that
+  detached task unwinding — and nothing bounded it: the inner collector loop has
+  no deadline of its own. Worse, `abort()` alone could not have fixed it either,
+  because the `system` collector (see [#35] below) ran synchronous `std::fs` I/O
+  inside an `async` block with **no await points**, and a Tokio task can only be
+  cancelled at an await point. One timeout therefore leaked the permit
+  permanently and every later scrape answered `503 another /metrics scrape is
+  already running` until the process was restarted.
+
+  The permit is now owned by the **request** future, so it is released by the
+  ordinary `Drop` on every exit path — success, timeout, collector error, or
+  client disconnect — with no dependence on the scrape task's behaviour. The
+  scrape task is additionally wrapped in an abort-on-drop guard so a timed-out
+  scrape stops driving its in-flight `sqlx` futures and hands the pooled
+  connections back instead of leaving them parked as idle `Client:ClientRead`.
+
+- **`--collector.system` no longer costs ~14 s per scrape, and no longer starves
+  the async runtime** ([#35]). Two independent defects with one symptom:
+
+  1. **PSS is now opt-in, RSS is the default.** The process-group memory gauge
+     read `/proc/<pid>/smaps_rollup`, which forces the kernel to walk every
+     page-table entry of every mapping — `O(processes × resident pages)`. On the
+     affected production primary (253 `postgres` processes,
+     `shared_buffers = 15939MB`) that took **13.851 s**, versus **0.016 s** for
+     the equivalent `/proc/<pid>/stat` reads: **866× slower**, and 92% of the 15 s
+     scrape budget on its own. The default is now RSS from `/proc/<pid>/statm`
+     (one cheap read per process); PSS is available via the new
+     `--system.process-memory=pss` flag for operators who have measured the cost.
+     This restores the behaviour originally requested in [#26], which asked for
+     RSS. **No metric was renamed**: `pg_system_process_group_memory_bytes`
+     is source-agnostic, so no dashboard or alert changes are required.
+  2. **Blocking OS I/O moved off the runtime worker.** All three `system`
+     sub-collectors performed synchronous `std::fs` / `sysctl` / `sysinfo` reads
+     directly inside their `async` blocks. That monopolised a Tokio worker for
+     the entire walk and stopped every other collector's futures from being
+     polled — which surfaced as the badly misleading
+     `pool timed out while waiting for an open connection`, sending operators to
+     investigate a connection pool that was never the problem. Sampling now runs
+     on the blocking pool via `spawn_blocking`, so a slow host read degrades into
+     a slow `system` collector instead of a stalled exporter.
+
+  Measured effect of the collector being pathological on the affected host:
+  `/metrics` went from `504` after 15.002 s with **0 metrics** and 59–100% CPU,
+  to `200` in **0.017 s** with 694 metrics at 0.1% CPU.
+
+  Per-collector cost was already observable via
+  `pg_exporter_collector_scrape_duration_seconds{collector="system"}`; watch that
+  series if you enable PSS.
+
+[#26]: https://github.com/nbari/pg_exporter/issues/26
+[#34]: https://github.com/nbari/pg_exporter/issues/34
+[#35]: https://github.com/nbari/pg_exporter/issues/35
+
 ## [0.18.0] - 2026-08-17
 
 ### Changed - action may be required

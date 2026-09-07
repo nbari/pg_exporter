@@ -1,7 +1,7 @@
 use clap::{Arg, Command, value_parser};
 use std::num::{NonZeroU64, NonZeroUsize};
 
-use crate::collectors::MAX_DB_QUERY_CONCURRENCY_LIMIT;
+use crate::collectors::{MAX_DB_QUERY_CONCURRENCY_LIMIT, system::ProcessMemorySource};
 
 pub fn add_collector_option_args(cmd: Command) -> Command {
     cmd.arg(
@@ -86,6 +86,35 @@ pub fn add_collector_option_args(cmd: Command) -> Command {
             .value_parser(value_parser!(NonZeroU64)),
     )
     .arg(sequences_min_ratio_arg())
+    .arg(system_process_memory_arg())
+}
+
+fn system_process_memory_arg() -> Arg {
+    Arg::new("system.process-memory")
+        .long("system.process-memory")
+        .help("Source for the --collector.system process-group memory gauge (rss or pss)")
+        .long_help(
+            "Where --collector.system reads pg_system_process_group_memory_bytes from on Linux.\n\n\
+             rss (default): /proc/<pid>/statm. One short line per process, answered from \
+             counters the kernel already maintains, so the cost is O(processes). Summing it \
+             over-counts memory shared between backends (shared_buffers is counted once per \
+             backend that touched it), so treat the group total as an upper bound.\n\n\
+             pss: /proc/<pid>/smaps_rollup. Divides shared pages proportionally, so \
+             shared_buffers is counted once across the group rather than once per connection. \
+             The kernel can only compute that by walking every page-table entry of every \
+             mapping, making the cost O(processes x resident pages). On a production primary \
+             with 253 backends and shared_buffers=15939MB this took 13.9s per scrape versus \
+             0.016s for rss (~866x), consuming 92% of the default 15s scrape budget. Enable it \
+             only on instances with small shared_buffers and few connections.\n\n\
+             Examples:\n\
+               --system.process-memory rss\n\
+               --system.process-memory pss\n\
+               PG_EXPORTER_SYSTEM_PROCESS_MEMORY=pss",
+        )
+        .env("PG_EXPORTER_SYSTEM_PROCESS_MEMORY")
+        .default_value(SYSTEM_PROCESS_MEMORY_DEFAULT)
+        .value_name("SOURCE")
+        .value_parser(ProcessMemorySource::parse)
 }
 
 fn sequences_min_ratio_arg() -> Arg {
@@ -192,6 +221,9 @@ const LOCK_TIMEOUT_MS_DEFAULT: &str = "2000";
 const STATEMENT_TIMEOUT_MS_DEFAULT: &str = "10000";
 const SCRAPE_TIMEOUT_MS_DEFAULT: &str = "15000";
 const SEQUENCES_MIN_RATIO_DEFAULT: &str = "0.5";
+/// String form of the default process-memory source, kept in sync with
+/// [`ProcessMemorySource::default`] by `system_process_memory_default_matches_const`.
+const SYSTEM_PROCESS_MEMORY_DEFAULT: &str = "rss";
 /// String form of the default query-text lookup interval, kept in sync with
 /// [`crate::collectors::config::DEFAULT_STATEMENTS_QUERY_TEXT_REFRESH`] by
 /// `query_text_refresh_default_matches_const`.
@@ -237,6 +269,56 @@ mod tests {
             STATEMENTS_QUERY_TEXT_REFRESH_DEFAULT.parse::<u64>().ok(),
             Some(DEFAULT_STATEMENTS_QUERY_TEXT_REFRESH.as_secs())
         );
+    }
+
+    #[test]
+    fn system_process_memory_default_matches_const() {
+        assert_eq!(
+            ProcessMemorySource::parse(SYSTEM_PROCESS_MEMORY_DEFAULT),
+            Ok(ProcessMemorySource::default())
+        );
+    }
+
+    /// Issue #35: the expensive `smaps_rollup` PSS walk must stay opt-in on the CLI.
+    #[test]
+    fn system_process_memory_defaults_to_rss() {
+        temp_env::with_var("PG_EXPORTER_SYSTEM_PROCESS_MEMORY", None::<String>, || {
+            let matches = commands::new().get_matches_from(vec!["pg_exporter"]);
+            assert_eq!(
+                matches
+                    .get_one::<ProcessMemorySource>("system.process-memory")
+                    .copied(),
+                Some(ProcessMemorySource::Rss)
+            );
+        });
+    }
+
+    #[test]
+    fn system_process_memory_accepts_pss_and_rejects_junk() {
+        temp_env::with_var("PG_EXPORTER_SYSTEM_PROCESS_MEMORY", None::<String>, || {
+            let matches = commands::new().get_matches_from(vec![
+                "pg_exporter",
+                "--system.process-memory",
+                "pss",
+            ]);
+            assert_eq!(
+                matches
+                    .get_one::<ProcessMemorySource>("system.process-memory")
+                    .copied(),
+                Some(ProcessMemorySource::Pss)
+            );
+
+            assert!(
+                commands::new()
+                    .try_get_matches_from(vec![
+                        "pg_exporter",
+                        "--system.process-memory",
+                        "smaps_rollup"
+                    ])
+                    .is_err(),
+                "an unknown memory source must be rejected at parse time"
+            );
+        });
     }
 
     #[test]

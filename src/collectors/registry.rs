@@ -5,6 +5,7 @@ use crate::{
         exporter::ScraperCollector,
         sequences::SequencesCollector,
         statements::StatementsCollector,
+        system::SystemCollector,
         util::{get_pg_version, get_scrape_timeout, set_pg_version},
     },
     exporter::GIT_COMMIT_HASH,
@@ -15,10 +16,13 @@ use std::{
     env,
     error::Error,
     fmt,
+    future::Future,
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    task::{Context, Poll},
     time::Duration,
 };
 use tokio::{sync::Semaphore, time::timeout};
@@ -39,6 +43,9 @@ fn build_collector(
         )),
         "sequences" => Some(CollectorType::SequencesCollector(
             SequencesCollector::with_min_ratio(config.sequences.min_ratio),
+        )),
+        "system" => Some(CollectorType::SystemCollector(
+            SystemCollector::with_config(config.system.process_memory),
         )),
         _ => factories.get(name).map(|factory| factory()),
     }
@@ -84,6 +91,84 @@ impl From<std::string::FromUtf8Error> for ScrapeError {
 enum ActivePool {
     Available(sqlx::PgPool),
     Unavailable,
+}
+
+/// A spawned task that is **aborted** when this handle is dropped, rather than detached.
+///
+/// `tokio::spawn` hands back a `JoinHandle` whose `Drop` detaches: the task keeps running
+/// unsupervised, with no deadline of its own and no way to reach it again. Dropping the
+/// handle on a scrape timeout is what wedged `/metrics` permanently in issue #34.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Future for AbortOnDrop<T> {
+    type Output = Result<T, tokio::task::JoinError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.get_mut().0).poll(cx)
+    }
+}
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Runs one scrape behind the single-flight gate, bounded by `scrape_timeout`.
+///
+/// # Why the permit is held here and not inside the task
+///
+/// The permit is owned by **this** future, so it is released the moment this future
+/// returns *or is dropped* — on success, on timeout, on a collector panic, and when the
+/// HTTP client disconnects mid-scrape. Nothing about the gate depends on the spawned task
+/// making progress.
+///
+/// The previous implementation moved the permit *into* the spawned task and dropped the
+/// `JoinHandle` on timeout, which detaches rather than aborts. Releasing the gate then
+/// depended entirely on the detached task unwinding on its own, and there is nothing in
+/// the code that guarantees it ever does: `collect_all_bytes_inner` drives a
+/// `FuturesUnordered` of collector futures with no inner deadline, so one future that
+/// never resolves holds the only permit of a `Semaphore::new(1)` for the rest of the
+/// process lifetime and every later scrape fails with `ScrapeError::Busy` (503).
+///
+/// Aborting is not sufficient on its own either. A collector future that blocks inside
+/// synchronous code contains no await point, and a `tokio` task can only be cancelled at
+/// an await point — so an abort would not land until it yields. The gate therefore must
+/// not, and now does not, depend on the task's cancellation at all.
+///
+/// Aborting is still the right thing to do alongside it: dropping the in-flight `sqlx`
+/// futures releases the pooled connections that the timed-out scrape had checked out,
+/// instead of leaving them parked server-side in `idle`/`Client:ClientRead` as observed in
+/// issue #34.
+async fn run_gated_scrape<F>(
+    gate: &Arc<Semaphore>,
+    scrape_timeout: Duration,
+    scrape: F,
+) -> Result<Vec<u8>, ScrapeError>
+where
+    F: Future<Output = Result<Vec<u8>, ScrapeError>> + Send + 'static,
+{
+    let _permit = Arc::clone(gate)
+        .try_acquire_owned()
+        .map_err(|_| ScrapeError::Busy)?;
+
+    // Dropped at the end of this statement on timeout, which aborts the scrape task.
+    let outcome = timeout(scrape_timeout, AbortOnDrop(tokio::spawn(scrape))).await;
+
+    match outcome {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => Err(ScrapeError::CollectorFailed(vec![format!(
+            "scrape task failed: {error}"
+        )])),
+        Err(_) => {
+            warn!(
+                timeout = ?scrape_timeout,
+                "scrape exceeded --scrape.timeout-ms; aborted it and released the scrape gate so \
+                 the next scrape can run"
+            );
+            Err(ScrapeError::Timeout(scrape_timeout))
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -240,31 +325,13 @@ impl CollectorRegistry {
         &self,
         pool: &sqlx::PgPool,
     ) -> Result<Vec<u8>, ScrapeError> {
-        let permit = self
-            .scrape_gate
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| ScrapeError::Busy)?;
-
-        let scrape_timeout = get_scrape_timeout();
         let registry = self.clone();
         let pool = pool.clone();
-        let scrape_task = tokio::spawn(async move {
-            let _permit = permit;
-            registry.collect_all_bytes_inner(&pool).await
-        });
 
-        // On timeout, dropping the JoinHandle detaches the task instead of aborting it.
-        // That intentionally keeps the scrape gate permit held until collector futures
-        // unwind, so the next scrape cannot start another wave of DB work while the
-        // previous scrape's PostgreSQL backends are still cancelling server-side.
-        match timeout(scrape_timeout, scrape_task).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(error)) => Err(ScrapeError::CollectorFailed(vec![format!(
-                "scrape task failed: {error}"
-            )])),
-            Err(_) => Err(ScrapeError::Timeout(scrape_timeout)),
-        }
+        run_gated_scrape(&self.scrape_gate, get_scrape_timeout(), async move {
+            registry.collect_all_bytes_inner(&pool).await
+        })
+        .await
     }
 
     async fn collect_all_bytes_inner(&self, pool: &sqlx::PgPool) -> Result<Vec<u8>, ScrapeError> {
@@ -676,5 +743,212 @@ metric_two 2
             .count();
 
         assert_eq!(count_exposed_metric_lines(buffer), string_count);
+    }
+
+    /// Regression tests for the scrape gate (issue #34).
+    ///
+    /// The failure mode was a permanently closed gate: a scrape that timed out left its
+    /// permit inside a *detached* task, so `/metrics` answered `503 another /metrics
+    /// scrape is already running` for the rest of the process lifetime. These drive
+    /// [`run_gated_scrape`] — the exact code path `collect_all_bytes` uses — with scrape
+    /// futures that model the collectors observed in production.
+    mod scrape_gate {
+        use super::*;
+        use std::sync::atomic::AtomicBool;
+        use tokio::sync::oneshot;
+
+        const TEST_TIMEOUT: Duration = Duration::from_millis(100);
+
+        fn gate() -> Arc<Semaphore> {
+            Arc::new(Semaphore::new(1))
+        }
+
+        /// Signals on drop, so a test can observe whether a future was actually dropped
+        /// (cancelled) rather than left running.
+        struct SignalOnDrop(Option<oneshot::Sender<()>>);
+
+        impl Drop for SignalOnDrop {
+            fn drop(&mut self) {
+                if let Some(tx) = self.0.take() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+
+        /// A scrape future that never resolves — the hung collector from issue #34.
+        ///
+        /// On the old code this permanently wedged the gate: the permit lived in the
+        /// detached task, which by construction never unwinds, so every later scrape
+        /// returned `Busy`.
+        #[tokio::test]
+        async fn gate_reopens_after_a_scrape_that_never_finishes() {
+            let gate = gate();
+
+            let first = run_gated_scrape(&gate, TEST_TIMEOUT, std::future::pending()).await;
+            assert!(
+                matches!(first, Err(ScrapeError::Timeout(_))),
+                "a scrape that never resolves must be reported as a timeout, got {first:?}"
+            );
+
+            for attempt in 1..=3 {
+                let next =
+                    run_gated_scrape(&gate, TEST_TIMEOUT, std::future::ready(Ok(b"ok".to_vec())))
+                        .await;
+                assert!(
+                    !matches!(next, Err(ScrapeError::Busy)),
+                    "attempt {attempt}: the gate stayed closed after a timed-out scrape, so \
+                     /metrics is wedged at 503 until restart (issue #34)"
+                );
+                assert!(next.is_ok(), "attempt {attempt}: scrape failed: {next:?}");
+            }
+
+            assert_eq!(
+                gate.available_permits(),
+                1,
+                "the scrape gate must be fully released once no scrape is in flight"
+            );
+        }
+
+        /// A timed-out scrape must actually be cancelled, not detached to keep burning a
+        /// worker and holding pooled `PostgreSQL` connections.
+        #[tokio::test]
+        async fn timed_out_scrape_is_aborted_not_detached() {
+            let gate = gate();
+            let (dropped_tx, dropped_rx) = oneshot::channel();
+
+            let result = run_gated_scrape(&gate, TEST_TIMEOUT, async move {
+                let _guard = SignalOnDrop(Some(dropped_tx));
+                std::future::pending::<()>().await;
+                Ok(Vec::new())
+            })
+            .await;
+
+            assert!(matches!(result, Err(ScrapeError::Timeout(_))));
+            assert!(
+                timeout(Duration::from_secs(5), dropped_rx).await.is_ok(),
+                "the timed-out scrape task was detached instead of aborted: its futures were \
+                 never dropped, so pooled connections stay checked out (issue #34)"
+            );
+        }
+
+        /// The gate must survive a scrape task that blocks its worker thread with no await
+        /// point — `abort()` cannot land there, so permit release must not depend on it.
+        /// This is the shape of the `system` collector before the issue #35 fix.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn gate_reopens_after_a_scrape_that_blocks_its_worker() {
+            let gate = gate();
+            let release = Arc::new(AtomicBool::new(false));
+            let blocker = Arc::clone(&release);
+
+            let first = run_gated_scrape(&gate, TEST_TIMEOUT, async move {
+                while !blocker.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Ok(Vec::new())
+            })
+            .await;
+            assert!(matches!(first, Err(ScrapeError::Timeout(_))));
+
+            let next =
+                run_gated_scrape(&gate, TEST_TIMEOUT, std::future::ready(Ok(Vec::new()))).await;
+            release.store(true, Ordering::Relaxed);
+
+            assert!(
+                !matches!(next, Err(ScrapeError::Busy)),
+                "a scrape blocked in synchronous code cannot be aborted at an await point, so \
+                 the gate must never depend on it to release the permit (issues #34, #35)"
+            );
+            assert!(next.is_ok(), "scrape failed: {next:?}");
+        }
+
+        /// Single-flight still holds: a genuinely concurrent second scrape is rejected
+        /// while the first is running, which is what the gate exists for.
+        #[tokio::test]
+        async fn concurrent_scrape_is_still_rejected_while_one_is_in_flight() {
+            let gate = gate();
+            let (unblock_tx, unblock_rx) = oneshot::channel::<()>();
+            let (started_tx, started_rx) = oneshot::channel::<()>();
+
+            let gate_for_task = Arc::clone(&gate);
+            let first = tokio::spawn(async move {
+                run_gated_scrape(&gate_for_task, Duration::from_secs(30), async move {
+                    let _ = started_tx.send(());
+                    let _ = unblock_rx.await;
+                    Ok(b"first".to_vec())
+                })
+                .await
+            });
+
+            assert!(started_rx.await.is_ok(), "first scrape never started");
+
+            let concurrent =
+                run_gated_scrape(&gate, TEST_TIMEOUT, std::future::ready(Ok(Vec::new()))).await;
+            assert!(
+                matches!(concurrent, Err(ScrapeError::Busy)),
+                "an overlapping scrape must be rejected with Busy, got {concurrent:?}"
+            );
+
+            let _ = unblock_tx.send(());
+            let first = first.await;
+            assert!(
+                matches!(first, Ok(Ok(ref bytes)) if bytes == b"first"),
+                "the in-flight scrape must still succeed, got {first:?}"
+            );
+            assert_eq!(gate.available_permits(), 1);
+        }
+
+        /// A client that disconnects mid-scrape drops the request future. The permit must
+        /// go with it, otherwise a hung client would wedge the gate just like a timeout.
+        #[tokio::test]
+        async fn gate_reopens_when_the_caller_is_cancelled() {
+            let gate = gate();
+            let gate_for_task = Arc::clone(&gate);
+            let (started_tx, started_rx) = oneshot::channel::<()>();
+
+            let request = tokio::spawn(async move {
+                run_gated_scrape(&gate_for_task, Duration::from_secs(30), async move {
+                    let _ = started_tx.send(());
+                    std::future::pending::<Result<Vec<u8>, ScrapeError>>().await
+                })
+                .await
+            });
+
+            assert!(started_rx.await.is_ok(), "scrape never started");
+            request.abort();
+            let _ = request.await;
+
+            let next =
+                run_gated_scrape(&gate, TEST_TIMEOUT, std::future::ready(Ok(Vec::new()))).await;
+            assert!(
+                !matches!(next, Err(ScrapeError::Busy)),
+                "a cancelled request left the scrape gate closed"
+            );
+            assert!(next.is_ok(), "scrape failed: {next:?}");
+        }
+
+        /// A panicking collector must surface as a failed scrape and still reopen the gate.
+        #[tokio::test]
+        async fn gate_reopens_after_a_panicking_scrape() {
+            let gate = gate();
+
+            let result = run_gated_scrape(&gate, Duration::from_secs(30), async {
+                #[allow(clippy::panic)]
+                {
+                    panic!("collector exploded");
+                }
+            })
+            .await;
+            assert!(
+                matches!(result, Err(ScrapeError::CollectorFailed(_))),
+                "a panicking scrape must be reported, got {result:?}"
+            );
+
+            let next =
+                run_gated_scrape(&gate, TEST_TIMEOUT, std::future::ready(Ok(Vec::new()))).await;
+            assert!(
+                next.is_ok(),
+                "the gate stayed closed after a panic: {next:?}"
+            );
+        }
     }
 }

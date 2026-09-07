@@ -31,6 +31,11 @@ const POSTGRES_TAG: &str = "16";
 const EXPORTER_ROLE: &str = "postgres_exporter_budget";
 const CONNECTION_BUDGET: i64 = 5;
 
+/// Body fragment the exporter serves when the scrape gate rejects a request
+/// (`ScrapeError::Busy`). Used to tell "the gate is closed" apart from an ordinary
+/// failed scrape, which also answers `503`.
+const SCRAPE_BUSY_MESSAGE: &str = "another /metrics scrape is already running";
+
 fn postgres_tag() -> String {
     std::env::var("PG_EXPORTER_TEST_POSTGRES_TAG").unwrap_or_else(|_| POSTGRES_TAG.to_string())
 }
@@ -203,15 +208,13 @@ async fn wait_for_connection_baseline(admin: &mut PgConnection) -> Result<()> {
 
 /// Poll `/metrics` until the exporter reports `200 OK`, within a bounded window.
 ///
-/// After a scrape exceeds the scrape timeout the exporter intentionally keeps the
-/// scrape-gate permit held until the detached scrape task unwinds (see
-/// `collect_all_bytes`). During that window a fresh scrape observes
-/// `ScrapeError::Busy` and returns `503`. A real Prometheus simply scrapes again on
-/// the next interval, so the recovery assertion models that instead of demanding the
-/// gate be free on the very first immediate scrape (which races the permit release
-/// and made this test flaky). A genuine regression - a gate that never releases or a
-/// collector that never recovers - still fails the test via the deadline, with the
-/// last observed status and body attached for diagnosis.
+/// The locks have just been released, but collectors that were aborted server-side may
+/// still be unwinding, and a scrape that started before the release can still fail. A
+/// real Prometheus simply scrapes again on the next interval, so the recovery assertion
+/// models that instead of demanding success from the very first immediate scrape. A
+/// genuine regression - a gate that never releases or a collector that never recovers -
+/// still fails the test via the deadline, with the last observed status and body attached
+/// for diagnosis.
 async fn wait_for_metrics_recovery(client: &reqwest::Client, metrics_url: &str) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut last_status = None;
@@ -494,10 +497,46 @@ async fn run_budget_scenario(
     wait_for_lock_waiter(&mut *admin).await?;
     primary_scrape.abort();
 
-    for _ in 0..4 {
+    // Issue #34: a client that disconnects mid-scrape must not wedge the scrape gate.
+    // The permit belongs to the request future, so dropping that future releases it and
+    // aborts the scrape task. These follow-up scrapes must therefore get *past* the gate
+    // rather than being told another scrape is still running.
+    //
+    // They may well still fail: the ACCESS EXCLUSIVE locks are still held, so collectors
+    // can hit lock_timeout and the scrape reports 503 CollectorFailed. That is a healthy
+    // failure and is asserted separately from a closed gate, which is the actual defect.
+    // Detecting a client disconnect is not instantaneous, so the first response is
+    // allowed to still report Busy; once the gate reopens it must stay open.
+    let mut gate_reopened = false;
+    for attempt in 1..=4 {
         let response = client.get(&metrics_url).send().await?;
-        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        let status = response.status();
+        assert!(
+            matches!(
+                status,
+                reqwest::StatusCode::OK
+                    | reqwest::StatusCode::SERVICE_UNAVAILABLE
+                    | reqwest::StatusCode::GATEWAY_TIMEOUT
+            ),
+            "attempt {attempt}: unexpected scrape status {status}"
+        );
+
+        let body = response.text().await.unwrap_or_default();
+        let gate_closed = body.contains(SCRAPE_BUSY_MESSAGE);
+
+        assert!(
+            !(gate_closed && gate_reopened),
+            "attempt {attempt}: the scrape gate closed again after reopening, with no scrape \
+             in flight (issue #34)"
+        );
+        gate_reopened |= !gate_closed;
     }
+
+    assert!(
+        gate_reopened,
+        "the scrape gate never reopened after the client disconnected mid-scrape: /metrics \
+         is wedged at 503 '{SCRAPE_BUSY_MESSAGE}' until the process is restarted (issue #34)"
+    );
 
     wait_for_connection_baseline(&mut *admin).await?;
     for mut connection in lock_holders {

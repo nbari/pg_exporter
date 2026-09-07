@@ -179,7 +179,9 @@ impl Collector for MemoryCollector {
     #[instrument(skip(self, _pool), level = "debug")]
     fn collect_once<'a>(&'a self, _pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
-            self.collect_stats();
+            // Blocking sysinfo refresh: never run this on a runtime worker (issue #35).
+            let collector = self.clone();
+            super::blocking::offload("system.memory", move || collector.collect_stats()).await?;
             Ok(Collected::Fresh)
         })
     }

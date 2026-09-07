@@ -13152,7 +13152,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "description": "Resident memory of the whole postgres* process group (pg_system_process_group_memory_bytes). On Linux this is PSS (proportional set size) from /proc/<pid>/smaps_rollup, so PostgreSQL's shared_buffers is counted once across all backends rather than multiplied per connection - PSS requires the exporter to run as the postgres user or root, otherwise it falls back to RSS (which over-counts shared memory). On FreeBSD this is summed RSS. The right axis shows the live postgres* process count. Requires --collector.system on a co-located host (not RDS/Aurora).",
+          "description": "Resident memory of the whole postgres* process group (pg_system_process_group_memory_bytes). On Linux this is RSS from /proc/<pid>/statm by default (which over-counts shared memory, since shared_buffers is charged to every backend). Start the exporter with --system.process-memory=pss to report PSS (proportional set size) instead, counting shared_buffers once across all backends; PSS requires running as the postgres user or root and is much more expensive to collect, as /proc/<pid>/smaps_rollup forces a full page-table walk per process. On FreeBSD this is summed RSS. The right axis shows the live postgres* process count. Requires --collector.system on a co-located host (not RDS/Aurora).",
           "fieldConfig": {
             "defaults": {
               "color": {

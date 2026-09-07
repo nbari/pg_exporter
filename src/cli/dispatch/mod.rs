@@ -3,6 +3,7 @@ use crate::{
     collectors::{
         COLLECTOR_NAMES, Collector, all_factories,
         config::CollectorConfig,
+        system::ProcessMemorySource,
         util::{
             get_excluded_databases, set_excluded_databases, set_max_db_concurrency,
             set_scrape_timeouts,
@@ -193,9 +194,17 @@ pub fn get_collector_config(matches: &ArgMatches) -> Result<CollectorConfig> {
             anyhow!("internal CLI error: missing resolved value for --sequences.min-ratio")
         })?;
 
+    let system_process_memory = matches
+        .get_one::<ProcessMemorySource>("system.process-memory")
+        .copied()
+        .ok_or_else(|| {
+            anyhow!("internal CLI error: missing resolved value for --system.process-memory")
+        })?;
+
     Ok(CollectorConfig::new(statements_top_n)
         .with_statements_query_text_refresh(statements_query_text_refresh)
         .with_sequences_min_ratio(sequences_min_ratio)
+        .with_system_process_memory(system_process_memory)
         .with_enabled(&enabled))
 }
 

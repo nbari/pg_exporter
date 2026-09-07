@@ -10,16 +10,23 @@
 //!   (`utime + stime`). It is built by accumulating per-PID deltas so process
 //!   churn (backends coming and going) never makes the group counter go
 //!   backwards; use `rate()` to get "cores consumed by `PostgreSQL`".
-//! - **Memory** is `pg_system_process_group_memory_bytes`. On Linux this is
-//!   **PSS** (proportional set size, from `/proc/<pid>/smaps_rollup`), which
-//!   divides shared pages such as `shared_buffers` proportionally across the
-//!   backends touching them — so summing across backends does **not**
-//!   double-count shared memory the way RSS would. PSS requires the exporter to
-//!   run as the `postgres` user or root; when a process is not readable it falls
-//!   back to that process's RSS. On FreeBSD there is no cheap PSS, so this is the
-//!   summed **RSS** and therefore over-counts shared memory (documented caveat).
+//! - **Memory** is `pg_system_process_group_memory_bytes`. On Linux this defaults
+//!   to **RSS** (`/proc/<pid>/statm`), one cheap read per process. Because RSS
+//!   charges every shared page to every process that maps it, summing across
+//!   backends over-counts `shared_buffers`. `--system.process-memory=pss`
+//!   switches to **PSS** (`/proc/<pid>/smaps_rollup`), which divides shared pages
+//!   proportionally and so does not double-count shared memory — but it makes the
+//!   kernel walk every page-table entry of every mapping and cost
+//!   `O(processes × resident pages)` (see [`ProcessMemorySource`] for the
+//!   production measurements behind issue #35). PSS also requires the exporter to
+//!   run as the `postgres` user or root; unreadable processes fall back to RSS.
+//!   On FreeBSD there is no cheap PSS, so this is always the summed **RSS**.
 //! - **Count** is `pg_system_process_group_count`, the number of matched
 //!   processes.
+//!
+//! All sampling here is **blocking, synchronous** OS I/O and must be run on the
+//! blocking pool via [`super::blocking::offload`] — never inline on a Tokio
+//! worker, which would stall every other collector sharing the runtime.
 //!
 //! Like the rest of `--collector.system` this only makes sense when the exporter
 //! is co-located with `PostgreSQL` and never touches the database.
@@ -45,6 +52,69 @@ use super::cpu::ticks_to_seconds;
 /// Process-name prefix that defines the group, and the value of the `group`
 /// label. `PostgreSQL` sets every backend's `comm` to `postgres`.
 const GROUP: &str = "postgres";
+
+/// Which `/proc` source the process-group memory gauge is built from (Linux only).
+///
+/// This exists because the two sources differ in cost by orders of magnitude, not just in
+/// accuracy. See [`ProcessMemorySource::Pss`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ProcessMemorySource {
+    /// **Default.** Resident set size, read from `/proc/<pid>/statm`.
+    ///
+    /// One short, world-readable line per process that the kernel answers from already
+    /// maintained counters, so cost is `O(processes)` and independent of how much memory
+    /// each backend has touched. Summing RSS across backends **over-counts** shared
+    /// memory: every backend that has faulted in a `shared_buffers` page counts that page
+    /// in full, so the group total can exceed the machine's memory on a large instance.
+    /// Read it as an upper bound, and use `pg_system_memory_used_bytes` for the truth
+    /// about the host.
+    #[default]
+    Rss,
+    /// Proportional set size, read from `/proc/<pid>/smaps_rollup`. **Opt-in: expensive.**
+    ///
+    /// PSS divides each shared page by the number of processes mapping it, so summing it
+    /// across backends counts `shared_buffers` once instead of once per connection. The
+    /// kernel can only produce that number by walking **every PTE of every VMA** of the
+    /// process and checking each page's mapcount, which makes the cost
+    /// `O(processes × resident pages)`.
+    ///
+    /// Measured on the production primary in issue #35 — 253 `postgres` processes,
+    /// `shared_buffers = 15939MB` — reading `smaps_rollup` for the group took **13.851 s**
+    /// versus **0.016 s** for `stat`, or ~866x. That consumed 92% of the default 15 s
+    /// scrape budget in one sub-collector. The cost scales with how much of the buffer
+    /// pool the backends have actually faulted in, so it is mild on an idle instance and
+    /// worst on a busy production primary.
+    ///
+    /// Enable with `--system.process-memory=pss` only on instances with a small
+    /// `shared_buffers` and a low connection count.
+    Pss,
+}
+
+impl ProcessMemorySource {
+    /// CLI/env spelling of this variant.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Rss => "rss",
+            Self::Pss => "pss",
+        }
+    }
+
+    /// Parses the CLI/env spelling, case-insensitively.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message naming the accepted values if `value` is neither.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "rss" => Ok(Self::Rss),
+            "pss" => Ok(Self::Pss),
+            other => Err(format!(
+                "process memory source must be 'rss' or 'pss', got '{other}'"
+            )),
+        }
+    }
+}
 
 /// Whether per-process sampling is implemented for the current platform.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -117,23 +187,41 @@ fn page_size() -> u64 {
 
 /// Reads PSS (bytes) for one PID, or `None` when `smaps_rollup` is unavailable
 /// (older kernels) or unreadable (insufficient privileges for that process).
+///
+/// **This forces a full page-table walk in the kernel.** Only reachable via
+/// `--system.process-memory=pss`; see [`ProcessMemorySource::Pss`].
 #[cfg(target_os = "linux")]
 fn read_pss_bytes(pid: u32) -> Option<u64> {
     let content = std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup")).ok()?;
     parse_pss_kb(&content).map(|kb| kb.saturating_mul(1024))
 }
 
-/// Reads RSS (bytes) for one PID from the world-readable `statm`, the fallback
-/// when PSS is not available.
+/// Reads RSS (bytes) for one PID from the world-readable `statm`. This is the default
+/// source, and the fallback when PSS is requested but not readable.
 #[cfg(target_os = "linux")]
 fn read_rss_bytes(pid: u32, page_size: u64) -> Option<u64> {
     let content = std::fs::read_to_string(format!("/proc/{pid}/statm")).ok()?;
     parse_statm_resident_pages(&content).map(|pages| pages.saturating_mul(page_size))
 }
 
-/// Samples every `postgres*` process on Linux by reading `/proc` directly.
+/// Reads the memory figure for one PID from the configured source.
 #[cfg(target_os = "linux")]
-fn sample_processes(prefix: &str) -> Vec<ProcSample> {
+fn read_memory_bytes(pid: u32, page_size: u64, source: ProcessMemorySource) -> u64 {
+    match source {
+        ProcessMemorySource::Rss => read_rss_bytes(pid, page_size),
+        ProcessMemorySource::Pss => {
+            read_pss_bytes(pid).or_else(|| read_rss_bytes(pid, page_size))
+        }
+    }
+    .unwrap_or(0)
+}
+
+/// Samples every `postgres*` process on Linux by reading `/proc` directly.
+///
+/// Blocking, synchronous I/O: callers must run this on the blocking pool via
+/// [`super::blocking::offload`], never inline on a runtime worker (issue #35).
+#[cfg(target_os = "linux")]
+fn sample_processes(prefix: &str, source: ProcessMemorySource) -> Vec<ProcSample> {
     let hz = clk_tck();
     let bytes_per_page = page_size();
     let mut out = Vec::new();
@@ -160,8 +248,7 @@ fn sample_processes(prefix: &str) -> Vec<ProcSample> {
             .and_then(|stat| parse_stat_cpu_ticks(&stat))
             .map_or(0.0, |ticks| ticks_to_seconds(ticks, hz));
 
-        let mem_bytes =
-            read_pss_bytes(pid).or_else(|| read_rss_bytes(pid, bytes_per_page)).unwrap_or(0);
+        let mem_bytes = read_memory_bytes(pid, bytes_per_page, source);
 
         out.push(ProcSample { pid, cpu_seconds, mem_bytes });
     }
@@ -217,6 +304,8 @@ pub struct ProcessGroupCollector {
     cpu_seconds: CounterVec,
     memory_bytes: IntGaugeVec,
     proc_count: IntGaugeVec,
+    /// Where the memory gauge is read from; RSS by default (see issue #35).
+    memory_source: ProcessMemorySource,
     /// Last observed cumulative CPU seconds per live PID, used to accumulate a
     /// monotonic group counter across process churn.
     prev_cpu: Arc<Mutex<HashMap<u32, f64>>>,
@@ -244,6 +333,18 @@ impl ProcessGroupCollector {
     #[must_use]
     #[allow(clippy::expect_used)]
     pub fn new() -> Self {
+        Self::with_memory_source(ProcessMemorySource::default())
+    }
+
+    /// Creates a `ProcessGroupCollector` reading memory from `memory_source`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if metric creation fails, which only happens with an invalid
+    /// metric name or label set and therefore never at runtime.
+    #[must_use]
+    #[allow(clippy::expect_used)]
+    pub fn with_memory_source(memory_source: ProcessMemorySource) -> Self {
         let cpu_seconds = CounterVec::new(
             Opts::new(
                 "pg_system_process_group_cpu_seconds_total",
@@ -257,8 +358,10 @@ impl ProcessGroupCollector {
         let memory_bytes = IntGaugeVec::new(
             Opts::new(
                 "pg_system_process_group_memory_bytes",
-                "Resident memory of the host process group in bytes (Linux: PSS, so shared_buffers \
-                 is not double-counted; FreeBSD: summed RSS, which over-counts shared memory)",
+                "Resident memory of the host process group in bytes (Linux: RSS by default, \
+                 which over-counts memory shared between backends such as shared_buffers; set \
+                 --system.process-memory=pss for the shared-aware but far more expensive PSS. \
+                 FreeBSD: summed RSS)",
             ),
             &["group"],
         )
@@ -277,6 +380,7 @@ impl ProcessGroupCollector {
             cpu_seconds,
             memory_bytes,
             proc_count,
+            memory_source,
             prev_cpu: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(target_os = "freebsd")]
             system: Arc::new(Mutex::new(System::new())),
@@ -296,7 +400,7 @@ impl ProcessGroupCollector {
         }
 
         #[cfg(target_os = "linux")]
-        let samples = sample_processes(GROUP);
+        let samples = sample_processes(GROUP, self.memory_source);
         #[cfg(target_os = "freebsd")]
         let samples = sample_processes(&self.system, GROUP);
         #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
@@ -357,7 +461,9 @@ impl Collector for ProcessGroupCollector {
     #[instrument(skip(self, _pool), level = "debug")]
     fn collect_once<'a>(&'a self, _pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
-            self.collect_stats();
+            // Blocking /proc reads: never run these on a runtime worker (issue #35).
+            let collector = self.clone();
+            super::blocking::offload("system.process", move || collector.collect_stats()).await?;
             Ok(Collected::Fresh)
         })
     }
@@ -455,5 +561,84 @@ mod tests {
     fn parse_statm_resident_pages_reads_second_field() {
         // size resident shared text lib data dt
         assert_eq!(parse_statm_resident_pages("1000 256 128 4 0 512 0"), Some(256));
+    }
+
+    /// Issue #35: PSS must be opt-in. `smaps_rollup` forces a full page-table walk per
+    /// process, which cost 13.9s of a 15s scrape budget on a production primary.
+    #[test]
+    fn default_memory_source_is_rss() {
+        assert_eq!(ProcessMemorySource::default(), ProcessMemorySource::Rss);
+        assert_eq!(
+            ProcessGroupCollector::new().memory_source,
+            ProcessMemorySource::Rss,
+            "the process-group collector must default to the cheap statm RSS read"
+        );
+    }
+
+    #[test]
+    fn memory_source_round_trips_through_its_cli_spelling() {
+        for source in [ProcessMemorySource::Rss, ProcessMemorySource::Pss] {
+            assert_eq!(ProcessMemorySource::parse(source.as_str()), Ok(source));
+        }
+        assert_eq!(ProcessMemorySource::parse("  PSS "), Ok(ProcessMemorySource::Pss));
+        assert!(ProcessMemorySource::parse("smaps").is_err());
+    }
+
+    #[test]
+    fn explicit_memory_source_is_honoured() {
+        assert_eq!(
+            ProcessGroupCollector::with_memory_source(ProcessMemorySource::Pss).memory_source,
+            ProcessMemorySource::Pss
+        );
+    }
+
+    /// Proves the default source actually reads `statm` and not the expensive
+    /// `smaps_rollup` walk. Uses this test process, whose shared library mappings make
+    /// PSS measurably smaller than RSS.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rss_mode_reports_statm_and_not_the_smaps_rollup_walk() {
+        let pid = std::process::id();
+        let page = page_size();
+        let tolerance = page.saturating_mul(64);
+
+        let Some(statm) = read_rss_bytes(pid, page) else {
+            return; // no /proc/<pid>/statm: nothing to assert
+        };
+        let dispatched = read_memory_bytes(pid, page, ProcessMemorySource::Rss);
+        assert!(
+            dispatched.abs_diff(statm) <= tolerance,
+            "rss mode reported {dispatched} bytes but statm says {statm}"
+        );
+
+        let Some(rollup) = read_pss_bytes(pid) else {
+            return; // smaps_rollup unreadable (old kernel / restricted): nothing to compare
+        };
+        // Only meaningful when the two sources genuinely disagree for this process.
+        if statm.abs_diff(rollup) > tolerance {
+            assert!(
+                dispatched.abs_diff(rollup) > tolerance,
+                "rss mode returned the PSS value: the expensive smaps_rollup page-table walk is \
+                 still on the default path (issue #35)"
+            );
+        }
+    }
+
+    /// The opt-in must genuinely reach `smaps_rollup`, otherwise `--system.process-memory=pss`
+    /// would silently do nothing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pss_mode_reports_the_smaps_rollup_value() {
+        let pid = std::process::id();
+        let page = page_size();
+
+        let Some(rollup) = read_pss_bytes(pid) else {
+            return; // smaps_rollup unreadable: nothing to assert
+        };
+        let dispatched = read_memory_bytes(pid, page, ProcessMemorySource::Pss);
+        assert!(
+            dispatched.abs_diff(rollup) <= page.saturating_mul(64),
+            "pss mode reported {dispatched} bytes but smaps_rollup says {rollup}"
+        );
     }
 }

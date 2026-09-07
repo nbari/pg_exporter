@@ -83,13 +83,22 @@ cardinality stays constant regardless of how many backends exist.
 - `pg_system_process_group_count{group="postgres"}` — number of live `postgres*`
   processes.
 
-> **PSS vs RSS:** on Linux the memory gauge is **PSS** (proportional set size)
-> from `/proc/<pid>/smaps_rollup`, which divides shared pages proportionally, so
+> **RSS by default, PSS opt-in:** on Linux the memory gauge is **RSS** (resident
+> set size) from `/proc/<pid>/statm`, a single cheap read per process. Passing
+> `--system.process-memory=pss` switches to **PSS** (proportional set size) from
+> `/proc/<pid>/smaps_rollup`, which divides shared pages proportionally so
 > `shared_buffers` is counted **once** across all backends rather than multiplied
-> per connection. PSS requires the exporter to run as the `postgres` user or as
-> root; without that permission it falls back to **RSS** (from
-> `/proc/<pid>/statm`), which over-counts shared memory. On FreeBSD the gauge is
-> summed **RSS**.
+> per connection. PSS is more accurate but **far more expensive**: `smaps_rollup`
+> makes the kernel walk every page-table entry of every mapping, costing
+> `O(processes × resident pages)`. On a production primary with 253 `postgres`
+> processes and `shared_buffers = 15939MB` it took **13.851 s** versus **0.016 s**
+> for the equivalent `statm` reads — 92% of a 15 s scrape budget (issue #35). PSS
+> also requires the exporter to run as the `postgres` user or as root; without
+> that permission it falls back to RSS. Only enable PSS if you have measured the
+> cost on your own host. On FreeBSD the gauge is always summed **RSS**.
+>
+> Watch `pg_exporter_collector_scrape_duration_seconds{collector="system"}` after
+> changing this.
 
 ## Interpreting the Counters
 
@@ -110,5 +119,6 @@ cardinality stays constant regardless of how many backends exist.
   the fraction of the whole machine burned by `postgres*` processes; compare it
   with the host-wide busy fraction to tell `PostgreSQL` apart from a neighbour.
 - **`PostgreSQL` resident memory**:
-  `pg_system_process_group_memory_bytes{group="postgres"}` (PSS on Linux) tracks
-  the real footprint without multiplying `shared_buffers` per backend.
+  `pg_system_process_group_memory_bytes{group="postgres"}` (RSS on Linux by
+  default; `--system.process-memory=pss` reports PSS instead, which avoids
+  multiplying `shared_buffers` per backend at a significant scrape cost).
