@@ -61,6 +61,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pg_exporter_collector_scrape_duration_seconds{collector="system"}`; watch that
   series if you enable PSS.
 
+### Changed
+
+- **Dependencies**: refreshed to the latest compatible versions — `tower-http` 0.7.0 -> 0.7.1
+  in the manifest, plus lockfile bumps across the tree including `rustls` 0.23.43 -> 0.23.44,
+  `hyper` 1.11.0 -> 1.11.1, `h2` 0.4.16 -> 0.4.19, `uuid` 1.24.1 -> 1.26.0, `mio` 1.2.2 -> 1.2.3
+  and `tokio-rustls` 0.26.4 -> 0.26.5. Two transitive crates stay pinned: `matchit` is held at
+  0.8.4 by an exact `=0.8.4` requirement in `axum` 0.8.9, and `crypto-common` 0.1.x is held by
+  `digest` 0.10 via `sqlx`; forcing it would downgrade `generic-array`.
+
 [#26]: https://github.com/nbari/pg_exporter/issues/26
 [#34]: https://github.com/nbari/pg_exporter/issues/34
 [#35]: https://github.com/nbari/pg_exporter/issues/35
