@@ -65,6 +65,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   regression guard in `tests/collector_safety.rs` covers every collector rather
   than only `--collector.system`.
 
+  That guard now classifies whole call graphs instead of matching text against the body
+  of `collect_once`. Matching the body alone was defeated by the most natural refactor
+  there is — move the read one line down into a helper and call the helper — which keeps
+  the marker out of `collect_once`, leaves the `offload_coalesced` call sitting next to
+  it, and puts the read straight back on a Tokio worker. A function is now *blocking* if
+  it reads the OS **or calls something that does**, transitively, and `collect_once` may
+  name a blocking function only inside the `offload_coalesced(..)` argument list.
+  Renamed imports (`use std::fs::read_to_string as slurp;`) contribute their alias as an
+  extra marker, so aliasing a read does not hide it either.
+
 - **`pg_system_process_group_cpu_seconds_total` no longer over-reports when
   scrapes overlap.** Now that the scrape gate reopens immediately on timeout
   ([#34]), a new scrape can begin while an abandoned scrape's sample is still
@@ -87,14 +97,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `_sum / _count`: the histogram's top bucket is 5 s, so a PSS walk lands in
   `+Inf` and the bucket counts alone will not tell you how expensive it was.
 
+  Note that `_count` covers successes **and** aborts, not errors: an aborted collector
+  observes its time-until-abort (see below) while an errored one observes nothing. So
+  during a run of scrape timeouts, `_sum / _count` is pulled towards
+  `--scrape.timeout-ms` and reads high. Subtract the aborts to get the cost of the
+  scrapes that actually finished:
+
+  ```promql
+  # Mean duration of completed system scrapes, excluding timed-out ones
+  rate(pg_exporter_collector_scrape_duration_seconds_sum{collector="system"}[5m])
+    / clamp_min(
+        rate(pg_exporter_collector_scrape_duration_seconds_count{collector="system"}[5m])
+          - rate(pg_exporter_collector_scrape_aborted_total{collector="system"}[5m]),
+        1e-9)
+  ```
+
 - **Builds for FreeBSD and every other non-Linux target work again.** The PSS opt-in
   above added `ProcessGroupCollector::memory_source`, and only the Linux sampler reads
   it: FreeBSD samples through `sysinfo`, which exposes RSS alone, and unsupported
   platforms collect nothing at all. `warnings = "deny"` promoted the resulting
-  `dead_code` lint to a hard error, so `cargo build` failed outright off Linux. CI now
-  runs `cargo check --target x86_64-unknown-freebsd`, which compiles the FreeBSD `cfg`
-  branches — the `sysctl` CPU reader and the `sysinfo` process sampler — that no job
-  had ever compiled before.
+  `dead_code` lint to a hard error, so `cargo build` failed outright off Linux.
+
+  CI now cross-lints **two** targets that no job had ever compiled: `x86_64-unknown-freebsd`
+  for the `sysctl` CPU reader and the `sysinfo` process sampler, and
+  `x86_64-unknown-illumos` as a stand-in for every other platform, which is the only thing
+  that compiles the `cfg(not(any(target_os = "linux", target_os = "freebsd")))` fallbacks.
+  That second target immediately found one: the unsupported-platform `read_cpu_times`
+  returns `Ok(Vec::new())` unconditionally and tripped `clippy::unnecessary_wraps`, so
+  `cargo clippy` failed for anyone building off Linux or FreeBSD. The `Result` is
+  deliberate — `update_cpu_seconds` distinguishes `Ok(empty)` ("no counters on this
+  platform": warn once, still publish the core count) from `Err` ("a read that should have
+  worked did not": warn every scrape) — so the lint is allowed at that one function with
+  the reason recorded. Both cross-runs are `cargo clippy` rather than `cargo check`,
+  because this class of breakage is invisible to `cargo check`.
 
 - **Aborted scrapes no longer masquerade as successes in the exporter's self-metrics.**
   When a scrape is aborted mid-flight (timeout or client disconnect, [#34]), every

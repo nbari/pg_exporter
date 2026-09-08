@@ -67,9 +67,33 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+          targets: x86_64-unknown-freebsd, x86_64-unknown-illumos
 
       - name: Clippy
         run: cargo clippy --all-targets --all-features
+
+      # The system collector cfg-gates its process and CPU sampling per platform, and
+      # `warnings = "deny"` turns a field read on only one of them into a compile error.
+      # Nothing else in CI compiles these branches, so a break that only exists off Linux
+      # reaches users unnoticed. Cross-checking needs no toolchain beyond the target's std.
+      #
+      # Clippy rather than `cargo check`, because the lint contract is what gates merges
+      # here and some of it is cfg-sensitive: the unsupported-platform `read_cpu_times`
+      # returns `Ok(Vec::new())` unconditionally, which only `clippy::unnecessary_wraps`
+      # sees. Neither run passes `--all-targets --all-features`; that pulls in dev-only
+      # `aws-lc-sys`, which needs a real cross C toolchain.
+      - name: Clippy (FreeBSD)
+        run: cargo clippy --target x86_64-unknown-freebsd
+
+      # A target that is neither Linux nor FreeBSD, so it compiles the
+      # `cfg(not(any(target_os = "linux", target_os = "freebsd")))` fallbacks that report
+      # "not supported on this platform". `ring` assembles C for this target, so point
+      # cc-rs at the runner's own toolchain instead of illumos-prefixed binaries.
+      - name: Clippy (unsupported platform)
+        env:
+          AR_x86_64_unknown_illumos: ar
+          CC_x86_64_unknown_illumos: cc
+        run: cargo clippy --target x86_64-unknown-illumos
 
   check:
     name: Check
@@ -92,18 +116,9 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-freebsd
 
       - name: Check
         run: cargo check
-
-      # The system collector cfg-gates its process and CPU sampling per platform, and
-      # `warnings = "deny"` turns a field read on only one of them into a compile error.
-      # Nothing else in CI compiles the FreeBSD branch, so a FreeBSD-only break reaches
-      # users unnoticed. Cross-checking needs no toolchain beyond the target's std.
-      - name: Check (FreeBSD)
-        run: cargo check --target x86_64-unknown-freebsd
 
   test:
     name: Test (PostgreSQL ${{ matrix.postgres }})

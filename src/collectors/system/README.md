@@ -101,6 +101,11 @@ cardinality stays constant regardless of how many backends exist.
 > changing this. That series belongs to the `exporter` collector, so it only exists
 > if you also pass `--collector.exporter`; read the magnitude from `_sum / _count`,
 > because the histogram's top bucket is 5 s and a PSS walk simply lands in `+Inf`.
+> `_count` covers successes **and** aborted scrapes (an abort observes its
+> time-until-abort, an error observes nothing), so during a run of scrape timeouts that
+> ratio is pulled towards `--scrape.timeout-ms`. Subtract
+> `pg_exporter_collector_scrape_aborted_total{collector="system"}` from the count to see
+> what the scrapes that actually finished cost.
 >
 > If any system OS sample outlives its scrape, the overlapping scrape **skips** that
 > sub-collector before submitting another blocking task and serves its previously published

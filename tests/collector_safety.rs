@@ -180,6 +180,25 @@ fn statements_query_text_lookup_stays_detached_from_collect() -> Result<()> {
     Ok(())
 }
 
+/// Source-text markers for blocking operating-system access.
+const OS_READ_MARKERS: [&str; 10] = [
+    "std::fs::",
+    "::read(",
+    "::read_dir(",
+    "::read_to_string(",
+    "File::open(",
+    "OpenOptions::new(",
+    "sysinfo",
+    "sysctlbyname",
+    "refresh_processes",
+    "refresh_memory",
+];
+
+/// Import roots whose items block the calling thread when invoked. Used only to notice
+/// that a `use` renamed one of them, which would hide every later call from the literal
+/// markers above.
+const OS_IMPORT_ROOTS: [&str; 4] = ["std::fs", "std::io", "sysinfo", "libc"];
+
 /// Issue #35: several collectors read the operating system with blocking, synchronous
 /// APIs — `std::fs` on `/proc`, `sysctlbyname`, `sysinfo` refreshes, reading a certificate
 /// off disk. Running any of that inline in `collect_once` occupies a Tokio worker for the
@@ -190,22 +209,27 @@ fn statements_query_text_lookup_stays_detached_from_collect() -> Result<()> {
 /// Any `collect_once` in a file that touches the OS must therefore hand the work to
 /// `blocking::offload_coalesced` rather than calling its sampler directly. This covers all of
 /// `src/collectors/`, not just the `system` collector where the problem was found.
+///
+/// # Why this is a call-graph check and not a line match
+///
+/// Matching OS markers only against the literal text of `collect_once` is trivially
+/// defeated by the most natural refactor there is: move the read one level down into a
+/// helper and call the helper. The helper still runs on the runtime worker, the marker no
+/// longer appears in `collect_once`, and the `offload_coalesced` call sitting next to it
+/// still satisfies a text check — so the guard passes while issue #35 is back.
+///
+/// So every function in the file is classified first: a function is *blocking* if it
+/// contains an OS marker, or if it calls a blocking function. `collect_once` may then
+/// reference a blocking function only from inside the argument list of
+/// `blocking::offload_coalesced(..)`, which is the one place the work does not run on a
+/// runtime worker. Renamed imports (`use std::fs::read_to_string as slurp;`) contribute
+/// their alias as an extra marker, so aliasing does not hide a read either.
+///
+/// Scope: within one file. A sampler in a *different* module reached from `collect_once`
+/// is not traced — but that module is itself scanned by this test, so an OS read there
+/// still has to sit behind its own offload.
 #[test]
 fn collectors_do_not_block_the_runtime_with_os_reads() -> Result<()> {
-    /// Source-text markers for blocking operating-system access.
-    const OS_READ_MARKERS: [&str; 10] = [
-        "std::fs::",
-        "::read(",
-        "::read_dir(",
-        "::read_to_string(",
-        "File::open(",
-        "OpenOptions::new(",
-        "sysinfo",
-        "sysctlbyname",
-        "refresh_processes",
-        "refresh_memory",
-    ];
-
     /// Files known to sample the OS today. Listed only so this test cannot quietly decay
     /// into a no-op if a marker above stops matching; a new collector is covered
     /// automatically and does not need to be added here.
@@ -234,13 +258,15 @@ fn collectors_do_not_block_the_runtime_with_os_reads() -> Result<()> {
             continue;
         };
 
+        let markers = os_read_markers(production_source);
+
         // Match real code only: the doc comments discuss `/proc` and `sysinfo` at length
         // by design, and an umbrella that merely documents them does no I/O itself.
         let touches_os = production_source
             .lines()
             .map(str::trim)
             .filter(|line| !line.starts_with("//"))
-            .any(|line| OS_READ_MARKERS.iter().any(|marker| line.contains(marker)));
+            .any(|line| markers.iter().any(|marker| line.contains(marker.as_str())));
         if !touches_os {
             continue;
         }
@@ -252,14 +278,16 @@ fn collectors_do_not_block_the_runtime_with_os_reads() -> Result<()> {
             .next()
             .unwrap_or(collect_once);
 
-        let body_code = body
+        let body_lines: Vec<&str> = body
             .lines()
             .map(str::trim)
             .filter(|line| !line.starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect();
 
-        if !body_code.contains("blocking::offload_coalesced(") {
+        if !body_lines
+            .iter()
+            .any(|line| line.contains("blocking::offload_coalesced("))
+        {
             failures.push(format!(
                 "{} runs collect_once without blocking::offload_coalesced: synchronous OS reads \
                  must be offloaded and capped at one submitted sample per collector, or aborted \
@@ -268,18 +296,39 @@ fn collectors_do_not_block_the_runtime_with_os_reads() -> Result<()> {
             ));
         }
 
-        // Merely *mentioning* blocking::offload is not enough: the read must live in a
-        // named sampler the offload calls, not inline in collect_once next to it.
-        let body_reads_os = body_code
-            .lines()
-            .any(|line| OS_READ_MARKERS.iter().any(|marker| line.contains(marker)));
-        if body_reads_os {
-            failures.push(format!(
-                "{} reads the OS directly inside collect_once: move the read into a named \
-                 sampler reached only through blocking::offload_coalesced, or an inline slow \
-                 read starves every other collector (issue #35)",
-                relative.display()
-            ));
+        // Merely *mentioning* blocking::offload is not enough. Every OS read, and every
+        // function that reaches one, must be handed to the offload rather than called
+        // beside it.
+        let blocking_fns = blocking_functions(production_source, &markers);
+        let offloaded = offload_argument_lines(&body_lines);
+
+        for (line, is_offloaded) in body_lines.iter().zip(offloaded.iter()) {
+            if *is_offloaded {
+                continue;
+            }
+
+            if let Some(marker) = markers.iter().find(|marker| line.contains(marker.as_str())) {
+                failures.push(format!(
+                    "{} reads the OS directly inside collect_once ('{marker}' in '{line}'): move \
+                     the read into a named sampler reached only through \
+                     blocking::offload_coalesced, or an inline slow read starves every other \
+                     collector (issue #35)",
+                    relative.display()
+                ));
+            }
+
+            if let Some(called) = blocking_fns
+                .iter()
+                .find(|name| line.contains(&format!("{name}(")))
+            {
+                failures.push(format!(
+                    "{} calls the blocking function '{called}' from collect_once outside the \
+                     blocking::offload_coalesced argument list ('{line}'): it reaches an OS read, \
+                     so calling it here runs that read on a Tokio worker exactly as issue #35 did. \
+                     Pass it to offload_coalesced instead",
+                    relative.display()
+                ));
+            }
         }
     }
 
@@ -298,6 +347,146 @@ fn collectors_do_not_block_the_runtime_with_os_reads() -> Result<()> {
     } else {
         Err(anyhow!(failures.join("\n")))
     }
+}
+
+/// The literal OS markers plus one per blocking item this file imports under a new name.
+///
+/// `use std::fs::read_to_string as slurp;` moves every later read behind `slurp(`, which
+/// none of the literal markers match. The alias becomes a marker of its own so renaming
+/// an import cannot launder a blocking read.
+fn os_read_markers(production_source: &str) -> Vec<String> {
+    let mut markers: Vec<String> = OS_READ_MARKERS.iter().map(|&m| m.to_string()).collect();
+
+    for line in production_source.lines().map(str::trim) {
+        if !line.starts_with("use ") || !OS_IMPORT_ROOTS.iter().any(|root| line.contains(root)) {
+            continue;
+        }
+
+        for renamed in line.split(" as ").skip(1) {
+            let alias: String = renamed
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !alias.is_empty() {
+                markers.push(format!("{alias}("));
+            }
+        }
+    }
+
+    markers
+}
+
+/// Names of every function in `production_source` that performs a blocking OS read, or
+/// calls something that does.
+///
+/// Attribution is by position: a line belongs to the most recent `fn` above it, which is
+/// how Rust source reads and is enough to tell "this helper does the read" from "this
+/// helper is merely named next to it". Propagation runs to a fixpoint, so a chain of
+/// helpers is as blocking as the read at the end of it.
+fn blocking_functions(production_source: &str, markers: &[String]) -> Vec<String> {
+    let mut spans: Vec<(String, Vec<&str>)> = Vec::new();
+
+    for line in production_source.lines().map(str::trim) {
+        if let Some(name) = function_name(line) {
+            spans.push((name, Vec::new()));
+        }
+        if let Some((_, lines)) = spans.last_mut() {
+            lines.push(line);
+        }
+    }
+
+    let code_lines = |lines: &Vec<&str>| -> Vec<String> {
+        lines
+            .iter()
+            .filter(|line| !line.starts_with("//"))
+            .map(|line| (*line).to_string())
+            .collect()
+    };
+
+    let mut blocking: Vec<String> = Vec::new();
+    for (name, lines) in &spans {
+        let reads_os = code_lines(lines)
+            .iter()
+            .any(|line| markers.iter().any(|marker| line.contains(marker.as_str())));
+        if reads_os && !blocking.contains(name) {
+            blocking.push(name.clone());
+        }
+    }
+
+    loop {
+        let mut discovered: Vec<String> = Vec::new();
+
+        for (name, lines) in &spans {
+            if blocking.contains(name) || discovered.contains(name) {
+                continue;
+            }
+            let calls_blocking = code_lines(lines).iter().any(|line| {
+                blocking
+                    .iter()
+                    .any(|callee| line.contains(&format!("{callee}(")))
+            });
+            if calls_blocking {
+                discovered.push(name.clone());
+            }
+        }
+
+        if discovered.is_empty() {
+            return blocking;
+        }
+        blocking.extend(discovered);
+    }
+}
+
+/// The name defined by a function-definition line, if the line is one.
+fn function_name(trimmed_line: &str) -> Option<String> {
+    let (prefix, rest) = trimmed_line.split_once("fn ")?;
+
+    // `fn` may only be preceded by qualifiers; anything else is prose or a type bound.
+    let qualifiers_only = prefix.split_whitespace().all(|word| {
+        matches!(
+            word,
+            "pub" | "async" | "const" | "unsafe" | "extern" | "default"
+        ) || word.starts_with("pub(")
+    });
+    if !qualifiers_only {
+        return None;
+    }
+
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+/// Marks the lines of `body_lines` that sit inside a `blocking::offload_coalesced(..)`
+/// argument list, tracking parenthesis depth so a multi-line call is covered exactly.
+///
+/// Work named there runs on the blocking pool; work named anywhere else in `collect_once`
+/// runs on a Tokio worker.
+fn offload_argument_lines(body_lines: &[&str]) -> Vec<bool> {
+    let mut inside = Vec::with_capacity(body_lines.len());
+    let mut depth: usize = 0;
+
+    for line in body_lines {
+        let opens = line.matches('(').count();
+        let closes = line.matches(')').count();
+
+        if depth == 0 {
+            if line.contains("offload_coalesced(") {
+                depth = opens.saturating_sub(closes);
+                inside.push(true);
+            } else {
+                inside.push(false);
+            }
+            continue;
+        }
+
+        inside.push(true);
+        depth = depth.saturating_add(opens).saturating_sub(closes);
+    }
+
+    inside
 }
 
 /// The `system.process` collector accumulates a monotonic CPU counter from per-PID deltas,

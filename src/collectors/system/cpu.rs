@@ -270,6 +270,13 @@ fn read_cpu_times() -> Result<Vec<CoreTimes>> {
     Ok(out)
 }
 
+// The `Result` is not optional here even though this arm cannot fail: the signature is
+// shared with the Linux and FreeBSD readers, and `update_cpu_seconds` distinguishes
+// `Ok(empty)` (platform has no counters — warn once, still publish the core count) from
+// `Err` (a read that should have worked did not — warn every scrape). Returning a bare
+// `Vec` would fork the caller per platform, and returning `Err` would both lose the core
+// count and turn a supported configuration into a recurring warning.
+#[allow(clippy::unnecessary_wraps)]
 #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 fn read_cpu_times() -> Result<Vec<CoreTimes>> {
     // CPU counters are only implemented for Linux and FreeBSD. The caller logs a
