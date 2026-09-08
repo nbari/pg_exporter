@@ -436,6 +436,47 @@ async fn limited_pg_monitor_role_runs_all_collectors_and_stays_within_five_conne
     cleanup
 }
 
+/// Polls the exporter's backend count until `stop` is raised, keeping the peak.
+fn spawn_connection_monitor(
+    admin_options: &PgConnectOptions,
+    stop: &Arc<AtomicBool>,
+    peak: &Arc<AtomicI64>,
+) -> tokio::task::JoinHandle<Result<()>> {
+    let monitor_stop = Arc::clone(stop);
+    let monitor_peak = Arc::clone(peak);
+    let monitor_options = admin_options.clone();
+    tokio::spawn(async move {
+        let mut connection = connect_with_retry(&monitor_options).await?;
+        while !monitor_stop.load(Ordering::SeqCst) {
+            let count = exporter_connection_count(&mut connection).await?;
+            monitor_peak.fetch_max(count, Ordering::SeqCst);
+            sleep(Duration::from_millis(10)).await;
+        }
+        Ok(())
+    })
+}
+
+/// The primary scrape was aborted mid-flight when its client disconnected: at least
+/// the lock-waiting collector was in flight, so its timer must have been recorded as
+/// an abort — never as a success — in the exporter's self-metrics.
+async fn assert_abort_was_recorded(client: &reqwest::Client, metrics_url: &str) -> Result<()> {
+    let body = client.get(metrics_url).send().await?.text().await?;
+    let aborted_total: f64 = body
+        .lines()
+        .filter(|line| line.starts_with("pg_exporter_collector_scrape_aborted_total{"))
+        .filter_map(|line| line.rsplit_once(' ').map(|(_, value)| value))
+        .filter_map(|value| value.parse::<f64>().ok())
+        .sum();
+    if aborted_total < 1.0 {
+        bail!(
+            "the client-disconnected scrape left no trace in \
+             pg_exporter_collector_scrape_aborted_total: in-flight collectors must not be \
+             recorded as successes when the scrape is aborted (issue #34). Body:\n{body}"
+        );
+    }
+    Ok(())
+}
+
 async fn run_budget_scenario(
     admin: &mut PgConnection,
     admin_options: &PgConnectOptions,
@@ -473,18 +514,7 @@ async fn run_budget_scenario(
 
     let stop_monitor = Arc::new(AtomicBool::new(false));
     let observed_peak = Arc::new(AtomicI64::new(0));
-    let monitor_stop = Arc::clone(&stop_monitor);
-    let monitor_peak = Arc::clone(&observed_peak);
-    let monitor_options = admin_options.clone();
-    let monitor = tokio::spawn(async move {
-        let mut connection = connect_with_retry(&monitor_options).await?;
-        while !monitor_stop.load(Ordering::SeqCst) {
-            let count = exporter_connection_count(&mut connection).await?;
-            monitor_peak.fetch_max(count, Ordering::SeqCst);
-            sleep(Duration::from_millis(10)).await;
-        }
-        Ok::<(), anyhow::Error>(())
-    });
+    let monitor = spawn_connection_monitor(admin_options, &stop_monitor, &observed_peak);
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -545,6 +575,7 @@ async fn run_budget_scenario(
     }
 
     wait_for_metrics_recovery(&client, &metrics_url).await?;
+    assert_abort_was_recorded(&client, &metrics_url).await?;
 
     stop_monitor.store(true, Ordering::SeqCst);
     monitor

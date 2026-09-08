@@ -140,6 +140,12 @@ impl<T> Drop for AbortOnDrop<T> {
 /// futures releases the pooled connections that the timed-out scrape had checked out,
 /// instead of leaving them parked server-side in `idle`/`Client:ClientRead` as observed in
 /// issue #34.
+///
+/// The trade-off, accepted deliberately: the next scrape may start while the aborted
+/// scrape's backends are still cancelling server-side, transiently doubling the observed
+/// connection footprint. That is bounded — the shared pool caps at
+/// `SHARED_POOL_MAX_CONNECTIONS` and per-database fan-out at a process-wide semaphore —
+/// and self-heals; see the "Connection budget" section of the README.
 async fn run_gated_scrape<F>(
     gate: &Arc<Semaphore>,
     scrape_timeout: Duration,

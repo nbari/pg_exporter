@@ -426,6 +426,18 @@ immediately with SQLSTATE `53300` (it does not queue and waits for nothing). Set
   sessions, or if several exporter processes share one role. Processes sharing a role share
   its limit and can reject each other's logins even while each stays within its own budget.
 
+**Scrape timeouts can briefly double the footprint.** When a scrape exceeds
+`--scrape.timeout-ms`, the exporter aborts it: in-flight queries are cancelled and their
+connections closed, but the server-side backends take a moment to finish cancelling. A
+follow-up scrape may start while that teardown is still visible in `pg_stat_activity`, so
+the exporter's *observed* backend count can transiently reach about **2 × (3 + N)** (the
+aborted scrape's connections plus the new scrape's). The transient is bounded — per-database
+fan-out is capped process-wide, not per scrape — and self-heals as the cancelled backends
+exit, but on slow networks it can last long enough to matter: a role limit of exactly
+`3 + N` may reject a few connections with SQLSTATE `53300` during an abort burst, which
+surfaces as a failed scrape that recovers on the next one. If that noise is unacceptable,
+size the role limit at `2 × (3 + N)`.
+
 Either way, keep enough cluster-wide `max_connections` headroom; the role limit is a
 backstop, not a substitute for the exporter's own concurrency bound. If monitoring must
 continue when ordinary slots are exhausted, see

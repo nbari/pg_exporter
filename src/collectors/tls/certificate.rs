@@ -32,6 +32,12 @@ pub struct CertificateCollector {
     pg_ssl_certificate_not_after_timestamp: GaugeVec,
     /// Ensures the missing-privilege warning is logged at most once per process.
     denied_warned: Arc<AtomicBool>,
+    /// Coalesces certificate reads to one in flight: a started `spawn_blocking` read
+    /// cannot be cancelled, so without this a hung `ssl_cert_file` (e.g. a dead network
+    /// mount) would leak one blocking-pool thread per scrape, without bound. A
+    /// `tokio::sync::Mutex`, not a `Semaphore`: collector semaphores are reserved for the
+    /// per-database query budget (enforced in `tests/collector_safety.rs`).
+    cert_read_slot: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl CertificateCollector {
@@ -71,6 +77,7 @@ impl CertificateCollector {
 
         Self {
             denied_warned: Arc::new(AtomicBool::new(false)),
+            cert_read_slot: Arc::new(tokio::sync::Mutex::new(())),
             pg_ssl_certificate_expiry_seconds,
             pg_ssl_certificate_valid,
             pg_ssl_certificate_not_before_timestamp,
@@ -198,12 +205,22 @@ impl Collector for CertificateCollector {
                     //
                     // The read and the X.509 parse are blocking, so they go to the blocking
                     // pool rather than the runtime worker (issue #35): `ssl_cert_file` can
-                    // point anywhere, including a network mount that hangs.
+                    // point anywhere, including a network mount that hangs. The coalescing
+                    // slot caps that case at one in-flight read — a hung read already holds
+                    // a blocking thread it cannot be cancelled out of, so queueing one more
+                    // per scrape would grow the pool without bound. While a read is stuck,
+                    // scrapes keep the last published series.
                     let collector = self.clone();
-                    blocking::offload("tls.certificate", move || {
-                        collector.parse_certificate_file(&cert_path)
-                    })
-                    .await?
+                    let outcome = blocking::offload_coalesced(
+                        "tls.certificate",
+                        &self.cert_read_slot,
+                        move || collector.parse_certificate_file(&cert_path),
+                    )
+                    .await?;
+                    match outcome {
+                        Some(result) => result,
+                        None => Ok(Collected::Fresh),
+                    }
                 }
                 Err(error) => {
                     // An absent or unreadable setting is a skip, which clears. Anything else

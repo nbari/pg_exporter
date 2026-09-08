@@ -24,13 +24,20 @@ use std::time::Instant;
 ///   - Alert if rate > 0: collector is failing
 ///   - Example: `rate(pg_exporter_collector_scrape_errors_total[5m]) > 0`
 ///
+/// - `pg_exporter_collector_scrape_aborted_total{collector}` (Counter)
+///   - Times the collector was still in flight when the scrape task was aborted
+///     (scrape timeout or client disconnect)
+///   - The collector is not necessarily at fault; the abort bounds the whole scrape
+///   - Alert if rate > 0 together with a stalled `..._duration_seconds`: the
+///     collector is not finishing within `--scrape.timeout-ms`
+///
 /// - `pg_exporter_collector_last_scrape_timestamp_seconds{collector}` (Gauge)
 ///   - Unix timestamp of last scrape attempt
 ///   - Detect stale collectors (stuck or disabled)
 ///   - Example: `time() - pg_exporter_collector_last_scrape_timestamp_seconds > 120`
 ///
 /// - `pg_exporter_collector_last_scrape_success{collector}` (Gauge)
-///   - 1 = last scrape succeeded, 0 = failed
+///   - 1 = last scrape succeeded, 0 = failed or aborted
 ///   - Simple success/failure indicator per collector
 ///
 /// ## Global Metrics
@@ -67,8 +74,10 @@ use std::time::Instant;
 ///     Err(e) => timer.error(),   // Records error, marks failure
 /// }
 ///
-/// // If timer is dropped without calling success()/error(),
-/// // it defaults to success (optimistic)
+/// // If the scrape task is aborted while the collector is in flight (scrape
+/// // timeout or client disconnect), the timer is dropped without either call
+/// // and the attempt is recorded in `pg_exporter_collector_scrape_aborted_total`
+/// // with `last_scrape_success = 0` — never as a success.
 /// # Ok(())
 /// # }
 /// # async fn collect_database_metrics() -> Result<()> { Ok(()) }
@@ -103,6 +112,7 @@ pub struct ScraperCollector {
     // Per-collector metrics
     scrape_duration_seconds: HistogramVec,
     scrape_errors_total: CounterVec,
+    scrape_aborted_total: CounterVec,
     last_scrape_timestamp: GaugeVec,
     last_scrape_success: GaugeVec,
 
@@ -145,6 +155,16 @@ impl ScraperCollector {
         )
         .expect("pg_exporter_collector_scrape_errors_total");
 
+        let scrape_aborted_total = CounterVec::new(
+            Opts::new(
+                "pg_exporter_collector_scrape_aborted_total",
+                "Total scrape attempts aborted mid-flight per collector (scrape timeout or \
+                 client disconnect); the duration sample records time-until-abort",
+            ),
+            &["collector"],
+        )
+        .expect("pg_exporter_collector_scrape_aborted_total");
+
         let last_scrape_timestamp = GaugeVec::new(
             Opts::new(
                 "pg_exporter_collector_last_scrape_timestamp_seconds",
@@ -178,6 +198,7 @@ impl ScraperCollector {
         Self {
             scrape_duration_seconds,
             scrape_errors_total,
+            scrape_aborted_total,
             last_scrape_timestamp,
             last_scrape_success,
             metrics_total,
@@ -253,6 +274,33 @@ impl ScraperCollector {
             .set(0.0);
     }
 
+    /// Record an aborted scrape: the collector was still in flight when the scrape
+    /// task was aborted, so no outcome is known. The duration is time-until-abort
+    /// (typically the scrape timeout), observed so a stalled collector still shows up
+    /// in `..._duration_seconds` — but it is counted as aborted, never as success.
+    fn record_aborted(&self, collector_name: &'static str, duration: f64) {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+
+        self.scrape_duration_seconds
+            .with_label_values(&[collector_name])
+            .observe(duration);
+
+        self.scrape_aborted_total
+            .with_label_values(&[collector_name])
+            .inc();
+
+        self.last_scrape_timestamp
+            .with_label_values(&[collector_name])
+            .set(timestamp);
+
+        self.last_scrape_success
+            .with_label_values(&[collector_name])
+            .set(0.0);
+    }
+
     /// Register all metrics with the registry
     ///
     /// # Errors
@@ -261,6 +309,7 @@ impl ScraperCollector {
     pub fn register(&self, registry: &Registry) -> Result<()> {
         registry.register(Box::new(self.scrape_duration_seconds.clone()))?;
         registry.register(Box::new(self.scrape_errors_total.clone()))?;
+        registry.register(Box::new(self.scrape_aborted_total.clone()))?;
         registry.register(Box::new(self.last_scrape_timestamp.clone()))?;
         registry.register(Box::new(self.last_scrape_success.clone()))?;
         registry.register(Box::new(self.metrics_total.clone()))?;
@@ -288,6 +337,7 @@ impl crate::collectors::Collector for ScraperCollector {
     fn reset_metrics(&self) {
         self.scrape_duration_seconds.reset();
         self.scrape_errors_total.reset();
+        self.scrape_aborted_total.reset();
         self.last_scrape_timestamp.reset();
         self.last_scrape_success.reset();
     }
@@ -329,10 +379,15 @@ impl Drop for ScrapeTimer {
         if self.recorded {
             return;
         }
-        // If neither success() nor error() was called explicitly,
-        // default to success (optimistic)
+        // Neither success() nor error() was called: the scrape future was dropped while
+        // the collector was still in flight, which happens only when the scrape task is
+        // aborted (scrape timeout or client disconnect, issue #34). Record it as aborted.
+        // Recording a success here — the previous behaviour — made every collector caught
+        // mid-flight by a timed-out scrape report `last_scrape_success = 1` and a
+        // timeout-sized "success" duration, so the exporter's own health metrics read
+        // healthy during exactly the incident they exist to diagnose.
         let duration = self.start.elapsed().as_secs_f64();
-        self.scraper.record_success(self.collector_name, duration);
+        self.scraper.record_aborted(self.collector_name, duration);
     }
 }
 
@@ -424,6 +479,108 @@ mod tests {
                     "Should not record duration on error"
                 );
             }
+        }
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    #[allow(clippy::expect_used)]
+    fn test_scrape_timer_records_aborted_on_unobserved_drop() {
+        // Issue #34 follow-up: when the scrape task is aborted mid-flight (timeout or
+        // client disconnect), each in-flight collector's timer is dropped without
+        // success()/error(). That must be visible as an abort, never as a success.
+        let scraper = ScraperCollector::new();
+        let registry = Registry::new();
+        scraper.register(&registry).unwrap();
+
+        {
+            let timer = scraper.start_scrape("test_collector");
+            thread::sleep(Duration::from_millis(10));
+            drop(timer);
+        }
+
+        let metrics = registry.gather();
+
+        let aborted = metrics
+            .iter()
+            .find(|m| m.name() == "pg_exporter_collector_scrape_aborted_total")
+            .expect("aborted metric should exist");
+        let aborted_sample = aborted
+            .get_metric()
+            .first()
+            .expect("aborted metric should have a sample");
+        assert!(
+            (aborted_sample.get_counter().value() - 1.0).abs() < f64::EPSILON,
+            "an unobserved timer drop must count exactly one abort"
+        );
+
+        let success = metrics
+            .iter()
+            .find(|m| m.name() == "pg_exporter_collector_last_scrape_success")
+            .expect("success gauge should exist");
+        let success_sample = success
+            .get_metric()
+            .first()
+            .expect("success gauge should have a sample");
+        assert!(
+            success_sample.get_gauge().value().abs() < f64::EPSILON,
+            "an aborted collector must not report last_scrape_success = 1"
+        );
+
+        let errors = metrics
+            .iter()
+            .find(|m| m.name() == "pg_exporter_collector_scrape_errors_total");
+        if let Some(errors) = errors {
+            assert!(
+                errors.get_metric().is_empty(),
+                "an abort is not a collector error: scrape_errors_total must stay empty"
+            );
+        }
+
+        // The duration is still observed (time-until-abort), so a stalled collector
+        // keeps showing up in pg_exporter_collector_scrape_duration_seconds.
+        let duration = metrics
+            .iter()
+            .find(|m| m.name() == "pg_exporter_collector_scrape_duration_seconds")
+            .expect("duration metric should exist");
+        assert_eq!(
+            duration
+                .get_metric()
+                .first()
+                .expect("duration metric should have a sample")
+                .get_histogram()
+                .get_sample_count(),
+            1,
+            "the aborted attempt should still record its time-until-abort"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    #[allow(clippy::expect_used)]
+    fn test_recorded_outcome_is_not_rewritten_by_drop() {
+        let scraper = ScraperCollector::new();
+        let registry = Registry::new();
+        scraper.register(&registry).unwrap();
+
+        {
+            let timer = scraper.start_scrape("ok_collector");
+            timer.success();
+        }
+        {
+            let timer = scraper.start_scrape("err_collector");
+            timer.error();
+        }
+
+        let metrics = registry.gather();
+        let aborted = metrics
+            .iter()
+            .find(|m| m.name() == "pg_exporter_collector_scrape_aborted_total");
+        if let Some(aborted) = aborted {
+            assert!(
+                aborted.get_metric().is_empty(),
+                "explicit success()/error() outcomes must not also count as aborted"
+            );
         }
     }
 

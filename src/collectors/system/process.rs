@@ -334,8 +334,10 @@ pub struct ProcessGroupCollector {
     /// Last observed cumulative CPU seconds per live PID, used to accumulate a
     /// monotonic group counter across process churn.
     ///
-    /// Also serialises the whole sample-and-publish sequence, because two collections can
-    /// overlap; see [`ProcessGroupCollector::collect_stats`].
+    /// Held across the whole sample-and-publish sequence, because two collections can
+    /// overlap; taken with `try_lock` so an overlapping collection skips instead of
+    /// queueing onto the blocking pool. See
+    /// [`ProcessGroupCollector::collect_stats_with`].
     prev_cpu: Arc<Mutex<HashMap<u32, f64>>>,
     /// Persistent `sysinfo` state for FreeBSD sampling (unused on Linux, which
     /// reads `/proc` directly).
@@ -417,6 +419,38 @@ impl ProcessGroupCollector {
     }
 
     fn collect_stats(&self) {
+        #[cfg(target_os = "linux")]
+        self.collect_stats_with(|| sample_processes(GROUP, self.memory_source));
+        #[cfg(target_os = "freebsd")]
+        self.collect_stats_with(|| sample_processes(&self.system, GROUP));
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+        self.collect_stats_with(Vec::new);
+    }
+
+    /// Samples via `sample` and publishes the per-PID CPU deltas and gauges, or skips
+    /// the whole pass when a previous sample is still running.
+    ///
+    /// The lock spans the sample, not just the bookkeeping, because two collections can
+    /// overlap: the scrape gate reopens the moment a scrape times out (issue #34), and a
+    /// `spawn_blocking` sample that has already started cannot be aborted, so a timed-out
+    /// scrape's walk keeps running alongside the next scrape's.
+    ///
+    /// Sampling outside the lock let those passes interleave. The newer sample could
+    /// publish its per-PID baseline first; the older one then found every total lower
+    /// than the baseline, counted no delta, and overwrote the baseline with its own
+    /// older values — so the next pass re-counted the interval between them and
+    /// `pg_system_process_group_cpu_seconds_total` climbed above the CPU actually
+    /// consumed.
+    ///
+    /// The lock is a *try* lock: a collection that finds a sample already in flight
+    /// skips instead of queueing behind it. A started `spawn_blocking` task cannot be
+    /// cancelled, so a sample that outlives its scrape (an over-timeout PSS walk) would
+    /// otherwise pile one queued task per scrape onto the blocking pool without bound;
+    /// skipping bounds the in-flight work to the one sample already running, and its
+    /// eventual publish is newer than anything the skipped pass would have produced
+    /// anyway. (This is the textbook `try_lock` use: the lock guards freshness of the
+    /// data, and stale work is simply dropped.)
+    fn collect_stats_with(&self, sample: impl FnOnce() -> Vec<ProcSample>) {
         if !SUPPORTED {
             if !self.unsupported_warned.swap(true, Ordering::Relaxed) {
                 warn!(
@@ -427,32 +461,19 @@ impl ProcessGroupCollector {
             return;
         }
 
-        // The lock spans the sample, not just the bookkeeping, because two collections
-        // can overlap: the scrape gate reopens the moment a scrape times out (issue #34),
-        // and a `spawn_blocking` sample that has already started cannot be aborted, so a
-        // timed-out scrape's walk keeps running alongside the next scrape's.
-        //
-        // Sampling outside the lock let those passes interleave. The newer sample could
-        // publish its per-PID baseline first; the older one then found every total lower
-        // than the baseline, counted no delta, and overwrote the baseline with its own
-        // older values — so the next pass re-counted the interval between them and
-        // `pg_system_process_group_cpu_seconds_total` climbed above the CPU actually
-        // consumed. Serialising here also keeps two concurrent walks from doubling the
-        // `/proc` load, and means the gauges are always published in sample order.
-        let mut prev = match self.prev_cpu.lock() {
+        let mut prev = match self.prev_cpu.try_lock() {
             Ok(guard) => guard,
-            Err(poisoned) => {
+            Err(std::sync::TryLockError::WouldBlock) => {
+                debug!("a previous process-group sample is still running; skipping this one");
+                return;
+            }
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
                 warn!("process-group cpu mutex was poisoned, recovering");
                 poisoned.into_inner()
             }
         };
 
-        #[cfg(target_os = "linux")]
-        let samples = sample_processes(GROUP, self.memory_source);
-        #[cfg(target_os = "freebsd")]
-        let samples = sample_processes(&self.system, GROUP);
-        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-        let samples: Vec<ProcSample> = Vec::new();
+        let samples = sample();
 
         let mut delta_total = 0.0_f64;
         let mut mem_total = 0_u64;
@@ -620,6 +641,96 @@ mod tests {
             "the group cpu counter grew by {growth}s over {elapsed}s on {cores} cores, which \
              is more CPU than the machine has: overlapping collections published their \
              per-PID baselines out of order and an interval was counted twice (issue #34)"
+        );
+    }
+
+    /// Two collections can overlap in production: the scrape gate reopens as soon as a
+    /// scrape times out (issue #34) and a `spawn_blocking` sample that has already started
+    /// cannot be aborted, so an abandoned scrape's walk keeps running alongside the next
+    /// one. The second collection must skip — never interleave its sample with the first.
+    ///
+    /// Scripted with an injected sampler so the interleaving is deterministic: the slow
+    /// sample is held open *inside* the lock while a concurrent collection runs. On the
+    /// pre-fix shape (sample outside the lock) the concurrent pass samples immediately
+    /// and the call-count assertion fails; with a blocking lock it queues until the
+    /// release and the elapsed/call-count assertions fail. Only the try-lock skip passes.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn a_concurrent_collection_skips_instead_of_interleaving_samples() {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::{Barrier, mpsc};
+
+        // Sampler script: the baseline returns cpu=10; the slow pass synchronises with
+        // the test, blocks until released, then returns cpu=12; later calls return 18.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let sample_started = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let script = {
+            let calls = Arc::clone(&calls);
+            let sample_started = Arc::clone(&sample_started);
+            let release = Arc::clone(&release);
+            Arc::new(move || {
+                let cpu = match calls.fetch_add(1, Ordering::SeqCst) {
+                    0 => 10.0,
+                    1 => {
+                        sample_started.wait();
+                        release.wait();
+                        12.0
+                    }
+                    _ => 18.0,
+                };
+                vec![ProcSample {
+                    pid: 1,
+                    cpu_seconds: cpu,
+                    mem_bytes: 0,
+                }]
+            })
+        };
+
+        let collector = ProcessGroupCollector::new();
+        // Baseline: prev = {1: 10}, no delta counted.
+        collector.collect_stats_with(|| (*script)());
+
+        let slow_collector = collector.clone();
+        let slow_script = Arc::clone(&script);
+        let slow = std::thread::spawn(move || {
+            slow_collector.collect_stats_with(|| (*slow_script)());
+        });
+        // Wait until the slow pass is inside its sample, holding the baseline lock.
+        sample_started.wait();
+
+        // While the slow sample holds the lock, a concurrent collection must skip: it
+        // must neither sample nor queue behind the walk. Run it on its own thread so a
+        // regression to a blocking lock fails the deadline instead of hanging the test.
+        let (done_tx, done_rx) = mpsc::channel::<usize>();
+        let concurrent_collector = collector.clone();
+        let concurrent_script = Arc::clone(&script);
+        let concurrent = std::thread::spawn(move || {
+            concurrent_collector.collect_stats_with(|| (*concurrent_script)());
+            let _ = done_tx.send(calls.load(Ordering::SeqCst));
+        });
+        let concurrent_calls = done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a concurrent collection queued behind an in-flight sample: aborted \
+                     scrapes would pile samples onto the blocking pool");
+        assert_eq!(
+            concurrent_calls, 2,
+            "a concurrent collection sampled instead of skipping"
+        );
+        concurrent.join().expect("the concurrent collection panicked");
+
+        // Let the slow pass finish: it publishes prev = {1: 12}, counting +2.
+        release.wait();
+        slow.join().expect("the slow collection panicked");
+
+        // Next pass: prev = {1: 12}, counts 18-12 = 6. Total = 2 + 6 = 8 = 18 - 10:
+        // exactly the CPU consumed since the baseline, no interval counted twice.
+        collector.collect_stats_with(|| (*script)());
+        let total = collector.cpu_seconds.with_label_values(&[GROUP]).get();
+        assert!(
+            (total - 8.0).abs() < f64::EPSILON,
+            "overlapping collections mis-counted the CPU interval: got {total}, want 8.0"
         );
     }
 

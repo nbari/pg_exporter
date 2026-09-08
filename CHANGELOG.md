@@ -95,6 +95,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   branches — the `sysctl` CPU reader and the `sysinfo` process sampler — that no job
   had ever compiled before.
 
+- **Aborted scrapes no longer masquerade as successes in the exporter's self-metrics.**
+  When a scrape is aborted mid-flight (timeout or client disconnect, [#34]), every
+  collector still in flight had its `ScrapeTimer` dropped without an outcome — and the
+  `Drop` impl recorded that as a *success* with a timeout-sized duration, so
+  `pg_exporter_collector_last_scrape_success` read `1` and
+  `pg_exporter_collector_scrape_duration_seconds` kept a bogus sample during exactly the
+  incident those metrics exist to diagnose. An unobserved drop now increments the new
+  `pg_exporter_collector_scrape_aborted_total{collector}` counter and sets
+  `last_scrape_success` to `0`. The duration is still observed, but it now means
+  "time until the abort", which is what a stalled collector looks like.
+
+- **A slow or hung OS read can no longer pile tasks onto the blocking pool.** A
+  `spawn_blocking` task that has started cannot be cancelled, so once the [#34] fix made
+  the scrape gate reopen on timeout, a sample that outlives its scrape — an
+  over-timeout PSS walk, or `ssl_cert_file` on a hung network mount — would accumulate
+  one queued blocking-pool task per scrape, without bound. Sampling is now coalesced:
+  the process-group collector takes its baseline lock with `try_lock` and a scrape that
+  finds a sample already running skips its own (the in-flight one publishes newer data
+  anyway), and the TLS certificate read holds a one-permit slot so a hung read leaks
+  exactly one blocking thread instead of one per scrape. Overlapping CPU-baseline
+  samples remain correctly ordered; the regression is pinned by a deterministic test
+  rather than a timing one.
+
 ### Changed
 
 - **Dependencies**: refreshed to the latest compatible versions — `tower-http` 0.7.0 -> 0.7.1

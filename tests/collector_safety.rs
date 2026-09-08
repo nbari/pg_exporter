@@ -257,6 +257,22 @@ fn collectors_do_not_block_the_runtime_with_os_reads() -> Result<()> {
                 relative.display()
             ));
         }
+
+        // Merely *mentioning* blocking::offload is not enough: the read must live in a
+        // named sampler the offload calls, not inline in collect_once next to it.
+        let body_reads_os = body
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//"))
+            .any(|line| OS_READ_MARKERS.iter().any(|marker| line.contains(marker)));
+        if body_reads_os {
+            failures.push(format!(
+                "{} reads the OS directly inside collect_once: move the read into a named \
+                 sampler reached only through blocking::offload, or an inline slow read \
+                 starves every other collector (issue #35)",
+                relative.display()
+            ));
+        }
     }
 
     for expected in KNOWN_OS_COLLECTORS {
@@ -287,6 +303,11 @@ fn collectors_do_not_block_the_runtime_with_os_reads() -> Result<()> {
 /// the pass after that would re-count the interval between them — inflating
 /// `pg_system_process_group_cpu_seconds_total` above the CPU actually consumed.
 ///
+/// The lock is a `try_lock`: an overlapping collection skips rather than queueing, so a
+/// sample that outlives its scrape cannot pile tasks onto the blocking pool. The skip path
+/// is pinned behaviourally by `a_concurrent_collection_skips_instead_of_interleaving_samples`
+/// in process.rs; this guard pins the shape that behaviour depends on.
+///
 /// This is a source-order assertion rather than a race reproduction: the interleaving needs
 /// a pause between the sample and the lock, which cannot be injected from outside, and a
 /// timing-based test would be flaky in both directions.
@@ -304,26 +325,46 @@ fn process_group_locks_the_cpu_baseline_before_sampling() -> Result<()> {
         .next()
         .unwrap_or(source.as_str());
 
+    // The sampling/publishing implementation: the lock must be taken before the sampler
+    // runs, and held across it.
     let body = production_source
-        .split("fn collect_stats")
+        .split("fn collect_stats_with")
+        .nth(1)
+        .ok_or_else(|| anyhow!("process.rs no longer has a collect_stats_with to check"))?
+        .split("\n    }")
+        .next()
+        .unwrap_or_default();
+
+    let lock_at = ["self.prev_cpu.try_lock()", "self.prev_cpu.lock()"]
+        .iter()
+        .filter_map(|needle| body.find(needle))
+        .min()
+        .ok_or_else(|| anyhow!("collect_stats_with no longer locks prev_cpu"))?;
+    let sample_at = body
+        .find("let samples = sample();")
+        .ok_or_else(|| anyhow!("collect_stats_with no longer samples through its closure"))?;
+
+    if lock_at > sample_at {
+        return Err(anyhow!(
+            "collect_stats_with samples before taking the prev_cpu lock: two overlapping \
+             collections can then publish their baselines out of order and \
+             pg_system_process_group_cpu_seconds_total over-reports (issues #34, #35)"
+        ));
+    }
+
+    // The production sampler must reach that implementation: collect_stats dispatches the
+    // per-platform `sample_processes` calls into it.
+    let dispatch = production_source
+        .split("fn collect_stats(")
         .nth(1)
         .ok_or_else(|| anyhow!("process.rs no longer has a collect_stats to check"))?
         .split("\n    }")
         .next()
         .unwrap_or_default();
-
-    let lock_at = body
-        .find("self.prev_cpu.lock()")
-        .ok_or_else(|| anyhow!("collect_stats no longer locks prev_cpu"))?;
-    let sample_at = body
-        .find("sample_processes(")
-        .ok_or_else(|| anyhow!("collect_stats no longer calls sample_processes"))?;
-
-    if lock_at > sample_at {
+    if !dispatch.contains("collect_stats_with(|| sample_processes(") {
         return Err(anyhow!(
-            "collect_stats samples before taking the prev_cpu lock: two overlapping \
-             collections can then publish their baselines out of order and \
-             pg_system_process_group_cpu_seconds_total over-reports (issues #34, #35)"
+            "collect_stats no longer routes sample_processes through collect_stats_with: the \
+             production sampler would bypass the baseline lock (issues #34, #35)"
         ));
     }
 
@@ -381,6 +422,20 @@ fn smaps_rollup_stays_behind_the_pss_opt_in() -> Result<()> {
                  (issue #35)"
             ));
         }
+    }
+
+    // The identifier itself, not just the call shape: exactly one definition and one
+    // lazy thunk. A function-reference detour (`let f = read_pss_bytes; f(pid)`) would
+    // add an occurrence without tripping the call-site check above.
+    let identifier_uses = code_lines()
+        .filter(|line| line.contains("read_pss_bytes"))
+        .count();
+    if identifier_uses != 2 {
+        return Err(anyhow!(
+            "expected exactly 2 references to read_pss_bytes in production code (its \
+             definition and the lazy thunk in read_memory_bytes), found {identifier_uses}: \
+             the PSS walk must keep a single, visible, lazy call site (issue #35)"
+        ));
     }
 
     // The dispatch itself — that the RSS arm never calls the PSS reader — is asserted

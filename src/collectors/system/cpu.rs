@@ -367,6 +367,16 @@ impl CpuCollector {
         self.load15.set(load.fifteen);
     }
 
+    /// Applies a fresh per-core sample against the previous raw values.
+    ///
+    /// The sample (`read_cpu_times`, one `/proc/stat` read of a few microseconds) is
+    /// intentionally taken *outside* the `raw_cpu_seconds` lock — unlike
+    /// `system::process::ProcessGroupCollector`, whose `/proc` walk can take seconds and
+    /// therefore locks across its sample. Two defences make the weaker scope safe here:
+    /// the backwards branch below refuses to lower the baseline, so an out-of-order
+    /// publish cannot re-count an interval; and the idle-reset detector would need 3 s of
+    /// idle drift inside a microseconds-wide interleaving window. If this collector ever
+    /// samples something slow, revisit that trade-off.
     fn apply_cpu_times(&self, times: &[CoreTimes]) {
         self.update_cores(times.len());
 
