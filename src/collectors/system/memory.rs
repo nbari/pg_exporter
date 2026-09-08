@@ -18,7 +18,7 @@
 //! reclaimable memory; there, prefer `used`/`free` and treat the `available`
 //! series as a conservative floor.
 
-use crate::collectors::{Collected, Collector};
+use crate::collectors::{Collected, Collector, blocking};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{IntGauge, Opts, Registry};
@@ -181,7 +181,7 @@ impl Collector for MemoryCollector {
         Box::pin(async move {
             // Blocking sysinfo refresh: never run this on a runtime worker (issue #35).
             let collector = self.clone();
-            super::blocking::offload("system.memory", move || collector.collect_stats()).await?;
+            blocking::offload("system.memory", move || collector.collect_stats()).await?;
             Ok(Collected::Fresh)
         })
     }

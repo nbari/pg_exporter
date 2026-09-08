@@ -25,13 +25,13 @@
 //!   processes.
 //!
 //! All sampling here is **blocking, synchronous** OS I/O and must be run on the
-//! blocking pool via [`super::blocking::offload`] — never inline on a Tokio
+//! blocking pool via `blocking::offload` — never inline on a Tokio
 //! worker, which would stall every other collector sharing the runtime.
 //!
 //! Like the rest of `--collector.system` this only makes sense when the exporter
 //! is co-located with `PostgreSQL` and never touches the database.
 
-use crate::collectors::{Collected, Collector};
+use crate::collectors::{Collected, Collector, blocking};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{CounterVec, IntGaugeVec, Opts, Registry};
@@ -204,22 +204,41 @@ fn read_rss_bytes(pid: u32, page_size: u64) -> Option<u64> {
     parse_statm_resident_pages(&content).map(|pages| pages.saturating_mul(page_size))
 }
 
+/// Chooses between the two readers for `source`, and applies the PSS fallback.
+///
+/// Both readers are taken lazily and that is the whole point: in [`ProcessMemorySource::Rss`]
+/// mode `pss` must never be called, because calling it is the `O(processes × resident pages)`
+/// page-table walk of issue #35. Taking them as arguments also makes the dispatch testable
+/// without reading a live process, whose footprint moves between reads.
+#[cfg(target_os = "linux")]
+fn select_memory_source<P, R>(source: ProcessMemorySource, pss: P, rss: R) -> u64
+where
+    P: FnOnce() -> Option<u64>,
+    R: FnOnce() -> Option<u64>,
+{
+    match source {
+        ProcessMemorySource::Rss => rss(),
+        // PSS is unreadable without privileges on that process; fall back rather than
+        // reporting nothing.
+        ProcessMemorySource::Pss => pss().or_else(rss),
+    }
+    .unwrap_or(0)
+}
+
 /// Reads the memory figure for one PID from the configured source.
 #[cfg(target_os = "linux")]
 fn read_memory_bytes(pid: u32, page_size: u64, source: ProcessMemorySource) -> u64 {
-    match source {
-        ProcessMemorySource::Rss => read_rss_bytes(pid, page_size),
-        ProcessMemorySource::Pss => {
-            read_pss_bytes(pid).or_else(|| read_rss_bytes(pid, page_size))
-        }
-    }
-    .unwrap_or(0)
+    select_memory_source(
+        source,
+        || read_pss_bytes(pid),
+        || read_rss_bytes(pid, page_size),
+    )
 }
 
 /// Samples every `postgres*` process on Linux by reading `/proc` directly.
 ///
 /// Blocking, synchronous I/O: callers must run this on the blocking pool via
-/// [`super::blocking::offload`], never inline on a runtime worker (issue #35).
+/// `blocking::offload`, never inline on a runtime worker (issue #35).
 #[cfg(target_os = "linux")]
 fn sample_processes(prefix: &str, source: ProcessMemorySource) -> Vec<ProcSample> {
     let hz = clk_tck();
@@ -297,7 +316,8 @@ fn sample_processes(system: &Mutex<System>, prefix: &str) -> Vec<ProcSample> {
 ///
 /// **Metrics (labeled `group="postgres"`):**
 /// - `pg_system_process_group_cpu_seconds_total` (counter, seconds)
-/// - `pg_system_process_group_memory_bytes` (gauge; PSS on Linux, RSS on FreeBSD)
+/// - `pg_system_process_group_memory_bytes` (gauge; RSS by default, PSS on Linux via
+///   `--system.process-memory=pss`)
 /// - `pg_system_process_group_count` (gauge)
 #[derive(Clone)]
 pub struct ProcessGroupCollector {
@@ -308,6 +328,9 @@ pub struct ProcessGroupCollector {
     memory_source: ProcessMemorySource,
     /// Last observed cumulative CPU seconds per live PID, used to accumulate a
     /// monotonic group counter across process churn.
+    ///
+    /// Also serialises the whole sample-and-publish sequence, because two collections can
+    /// overlap; see [`ProcessGroupCollector::collect_stats`].
     prev_cpu: Arc<Mutex<HashMap<u32, f64>>>,
     /// Persistent `sysinfo` state for FreeBSD sampling (unused on Linux, which
     /// reads `/proc` directly).
@@ -399,13 +422,18 @@ impl ProcessGroupCollector {
             return;
         }
 
-        #[cfg(target_os = "linux")]
-        let samples = sample_processes(GROUP, self.memory_source);
-        #[cfg(target_os = "freebsd")]
-        let samples = sample_processes(&self.system, GROUP);
-        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-        let samples: Vec<ProcSample> = Vec::new();
-
+        // The lock spans the sample, not just the bookkeeping, because two collections
+        // can overlap: the scrape gate reopens the moment a scrape times out (issue #34),
+        // and a `spawn_blocking` sample that has already started cannot be aborted, so a
+        // timed-out scrape's walk keeps running alongside the next scrape's.
+        //
+        // Sampling outside the lock let those passes interleave. The newer sample could
+        // publish its per-PID baseline first; the older one then found every total lower
+        // than the baseline, counted no delta, and overwrote the baseline with its own
+        // older values — so the next pass re-counted the interval between them and
+        // `pg_system_process_group_cpu_seconds_total` climbed above the CPU actually
+        // consumed. Serialising here also keeps two concurrent walks from doubling the
+        // `/proc` load, and means the gauges are always published in sample order.
         let mut prev = match self.prev_cpu.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
@@ -413,6 +441,13 @@ impl ProcessGroupCollector {
                 poisoned.into_inner()
             }
         };
+
+        #[cfg(target_os = "linux")]
+        let samples = sample_processes(GROUP, self.memory_source);
+        #[cfg(target_os = "freebsd")]
+        let samples = sample_processes(&self.system, GROUP);
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+        let samples: Vec<ProcSample> = Vec::new();
 
         let mut delta_total = 0.0_f64;
         let mut mem_total = 0_u64;
@@ -433,13 +468,13 @@ impl ProcessGroupCollector {
 
         let count = i64::try_from(samples.len()).unwrap_or(i64::MAX);
         *prev = current;
-        drop(prev);
 
         if delta_total > 0.0 {
             self.cpu_seconds.with_label_values(&[GROUP]).inc_by(delta_total);
         }
         self.memory_bytes.with_label_values(&[GROUP]).set(to_i64(mem_total));
         self.proc_count.with_label_values(&[GROUP]).set(count);
+        drop(prev);
 
         debug!(count, mem_bytes = mem_total, "updated postgres process-group metrics");
     }
@@ -463,7 +498,7 @@ impl Collector for ProcessGroupCollector {
         Box::pin(async move {
             // Blocking /proc reads: never run these on a runtime worker (issue #35).
             let collector = self.clone();
-            super::blocking::offload("system.process", move || collector.collect_stats()).await?;
+            blocking::offload("system.process", move || collector.collect_stats()).await?;
             Ok(Collected::Fresh)
         })
     }
@@ -529,6 +564,60 @@ mod tests {
         }
     }
 
+    /// Two collections can overlap in production: the scrape gate reopens as soon as a
+    /// scrape times out (issue #34), and a `spawn_blocking` sample that has already started
+    /// cannot be aborted, so an abandoned scrape's `/proc` walk keeps running alongside the
+    /// next scrape's. `collect_stats` therefore holds the CPU-baseline lock across the
+    /// sample.
+    ///
+    /// Two things must hold under that wider lock scope. It must not deadlock — on FreeBSD
+    /// the sample takes a second mutex while this one is held — and the accumulated counter
+    /// must stay within the physical ceiling of `elapsed x cores`, which is exactly the
+    /// bound an out-of-order baseline overwrite breaks by re-counting an interval.
+    #[test]
+    fn concurrent_collections_do_not_deadlock_or_over_count() {
+        let collector = Arc::new(ProcessGroupCollector::new());
+
+        // Start the clock *before* the baseline pass: every delta counted below is bounded
+        // by the interval between two samples, and the first of those samples happens
+        // inside this call. Timing it from after the call would leave the walk's own
+        // duration out of the budget and make the ceiling too tight.
+        let start = std::time::Instant::now();
+
+        // First pass only establishes per-PID baselines; deltas accrue from here on.
+        collector.collect_stats();
+        let baseline = collector.cpu_seconds.with_label_values(&[GROUP]).get();
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let collector = Arc::clone(&collector);
+                std::thread::spawn(move || {
+                    for _ in 0..5 {
+                        collector.collect_stats();
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            assert!(handle.join().is_ok(), "a concurrent collection panicked");
+        }
+
+        let elapsed = start.elapsed().as_secs_f64();
+        let cores = std::thread::available_parallelism()
+            .ok()
+            .and_then(|count| u32::try_from(count.get()).ok())
+            .map_or(1.0, f64::from);
+        let growth = collector.cpu_seconds.with_label_values(&[GROUP]).get() - baseline;
+
+        assert!(growth >= 0.0, "the group cpu counter went backwards: {growth}");
+        assert!(
+            growth <= elapsed * cores,
+            "the group cpu counter grew by {growth}s over {elapsed}s on {cores} cores, which \
+             is more CPU than the machine has: overlapping collections published their \
+             per-PID baselines out of order and an interval was counted twice (issue #34)"
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn parse_stat_cpu_ticks_handles_paren_in_comm() {
@@ -592,53 +681,76 @@ mod tests {
         );
     }
 
-    /// Proves the default source actually reads `statm` and not the expensive
-    /// `smaps_rollup` walk. Uses this test process, whose shared library mappings make
-    /// PSS measurably smaller than RSS.
+    /// Issue #35's core invariant: the default source must never touch `smaps_rollup`, and
+    /// the opt-in must genuinely reach it.
+    ///
+    /// Driven through injected readers rather than this process's own `/proc` entries. The
+    /// earlier version of these tests compared two live reads — `statm` against
+    /// `smaps_rollup`, or `smaps_rollup` against itself — within a fixed 64-page tolerance,
+    /// but a test binary's footprint moves by more than that between the two reads, so it
+    /// failed 17 times in 25 runs. Injecting the readers removes the moving target: what is
+    /// actually under test is which reader gets called, and that is exact.
     #[cfg(target_os = "linux")]
     #[test]
-    fn rss_mode_reports_statm_and_not_the_smaps_rollup_walk() {
-        let pid = std::process::id();
-        let page = page_size();
-        let tolerance = page.saturating_mul(64);
+    fn rss_mode_never_pays_for_the_smaps_rollup_walk() {
+        let pss_calls = std::cell::Cell::new(0_u32);
 
-        let Some(statm) = read_rss_bytes(pid, page) else {
-            return; // no /proc/<pid>/statm: nothing to assert
-        };
-        let dispatched = read_memory_bytes(pid, page, ProcessMemorySource::Rss);
-        assert!(
-            dispatched.abs_diff(statm) <= tolerance,
-            "rss mode reported {dispatched} bytes but statm says {statm}"
+        let bytes = select_memory_source(
+            ProcessMemorySource::Rss,
+            || {
+                pss_calls.set(pss_calls.get() + 1);
+                Some(999)
+            },
+            || Some(4096),
         );
 
-        let Some(rollup) = read_pss_bytes(pid) else {
-            return; // smaps_rollup unreadable (old kernel / restricted): nothing to compare
-        };
-        // Only meaningful when the two sources genuinely disagree for this process.
-        if statm.abs_diff(rollup) > tolerance {
-            assert!(
-                dispatched.abs_diff(rollup) > tolerance,
-                "rss mode returned the PSS value: the expensive smaps_rollup page-table walk is \
-                 still on the default path (issue #35)"
-            );
+        assert_eq!(bytes, 4096, "rss mode must report the statm reader's value");
+        assert_eq!(
+            pss_calls.get(),
+            0,
+            "rss mode called the PSS reader: the O(processes x resident pages) page-table \
+             walk is back on the default path (issue #35)"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pss_mode_reads_pss_and_falls_back_to_rss_when_it_is_unreadable() {
+        assert_eq!(
+            select_memory_source(ProcessMemorySource::Pss, || Some(999), || Some(4096)),
+            999,
+            "pss mode must report the smaps_rollup reader's value, or \
+             --system.process-memory=pss silently does nothing"
+        );
+
+        // PSS needs privileges on the target process; an unreadable one falls back to RSS
+        // rather than dropping the process from the total.
+        assert_eq!(
+            select_memory_source(ProcessMemorySource::Pss, || None, || Some(4096)),
+            4096,
+            "pss mode must fall back to statm when smaps_rollup is unreadable"
+        );
+
+        // Neither readable (exited mid-walk): contribute nothing rather than panic.
+        for source in [ProcessMemorySource::Rss, ProcessMemorySource::Pss] {
+            assert_eq!(select_memory_source(source, || None, || None), 0);
         }
     }
 
-    /// The opt-in must genuinely reach `smaps_rollup`, otherwise `--system.process-memory=pss`
-    /// would silently do nothing.
+    /// Smoke test over the real readers, asserting only what cannot drift: both sources
+    /// answer for a process that certainly exists, and PSS never exceeds RSS at the same
+    /// instant. No cross-read equality, so there is nothing here to flake.
     #[cfg(target_os = "linux")]
     #[test]
-    fn pss_mode_reports_the_smaps_rollup_value() {
+    fn both_sources_answer_for_a_live_process() {
         let pid = std::process::id();
         let page = page_size();
 
-        let Some(rollup) = read_pss_bytes(pid) else {
-            return; // smaps_rollup unreadable: nothing to assert
-        };
-        let dispatched = read_memory_bytes(pid, page, ProcessMemorySource::Pss);
-        assert!(
-            dispatched.abs_diff(rollup) <= page.saturating_mul(64),
-            "pss mode reported {dispatched} bytes but smaps_rollup says {rollup}"
-        );
+        for source in [ProcessMemorySource::Rss, ProcessMemorySource::Pss] {
+            assert!(
+                read_memory_bytes(pid, page, source) > 0,
+                "{source:?} reported no memory for this live process"
+            );
+        }
     }
 }

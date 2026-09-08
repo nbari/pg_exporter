@@ -117,6 +117,9 @@ pub trait Collector {
 /// cannot infer its element type, hence the named constant.
 pub(crate) const NO_LABELS: [&str; 0] = [];
 
+/// Runs collectors' blocking OS reads on Tokio's blocking pool (issue #35).
+pub(crate) mod blocking;
+
 // Make utils available to all collectors (exclusions, etc.)
 pub mod util;
 

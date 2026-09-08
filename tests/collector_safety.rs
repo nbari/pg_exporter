@@ -180,20 +180,46 @@ fn statements_query_text_lookup_stays_detached_from_collect() -> Result<()> {
     Ok(())
 }
 
-/// Issue #35: the `system` collector reads the OS with blocking, synchronous APIs
-/// (`std::fs` on `/proc`, `sysctlbyname`, `sysinfo`). Running that inline in `collect_once`
-/// occupies a Tokio worker for the whole walk, which stops the `sqlx` pool's futures from
-/// being polled and makes unrelated collectors fail with bogus `pool timed out` errors.
+/// Issue #35: several collectors read the operating system with blocking, synchronous
+/// APIs — `std::fs` on `/proc`, `sysctlbyname`, `sysinfo` refreshes, reading a certificate
+/// off disk. Running any of that inline in `collect_once` occupies a Tokio worker for the
+/// whole read, which stops the `sqlx` pool's futures from being polled and makes unrelated
+/// collectors fail with a badly misleading `pool timed out while waiting for an open
+/// connection`.
 ///
-/// Every `collect_once` in `src/collectors/system/` must therefore hand its sampling to
-/// `blocking::offload` instead of calling `collect_stats()` directly.
+/// Any `collect_once` in a file that touches the OS must therefore hand the work to
+/// `blocking::offload` rather than calling its sampler directly. This covers all of
+/// `src/collectors/`, not just the `system` collector where the problem was found.
 #[test]
-fn system_collectors_do_not_block_the_runtime() -> Result<()> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let system_root = root.join("src").join("collectors").join("system");
-    let mut failures = Vec::new();
+fn collectors_do_not_block_the_runtime_with_os_reads() -> Result<()> {
+    /// Source-text markers for blocking operating-system access.
+    const OS_READ_MARKERS: [&str; 7] = [
+        "std::fs::",
+        "fs::read(",
+        "fs::read_to_string",
+        "sysinfo",
+        "sysctlbyname",
+        "refresh_processes",
+        "refresh_memory",
+    ];
 
-    for path in rust_files_under(&system_root)? {
+    /// Files known to sample the OS today. Listed only so this test cannot quietly decay
+    /// into a no-op if a marker above stops matching; a new collector is covered
+    /// automatically and does not need to be added here.
+    const KNOWN_OS_COLLECTORS: [&str; 5] = [
+        "src/collectors/exporter/process.rs",
+        "src/collectors/system/cpu.rs",
+        "src/collectors/system/memory.rs",
+        "src/collectors/system/process.rs",
+        "src/collectors/tls/certificate.rs",
+    ];
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let collector_root = root.join("src").join("collectors");
+    let mut failures = Vec::new();
+    let mut checked: Vec<String> = Vec::new();
+
+    for path in rust_files_under(&collector_root)? {
         let source = std::fs::read_to_string(&path)?;
         let production_source = source
             .split("#[cfg(test)]")
@@ -201,14 +227,22 @@ fn system_collectors_do_not_block_the_runtime() -> Result<()> {
             .unwrap_or(source.as_str());
         let relative = path.strip_prefix(root).unwrap_or(path.as_path());
 
-        // The umbrella only fans out to sub-collectors; it does no OS I/O itself.
-        if path.file_name().is_some_and(|name| name == "mod.rs") {
-            continue;
-        }
-
         let Some(collect_once) = production_source.split("fn collect_once").nth(1) else {
             continue;
         };
+
+        // Match real code only: the doc comments discuss `/proc` and `sysinfo` at length
+        // by design, and an umbrella that merely documents them does no I/O itself.
+        let touches_os = production_source
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//"))
+            .any(|line| OS_READ_MARKERS.iter().any(|marker| line.contains(marker)));
+        if !touches_os {
+            continue;
+        }
+        checked.push(relative.to_string_lossy().into_owned());
+
         // Bound the slice to the body of collect_once, which ends at the next item.
         let body = collect_once
             .split("\n    fn ")
@@ -218,9 +252,19 @@ fn system_collectors_do_not_block_the_runtime() -> Result<()> {
         if !body.contains("blocking::offload") {
             failures.push(format!(
                 "{} runs collect_once without blocking::offload: synchronous OS reads must go \
-                 to the blocking pool, or a slow /proc walk starves every other collector \
-                 (issue #35)",
+                 to the blocking pool, or one slow read starves every other collector and \
+                 surfaces as a bogus `pool timed out` (issue #35)",
                 relative.display()
+            ));
+        }
+    }
+
+    for expected in KNOWN_OS_COLLECTORS {
+        if !checked.iter().any(|path| path == expected) {
+            failures.push(format!(
+                "{expected} is no longer recognised as sampling the OS: either it genuinely \
+                 stopped (update KNOWN_OS_COLLECTORS) or OS_READ_MARKERS stopped matching it, \
+                 which would silently stop enforcing issue #35 for every collector"
             ));
         }
     }
@@ -230,6 +274,60 @@ fn system_collectors_do_not_block_the_runtime() -> Result<()> {
     } else {
         Err(anyhow!(failures.join("\n")))
     }
+}
+
+/// The `system.process` collector accumulates a monotonic CPU counter from per-PID deltas,
+/// so the order of "sample" and "publish the new baseline" is load-bearing.
+///
+/// Two collections can overlap: the scrape gate reopens the moment a scrape times out
+/// (issue #34) and a `spawn_blocking` sample that has already started cannot be aborted, so
+/// an abandoned scrape's walk keeps running alongside the next one. If the sample happened
+/// outside the baseline lock, the newer pass could publish its baseline first, the older
+/// pass would then count no delta and overwrite the baseline with its own lower totals, and
+/// the pass after that would re-count the interval between them — inflating
+/// `pg_system_process_group_cpu_seconds_total` above the CPU actually consumed.
+///
+/// This is a source-order assertion rather than a race reproduction: the interleaving needs
+/// a pause between the sample and the lock, which cannot be injected from outside, and a
+/// timing-based test would be flaky in both directions.
+#[test]
+fn process_group_locks_the_cpu_baseline_before_sampling() -> Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let process_rs = root
+        .join("src")
+        .join("collectors")
+        .join("system")
+        .join("process.rs");
+    let source = std::fs::read_to_string(&process_rs)?;
+    let production_source = source
+        .split("#[cfg(test)]")
+        .next()
+        .unwrap_or(source.as_str());
+
+    let body = production_source
+        .split("fn collect_stats")
+        .nth(1)
+        .ok_or_else(|| anyhow!("process.rs no longer has a collect_stats to check"))?
+        .split("\n    }")
+        .next()
+        .unwrap_or_default();
+
+    let lock_at = body
+        .find("self.prev_cpu.lock()")
+        .ok_or_else(|| anyhow!("collect_stats no longer locks prev_cpu"))?;
+    let sample_at = body
+        .find("sample_processes(")
+        .ok_or_else(|| anyhow!("collect_stats no longer calls sample_processes"))?;
+
+    if lock_at > sample_at {
+        return Err(anyhow!(
+            "collect_stats samples before taking the prev_cpu lock: two overlapping \
+             collections can then publish their baselines out of order and \
+             pg_system_process_group_cpu_seconds_total over-reports (issues #34, #35)"
+        ));
+    }
+
+    Ok(())
 }
 
 /// Issue #35: `/proc/<pid>/smaps_rollup` makes the kernel walk every page-table entry of
@@ -270,21 +368,27 @@ fn smaps_rollup_stays_behind_the_pss_opt_in() -> Result<()> {
         ));
     }
 
-    // read_pss_bytes must only be reachable from the Pss arm of the source dispatch.
+    // read_pss_bytes must only ever be handed to the dispatcher as a lazy `|| read_pss_bytes(pid)`
+    // thunk. Called eagerly — passed as a value, or read before the match — every scrape
+    // would pay for the walk regardless of which source was configured.
     for call in code_lines()
         .filter(|line| line.contains("read_pss_bytes(") && !line.contains("fn read_pss_bytes"))
     {
-        if !call.starts_with("read_pss_bytes(pid)") {
+        if !call.starts_with("|| read_pss_bytes(pid)") {
             return Err(anyhow!(
-                "unexpected read_pss_bytes call site '{call}': PSS must only be reached via \
-                 --system.process-memory=pss (issue #35)"
+                "unexpected read_pss_bytes call site '{call}': PSS must stay a lazy thunk \
+                 reached only via --system.process-memory=pss, never evaluated eagerly \
+                 (issue #35)"
             ));
         }
     }
 
-    if !production_source.contains("ProcessMemorySource::Rss => read_rss_bytes") {
+    // The dispatch itself — that the RSS arm never calls the PSS reader — is asserted
+    // behaviourally by `rss_mode_never_pays_for_the_smaps_rollup_walk` in process.rs, which
+    // counts calls to an injected reader. This only pins the laziness the counter relies on.
+    if !production_source.contains("ProcessMemorySource::Rss => rss()") {
         return Err(anyhow!(
-            "process.rs no longer dispatches the default RSS source to read_rss_bytes; PSS must \
+            "process.rs no longer dispatches the default RSS source to the rss reader; PSS must \
              not become the default again (issue #35)"
         ));
     }

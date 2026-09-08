@@ -98,7 +98,9 @@ cardinality stays constant regardless of how many backends exist.
 > cost on your own host. On FreeBSD the gauge is always summed **RSS**.
 >
 > Watch `pg_exporter_collector_scrape_duration_seconds{collector="system"}` after
-> changing this.
+> changing this. That series belongs to the `exporter` collector, so it only exists
+> if you also pass `--collector.exporter`; read the magnitude from `_sum / _count`,
+> because the histogram's top bucket is 5 s and a PSS walk simply lands in `+Inf`.
 
 ## Interpreting the Counters
 

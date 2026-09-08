@@ -14,12 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   On timeout the request dropped the `JoinHandle`, which in Tokio **detaches**
   rather than cancels the task, so returning the permit depended entirely on that
   detached task unwinding — and nothing bounded it: the inner collector loop has
-  no deadline of its own. Worse, `abort()` alone could not have fixed it either,
-  because the `system` collector (see [#35] below) ran synchronous `std::fs` I/O
-  inside an `async` block with **no await points**, and a Tokio task can only be
-  cancelled at an await point. One timeout therefore leaked the permit
-  permanently and every later scrape answered `503 another /metrics scrape is
-  already running` until the process was restarted.
+  no deadline of its own, so a collector that never resolved held the only permit
+  of a `Semaphore::new(1)` for the rest of the process lifetime. Switching to
+  `abort()` would have narrowed the window but not closed it: a Tokio task is only
+  cancelled at an await point, and the `system` collector (see [#35] below) ran
+  synchronous `std::fs` I/O inside an `async` block, so the abort could not land
+  until that walk returned — tens of seconds later on the affected host. Either
+  way, `/metrics` answered `503 another /metrics scrape is already running` while
+  the gate stayed shut, which on the reporting instance meant a **66+ minute**
+  metrics blackout cleared only by a manual restart.
 
   The permit is now owned by the **request** future, so it is released by the
   ordinary `Drop` on every exit path — success, timeout, collector error, or
@@ -53,13 +56,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      on the blocking pool via `spawn_blocking`, so a slow host read degrades into
      a slow `system` collector instead of a stalled exporter.
 
+- **Blocking OS reads moved off the runtime worker in two more collectors.** The
+  `exporter` collector's own process metrics (a `sysinfo` refresh plus a
+  `/proc/<pid>/fd` read) and the `tls` collector's certificate read and X.509
+  parse both ran inline in `collect_once`. Both are far smaller than [#35]'s
+  `/proc` walk, but they are the same defect, and `ssl_cert_file` can point at a
+  path that is slow or hangs. Both now run on the blocking pool, and the
+  regression guard in `tests/collector_safety.rs` covers every collector rather
+  than only `--collector.system`.
+
+- **`pg_system_process_group_cpu_seconds_total` no longer over-reports when
+  scrapes overlap.** Now that the scrape gate reopens immediately on timeout
+  ([#34]), a new scrape can begin while an abandoned scrape's sample is still
+  running — an already-started `spawn_blocking` task cannot be cancelled. The
+  process-group collector sampled `/proc` *outside* its per-PID CPU baseline
+  lock, so the newer pass could publish its baseline first, the older pass would
+  then count no delta and overwrite the baseline with its own lower totals, and
+  the next pass re-counted the interval between them. The lock now spans the
+  sample, which also stops two concurrent walks from doubling the `/proc` load.
+
   Measured effect of the collector being pathological on the affected host:
   `/metrics` went from `504` after 15.002 s with **0 metrics** and 59–100% CPU,
   to `200` in **0.017 s** with 694 metrics at 0.1% CPU.
 
   Per-collector cost was already observable via
-  `pg_exporter_collector_scrape_duration_seconds{collector="system"}`; watch that
-  series if you enable PSS.
+  `pg_exporter_collector_scrape_duration_seconds{collector="system"}` — but only
+  when `--collector.exporter` is also enabled, since that collector owns the
+  metric. Watch it if you enable PSS, reading the magnitude from
+  `_sum / _count`: the histogram's top bucket is 5 s, so a PSS walk lands in
+  `+Inf` and the bucket counts alone will not tell you how expensive it was.
 
 ### Changed
 

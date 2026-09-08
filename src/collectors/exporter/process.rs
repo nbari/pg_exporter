@@ -1,4 +1,4 @@
-use crate::collectors::{Collected, Collector};
+use crate::collectors::{Collected, Collector, blocking};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{Gauge, IntGauge, Opts, Registry};
@@ -249,7 +249,13 @@ impl Collector for ProcessCollector {
     #[instrument(skip(self, _pool), level = "debug")]
     fn collect_once<'a>(&'a self, _pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
-            self.collect_stats();
+            // Blocking `sysinfo` refresh and `/proc/<pid>/fd` read: never run these on a
+            // runtime worker (issue #35). Only this one PID is refreshed, so the walk is
+            // small — but "small" is a property of the host, not of the code, and on a box
+            // where every file I/O is taxed (issue #34 saw a fanotify agent add ~1.7 cores
+            // of overhead) it is the same stall in miniature.
+            let collector = self.clone();
+            blocking::offload("metrics.process", move || collector.collect_stats()).await?;
             Ok(Collected::Fresh)
         })
     }

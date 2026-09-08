@@ -1,5 +1,5 @@
 use crate::collectors::util::{QueryFailure, classify_query_error};
-use crate::collectors::{NO_LABELS, Collected, Collector, i64_to_f64};
+use crate::collectors::{NO_LABELS, Collected, Collector, blocking, i64_to_f64};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
@@ -195,7 +195,15 @@ impl Collector for CertificateCollector {
                     // A malformed certificate propagates: it means TLS is misconfigured,
                     // which is worth failing loudly for, unlike a file this process simply
                     // cannot see.
-                    self.parse_certificate_file(&cert_path)
+                    //
+                    // The read and the X.509 parse are blocking, so they go to the blocking
+                    // pool rather than the runtime worker (issue #35): `ssl_cert_file` can
+                    // point anywhere, including a network mount that hangs.
+                    let collector = self.clone();
+                    blocking::offload("tls.certificate", move || {
+                        collector.parse_certificate_file(&cert_path)
+                    })
+                    .await?
                 }
                 Err(error) => {
                     // An absent or unreadable setting is a skip, which clears. Anything else

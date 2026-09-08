@@ -1,19 +1,30 @@
-//! Keeps the `system` collector's synchronous OS reads off the async runtime.
+//! Keeps collectors' synchronous OS reads off the async runtime.
 //!
-//! Every sub-collector under `--collector.system` samples the operating system with
-//! **blocking** APIs: `std::fs::read_to_string` on `/proc` (Linux), `sysctlbyname`
-//! (FreeBSD), and `sysinfo` refreshes. None of that is async, and none of it yields.
+//! Several collectors sample the operating system rather than `PostgreSQL`, and every one
+//! of those APIs is **blocking**: `std::fs` on `/proc` (Linux), `sysctlbyname` (FreeBSD),
+//! `sysinfo` refreshes, and reading and parsing a certificate off disk. None of that is
+//! async, and none of it yields.
 //!
-//! Running it directly inside an `async` block — which is what `collect_once` used to do
-//! — occupies a Tokio worker thread for the full duration of the walk. The registry
-//! launches every collector concurrently on that same runtime, so a slow walk stops the
-//! `sqlx` pool's futures from being polled and *unrelated* collectors fail with
-//! `pool timed out while waiting for an open connection`. That is what made issue #35 so
-//! hard to attribute: a `/proc` problem presented as a `PostgreSQL` connectivity problem.
+//! Running it directly inside an `async` block — which is what every one of those
+//! `collect_once` implementations used to do — occupies a Tokio worker thread for the full
+//! duration of the read. The registry launches every collector concurrently on that same
+//! runtime, so a slow read stops the `sqlx` pool's futures from being polled and
+//! *unrelated* collectors fail with `pool timed out while waiting for an open connection`.
+//! That is what made issue #35 so hard to attribute: a `/proc` problem presented as a
+//! `PostgreSQL` connectivity problem.
 //!
-//! [`offload`] moves the work to Tokio's blocking pool, where a long sample degrades into
-//! a merely slow `system` collector instead of a runtime-wide outage. It also gives the
-//! scrape task real await points, so the scrape timeout can actually fire and cancel it.
+//! `offload` moves the work to Tokio's blocking pool, where a long sample degrades into
+//! a merely slow collector instead of a runtime-wide outage. It also gives the scrape task
+//! real await points, so the scrape timeout can fire and stop waiting on it.
+//!
+//! Note what it does **not** buy: a `spawn_blocking` task that has already started cannot
+//! be cancelled, so an aborted scrape's sample keeps running to completion on the blocking
+//! pool. Collectors that carry state between scrapes must therefore tolerate a sample from
+//! a previous, already-abandoned scrape overlapping the current one — see
+//! `system::process::ProcessGroupCollector` for how that is handled.
+//!
+//! `tests/collector_safety.rs` enforces that every collector doing OS I/O comes through
+//! here.
 
 use anyhow::{Result, anyhow};
 
@@ -23,7 +34,7 @@ use anyhow::{Result, anyhow};
 ///
 /// Returns an error if the blocking task panicked or was cancelled; the caller reports it
 /// as a collector failure rather than propagating a panic.
-pub(super) async fn offload<F, T>(collector: &'static str, work: F) -> Result<T>
+pub(crate) async fn offload<F, T>(collector: &'static str, work: F) -> Result<T>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,

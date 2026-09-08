@@ -30,7 +30,6 @@ use std::sync::Arc;
 use tracing::{debug, info_span, instrument, warn};
 use tracing_futures::Instrument as _;
 
-pub mod blocking;
 pub mod cpu;
 pub mod memory;
 pub mod process;

@@ -36,7 +36,7 @@
 //! of 8 saturates 1 core but is ~25% of 32 cores). Load average
 //! (`pg_system_load1/5/15`) comes from `sysinfo`.
 
-use crate::collectors::{Collected, Collector};
+use crate::collectors::{Collected, Collector, blocking};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{CounterVec, Gauge, IntGauge, Opts, Registry};
@@ -505,7 +505,7 @@ impl Collector for CpuCollector {
         Box::pin(async move {
             // Blocking /proc and sysctl reads: never run these on a runtime worker (issue #35).
             let collector = self.clone();
-            super::blocking::offload("system.cpu", move || collector.collect_stats()).await?;
+            blocking::offload("system.cpu", move || collector.collect_stats()).await?;
             Ok(Collected::Fresh)
         })
     }
