@@ -325,6 +325,11 @@ pub struct ProcessGroupCollector {
     memory_bytes: IntGaugeVec,
     proc_count: IntGaugeVec,
     /// Where the memory gauge is read from; RSS by default (see issue #35).
+    ///
+    /// Only Linux offers a choice: FreeBSD sampling goes through `sysinfo`, which exposes
+    /// RSS alone, and every other platform collects nothing at all, so the field is inert
+    /// there rather than genuinely dead.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     memory_source: ProcessMemorySource,
     /// Last observed cumulative CPU seconds per live PID, used to accumulate a
     /// monotonic group counter across process churn.

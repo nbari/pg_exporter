@@ -92,9 +92,18 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-freebsd
 
       - name: Check
         run: cargo check
+
+      # The system collector cfg-gates its process and CPU sampling per platform, and
+      # `warnings = "deny"` turns a field read on only one of them into a compile error.
+      # Nothing else in CI compiles the FreeBSD branch, so a FreeBSD-only break reaches
+      # users unnoticed. Cross-checking needs no toolchain beyond the target's std.
+      - name: Check (FreeBSD)
+        run: cargo check --target x86_64-unknown-freebsd
 
   test:
     name: Test (PostgreSQL ${{ matrix.postgres }})

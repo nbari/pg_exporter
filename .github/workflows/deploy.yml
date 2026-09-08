@@ -19,7 +19,7 @@ permissions:
   packages: write
 
 # Harden against spurious crates.io/curl network failures on hosted runners
-# (notably "curl failed" / "download of <crate> failed" on macOS).
+# ("curl failed" / "download of <crate> failed").
 env:
   CARGO_NET_RETRY: "10"
   CARGO_HTTP_MULTIPLEXING: "false"
@@ -90,13 +90,6 @@ jobs:
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
 
-          - build: macos
-            os: macos-latest
-            target: x86_64-apple-darwin
-
-          - build: macos
-            os: macos-latest
-            target: aarch64-apple-darwin
 
     steps:
       - name: Checkout
@@ -155,11 +148,6 @@ jobs:
           DEB_PATH="$(find target/debian -maxdepth 1 -type f -name '*.deb' -print -quit)"
           echo "DEB_ASSET=$DEB_PATH" >> $GITHUB_ENV
           echo "DEB: $DEB_PATH"
-
-      # Non-Linux build (macOS)
-      - name: Build
-        if: matrix.build != 'linux'
-        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Build archive
         shell: bash

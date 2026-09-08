@@ -86,6 +86,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `_sum / _count`: the histogram's top bucket is 5 s, so a PSS walk lands in
   `+Inf` and the bucket counts alone will not tell you how expensive it was.
 
+- **Builds for FreeBSD and every other non-Linux target work again.** The PSS opt-in
+  above added `ProcessGroupCollector::memory_source`, and only the Linux sampler reads
+  it: FreeBSD samples through `sysinfo`, which exposes RSS alone, and unsupported
+  platforms collect nothing at all. `warnings = "deny"` promoted the resulting
+  `dead_code` lint to a hard error, so `cargo build` failed outright off Linux. CI now
+  runs `cargo check --target x86_64-unknown-freebsd`, which compiles the FreeBSD `cfg`
+  branches — the `sysctl` CPU reader and the `sysinfo` process sampler — that no job
+  had ever compiled before.
+
 ### Changed
 
 - **Dependencies**: refreshed to the latest compatible versions — `tower-http` 0.7.0 -> 0.7.1
@@ -94,6 +103,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `tokio-rustls` 0.26.4 -> 0.26.5. Two transitive crates stay pinned: `matchit` is held at
   0.8.4 by an exact `=0.8.4` requirement in `axum` 0.8.9, and `crypto-common` 0.1.x is held by
   `digest` 0.10 via `sqlx`; forcing it would downgrade `generic-array`.
+
+### Removed
+
+- **macOS release binaries** (`x86_64-apple-darwin`, `aarch64-apple-darwin`). The
+  `--collector.system` host metrics are Linux/FreeBSD-only, so a darwin archive shipped
+  the exporter with that feature inert. Across 28 releases the darwin tarballs drew 17
+  downloads against 444 for the Linux packages — none ever on `aarch64`, and none of any
+  kind since 0.11.1. Building from source on macOS is unaffected; only the published
+  archives are gone.
 
 [#26]: https://github.com/nbari/pg_exporter/issues/26
 [#34]: https://github.com/nbari/pg_exporter/issues/34
