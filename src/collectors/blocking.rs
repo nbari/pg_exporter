@@ -19,26 +19,26 @@
 //!
 //! Note what it does **not** buy: a `spawn_blocking` task that has already started cannot
 //! be cancelled, so an aborted scrape's sample keeps running to completion on the blocking
-//! pool. Collectors that carry state between scrapes must therefore tolerate a sample from
-//! a previous, already-abandoned scrape overlapping the current one — see
-//! `system::process::ProcessGroupCollector` for how that is handled.
+//! pool. Metric publication from that abandoned scrape must therefore remain safe even
+//! though a later scrape may already have started. Coalescing prevents a second sample for
+//! the same collector from being submitted during that overlap.
 //!
-//! `tests/collector_safety.rs` enforces that every collector doing OS I/O comes through
-//! here. [`offload_coalesced`] additionally caps each reader at one in-flight sample, so a
-//! read that outlives its scrape (or never returns) cannot pile tasks onto the pool.
+//! `tests/collector_safety.rs` enforces that every collector doing OS I/O uses
+//! [`offload_coalesced`]. It caps each reader at one submitted sample, so a read that outlives
+//! its scrape (or never returns) cannot pile started or queued tasks onto the pool.
 
 use anyhow::{Result, anyhow};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::debug;
 
-/// Runs `work` on Tokio's blocking pool and awaits the result.
+/// Runs already-coalesced `work` on Tokio's blocking pool and awaits the result.
 ///
 /// # Errors
 ///
 /// Returns an error if the blocking task panicked or was cancelled; the caller reports it
 /// as a collector failure rather than propagating a panic.
-pub(crate) async fn offload<F, T>(collector: &'static str, work: F) -> Result<T>
+async fn offload<F, T>(collector: &'static str, work: F) -> Result<T>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,

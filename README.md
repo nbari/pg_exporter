@@ -327,9 +327,9 @@ Only one `/metrics` scrape runs at a time. A plain PostgreSQL connectivity outag
 "exporter down" from "database down". A concurrent scrape returns `503`; collector/query or
 encoding failures return `503`; a whole-scrape timeout returns `504`. The exporter does not
 return stale collector data on failed scrapes. If a scrape reaches the HTTP timeout, the
-exporter keeps the scrape gate closed until in-flight collector work has unwound, preventing
-a new scrape from starting another wave of PostgreSQL backend work while the previous one is
-still cancelling server-side.
+request-owned scrape gate is released immediately and the scrape task is aborted. This
+prevents a timed-out or disconnected request from wedging `/metrics`; a follow-up scrape can
+start while non-cancellable OS sampling or PostgreSQL backend cancellation is still finishing.
 
 If Prometheus has a lower `scrape_timeout` than `--scrape.timeout-ms`, Prometheus may record
 its own client-side timeout before the exporter can return `504`. Keep the Prometheus scrape
@@ -384,7 +384,7 @@ full page-table walk per process and took 13.9 s per scrape on a 253-backend pro
 
 ### Connection budget for multi-database collectors
 
-Each exporter process opens at most:
+Each active client-side scrape opens at most:
 
     peak connections = shared pool (3) + max-db-concurrency (N)   # default: 3 + 2 = 5
 
@@ -399,11 +399,12 @@ Each exporter process opens at most:
   as soon as its query finishes. When more databases need scanning than there are free slots,
   the extra ones wait for a slot instead of opening more connections.
 
-Because `N` is a hard cap, the peak does **not** grow with the number of databases — 100 or
-10,000 databases both peak at `3 + N`. This is what keeps the exporter safe on
-connection-limited instances such as AWS RDS.
+Because `N` is a hard cap, that per-scrape peak does **not** grow with the number of databases
+— 100 or 10,000 databases both peak at `3 + N`. This is what keeps the exporter safe on
+connection-limited instances such as AWS RDS. The timeout overlap caveat below applies to
+server backends that have not finished cancellation.
 
-| `max-db-concurrency` (`N`) | peak connections (`3 + N`) | suggested role `CONNECTION LIMIT` |
+| `max-db-concurrency` (`N`) | per-scrape client peak (`3 + N`) | suggested role `CONNECTION LIMIT` |
 | --- | --- | --- |
 | `1` | `4` | `5` |
 | **`2` (default)** | **`5`** | **`5`** (exact cap) or `8` (with headroom) |
@@ -426,17 +427,18 @@ immediately with SQLSTATE `53300` (it does not queue and waits for nothing). Set
   sessions, or if several exporter processes share one role. Processes sharing a role share
   its limit and can reject each other's logins even while each stays within its own budget.
 
-**Scrape timeouts can briefly double the footprint.** When a scrape exceeds
+**Scrape timeouts can temporarily multiply the observed footprint.** When a scrape exceeds
 `--scrape.timeout-ms`, the exporter aborts it: in-flight queries are cancelled and their
 connections closed, but the server-side backends take a moment to finish cancelling. A
 follow-up scrape may start while that teardown is still visible in `pg_stat_activity`, so
-the exporter's *observed* backend count can transiently reach about **2 × (3 + N)** (the
-aborted scrape's connections plus the new scrape's). The transient is bounded — per-database
-fan-out is capped process-wide, not per scrape — and self-heals as the cancelled backends
-exit, but on slow networks it can last long enough to matter: a role limit of exactly
-`3 + N` may reject a few connections with SQLSTATE `53300` during an abort burst, which
-surfaces as a failed scrape that recovers on the next one. If that noise is unacceptable,
-size the role limit at `2 × (3 + N)`.
+the exporter's *observed* backend count will normally reach about **2 × (3 + N)** (the
+aborted scrape's connections plus the new scrape's). This is an operational estimate, not a
+hard server-side bound: client permits are released when their futures are dropped, so several
+generations of PostgreSQL backends can remain visible if cancellation itself stalls. The new
+client-side wave is still capped at `3 + N`, and ordinary cancellation self-heals. A role limit
+is the hard backstop: exactly `3 + N` may reject a few new connections with SQLSTATE `53300`
+during an abort burst, while `2 × (3 + N)` tolerates the usual one-old/one-new overlap but still
+caps pathological multi-generation overlap.
 
 Either way, keep enough cluster-wide `max_connections` headroom; the role limit is a
 backstop, not a substitute for the exporter's own concurrency bound. If monitoring must

@@ -25,7 +25,7 @@
 //!   processes.
 //!
 //! All sampling here is **blocking, synchronous** OS I/O and must be run on the
-//! blocking pool via `blocking::offload` — never inline on a Tokio
+//! blocking pool via `blocking::offload_coalesced` — never inline on a Tokio
 //! worker, which would stall every other collector sharing the runtime.
 //!
 //! Like the rest of `--collector.system` this only makes sense when the exporter
@@ -334,11 +334,13 @@ pub struct ProcessGroupCollector {
     /// Last observed cumulative CPU seconds per live PID, used to accumulate a
     /// monotonic group counter across process churn.
     ///
-    /// Held across the whole sample-and-publish sequence, because two collections can
-    /// overlap; taken with `try_lock` so an overlapping collection skips instead of
-    /// queueing onto the blocking pool. See
+    /// Held across the whole sample-and-publish sequence. The outer `sample_slot` prevents
+    /// normal scrape-driven overlap; `try_lock` makes direct or future internal callers
+    /// skip safely rather than interleave baselines. See
     /// [`ProcessGroupCollector::collect_stats_with`].
     prev_cpu: Arc<Mutex<HashMap<u32, f64>>>,
+    /// Caps blocking process walks at one submitted task across overlapping scrapes.
+    sample_slot: Arc<tokio::sync::Mutex<()>>,
     /// Persistent `sysinfo` state for FreeBSD sampling (unused on Linux, which
     /// reads `/proc` directly).
     #[cfg(target_os = "freebsd")]
@@ -412,6 +414,7 @@ impl ProcessGroupCollector {
             proc_count,
             memory_source,
             prev_cpu: Arc::new(Mutex::new(HashMap::new())),
+            sample_slot: Arc::new(tokio::sync::Mutex::new(())),
             #[cfg(target_os = "freebsd")]
             system: Arc::new(Mutex::new(System::new())),
             unsupported_warned: Arc::new(AtomicBool::new(false)),
@@ -430,10 +433,9 @@ impl ProcessGroupCollector {
     /// Samples via `sample` and publishes the per-PID CPU deltas and gauges, or skips
     /// the whole pass when a previous sample is still running.
     ///
-    /// The lock spans the sample, not just the bookkeeping, because two collections can
-    /// overlap: the scrape gate reopens the moment a scrape times out (issue #34), and a
-    /// `spawn_blocking` sample that has already started cannot be aborted, so a timed-out
-    /// scrape's walk keeps running alongside the next scrape's.
+    /// The lock spans the sample, not just the bookkeeping. The outer `sample_slot` prevents
+    /// normal scrape-driven overlap, but direct/internal callers and future refactors must not
+    /// be able to interleave sampling and baseline publication.
     ///
     /// Sampling outside the lock let those passes interleave. The newer sample could
     /// publish its per-PID baseline first; the older one then found every total lower
@@ -442,14 +444,11 @@ impl ProcessGroupCollector {
     /// `pg_system_process_group_cpu_seconds_total` climbed above the CPU actually
     /// consumed.
     ///
-    /// The lock is a *try* lock: a collection that finds a sample already in flight
-    /// skips instead of queueing behind it. A started `spawn_blocking` task cannot be
-    /// cancelled, so a sample that outlives its scrape (an over-timeout PSS walk) would
-    /// otherwise pile one queued task per scrape onto the blocking pool without bound;
-    /// skipping bounds the in-flight work to the one sample already running, and its
-    /// eventual publish is newer than anything the skipped pass would have produced
-    /// anyway. (This is the textbook `try_lock` use: the lock guards freshness of the
-    /// data, and stale work is simply dropped.)
+    /// `collect_once` acquires `sample_slot` before submitting blocking work, which is the
+    /// hard queue bound. This *try* lock is a second line of defence for direct/internal
+    /// callers: a collection that finds a sample already in flight skips instead of queueing
+    /// behind it. The in-flight pass eventually publishes a newer sample than the skipped
+    /// pass could have produced.
     fn collect_stats_with(&self, sample: impl FnOnce() -> Vec<ProcSample>) {
         if !SUPPORTED {
             if !self.unsupported_warned.swap(true, Ordering::Relaxed) {
@@ -524,7 +523,12 @@ impl Collector for ProcessGroupCollector {
         Box::pin(async move {
             // Blocking /proc reads: never run these on a runtime worker (issue #35).
             let collector = self.clone();
-            blocking::offload("system.process", move || collector.collect_stats()).await?;
+            let _ = blocking::offload_coalesced(
+                "system.process",
+                &self.sample_slot,
+                move || collector.collect_stats(),
+            )
+            .await?;
             Ok(Collected::Fresh)
         })
     }

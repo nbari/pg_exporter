@@ -2,7 +2,7 @@ use crate::{
     collectors::{
         Collector, CollectorType, all_factories,
         config::CollectorConfig,
-        exporter::ScraperCollector,
+        exporter::{ScrapeTimer, ScraperCollector},
         sequences::SequencesCollector,
         statements::StatementsCollector,
         system::SystemCollector,
@@ -10,13 +10,17 @@ use crate::{
     },
     exporter::GIT_COMMIT_HASH,
 };
-use futures::stream::{FuturesUnordered, StreamExt};
+use futures::{
+    FutureExt as _,
+    stream::{FuturesUnordered, StreamExt},
+};
 use prometheus::{Encoder, Gauge, GaugeVec, Opts, Registry, TextEncoder};
 use std::{
     env,
     error::Error,
     fmt,
     future::Future,
+    panic::AssertUnwindSafe,
     pin::Pin,
     sync::{
         Arc,
@@ -26,7 +30,7 @@ use std::{
     time::Duration,
 };
 use tokio::{sync::Semaphore, time::timeout};
-use tracing::{debug, debug_span, error, info, info_span, instrument, warn};
+use tracing::{Span, debug, debug_span, error, info, info_span, instrument, warn};
 use tracing_futures::Instrument as _;
 
 fn build_collector(
@@ -114,6 +118,56 @@ impl<T> Drop for AbortOnDrop<T> {
     }
 }
 
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload")
+}
+
+/// Runs one collector future, converting a panic into an ordinary collector error so its
+/// timer records an error rather than looking like a timeout/client-disconnect abort.
+async fn collect_with_outcome<F>(
+    name: &'static str,
+    timer: Option<ScrapeTimer>,
+    future: F,
+    span: Span,
+) -> (&'static str, anyhow::Result<()>)
+where
+    F: Future<Output = anyhow::Result<()>>,
+{
+    debug!("collector '{}' start", name);
+
+    let result = match AssertUnwindSafe(future.instrument(span))
+        .catch_unwind()
+        .await
+    {
+        Ok(result) => result,
+        Err(payload) => Err(anyhow::anyhow!(
+            "collector panicked: {}",
+            panic_payload_message(payload.as_ref())
+        )),
+    };
+
+    match &result {
+        Ok(()) => {
+            debug!("collector '{}' done: ok", name);
+            if let Some(timer) = timer {
+                timer.success();
+            }
+        }
+        Err(error) => {
+            error!("collector '{}' done: error: {}", name, error);
+            if let Some(timer) = timer {
+                timer.error();
+            }
+        }
+    }
+
+    (name, result)
+}
+
 /// Runs one scrape behind the single-flight gate, bounded by `scrape_timeout`.
 ///
 /// # Why the permit is held here and not inside the task
@@ -142,10 +196,11 @@ impl<T> Drop for AbortOnDrop<T> {
 /// issue #34.
 ///
 /// The trade-off, accepted deliberately: the next scrape may start while the aborted
-/// scrape's backends are still cancelling server-side, transiently doubling the observed
-/// connection footprint. That is bounded — the shared pool caps at
-/// `SHARED_POOL_MAX_CONNECTIONS` and per-database fan-out at a process-wide semaphore —
-/// and self-heals; see the "Connection budget" section of the README.
+/// scrape's backends are still cancelling server-side, normally doubling the observed
+/// connection footprint. Each new client-side wave is bounded by the shared pool and global
+/// per-database semaphore, but lingering server backends from several aborted generations are
+/// bounded only by PostgreSQL's role/cluster connection limits; see "Connection budget" in
+/// the README.
 async fn run_gated_scrape<F>(
     gate: &Arc<Semaphore>,
     scrape_timeout: Duration,
@@ -371,32 +426,14 @@ impl CollectorRegistry {
             // Start timing this collector if scraper is available
             let timer = self.scraper.as_ref().map(|s| s.start_scrape(name));
 
-            // Prepare the future now (do not await here).
-            let fut = collector.collect(&active_pool);
+            // Defer even construction of the collector future until it is inside the panic
+            // boundary. Trait implementations normally just box an async block, but a panic
+            // before returning that box must still be an error, not an unobserved timer drop.
+            let collector_pool = active_pool.clone();
+            let fut = async move { collector.collect(&collector_pool).await };
 
             // Push an instrumented future that logs start/finish.
-            tasks.push(async move {
-                debug!("collector '{}' start", name);
-
-                let res = fut.instrument(span).await;
-
-                match &res {
-                    Ok(()) => {
-                        debug!("collector '{}' done: ok", name);
-                        if let Some(t) = timer {
-                            t.success();
-                        }
-                    }
-                    Err(e) => {
-                        error!("collector '{}' done: error: {}", name, e);
-                        if let Some(t) = timer {
-                            t.error();
-                        }
-                    }
-                }
-
-                (name, res)
-            });
+            tasks.push(collect_with_outcome(name, timer, fut, span));
         }
 
         // Drain completions as they finish (unordered).
@@ -497,8 +534,53 @@ fn count_exposed_metric_lines(buffer: &[u8]) -> usize {
 mod tests {
     use super::*;
     use crate::collectors::config::CollectorConfig;
+    use anyhow::anyhow;
     use sqlx::postgres::PgPoolOptions;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn panicking_collector_is_recorded_as_error_not_abort() -> anyhow::Result<()> {
+        let scraper = ScraperCollector::new();
+        let prometheus_registry = Registry::new();
+        scraper.register(&prometheus_registry)?;
+        let timer = scraper.start_scrape("panicking_collector");
+
+        let (_, result) = collect_with_outcome(
+            "panicking_collector",
+            Some(timer),
+            async {
+                #[allow(clippy::panic)]
+                {
+                    panic!("collector exploded");
+                }
+            },
+            Span::none(),
+        )
+        .await;
+        assert!(result.is_err(), "a collector panic must become an error");
+
+        let metrics = prometheus_registry.gather();
+        let errors = metrics
+            .iter()
+            .find(|metric| metric.name() == "pg_exporter_collector_scrape_errors_total")
+            .ok_or_else(|| anyhow!("scrape error metric was not published"))?;
+        let error_value = errors
+            .get_metric()
+            .first()
+            .ok_or_else(|| anyhow!("scrape error metric has no sample"))?
+            .get_counter()
+            .value();
+        assert!((error_value - 1.0).abs() < f64::EPSILON);
+
+        let aborted = metrics
+            .iter()
+            .find(|metric| metric.name() == "pg_exporter_collector_scrape_aborted_total");
+        assert!(
+            aborted.is_none_or(|metric| metric.get_metric().is_empty()),
+            "a caught collector panic must not be classified as a scrape abort"
+        );
+        Ok(())
+    }
 
     #[tokio::test]
     #[allow(clippy::expect_used)]

@@ -188,15 +188,18 @@ fn statements_query_text_lookup_stays_detached_from_collect() -> Result<()> {
 /// connection`.
 ///
 /// Any `collect_once` in a file that touches the OS must therefore hand the work to
-/// `blocking::offload` rather than calling its sampler directly. This covers all of
+/// `blocking::offload_coalesced` rather than calling its sampler directly. This covers all of
 /// `src/collectors/`, not just the `system` collector where the problem was found.
 #[test]
 fn collectors_do_not_block_the_runtime_with_os_reads() -> Result<()> {
     /// Source-text markers for blocking operating-system access.
-    const OS_READ_MARKERS: [&str; 7] = [
+    const OS_READ_MARKERS: [&str; 10] = [
         "std::fs::",
-        "fs::read(",
-        "fs::read_to_string",
+        "::read(",
+        "::read_dir(",
+        "::read_to_string(",
+        "File::open(",
+        "OpenOptions::new(",
         "sysinfo",
         "sysctlbyname",
         "refresh_processes",
@@ -249,27 +252,32 @@ fn collectors_do_not_block_the_runtime_with_os_reads() -> Result<()> {
             .next()
             .unwrap_or(collect_once);
 
-        if !body.contains("blocking::offload") {
+        let body_code = body
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        if !body_code.contains("blocking::offload_coalesced(") {
             failures.push(format!(
-                "{} runs collect_once without blocking::offload: synchronous OS reads must go \
-                 to the blocking pool, or one slow read starves every other collector and \
-                 surfaces as a bogus `pool timed out` (issue #35)",
+                "{} runs collect_once without blocking::offload_coalesced: synchronous OS reads \
+                 must be offloaded and capped at one submitted sample per collector, or aborted \
+                 scrapes can pile work onto the blocking pool (issues #34, #35)",
                 relative.display()
             ));
         }
 
         // Merely *mentioning* blocking::offload is not enough: the read must live in a
         // named sampler the offload calls, not inline in collect_once next to it.
-        let body_reads_os = body
+        let body_reads_os = body_code
             .lines()
-            .map(str::trim)
-            .filter(|line| !line.starts_with("//"))
             .any(|line| OS_READ_MARKERS.iter().any(|marker| line.contains(marker)));
         if body_reads_os {
             failures.push(format!(
                 "{} reads the OS directly inside collect_once: move the read into a named \
-                 sampler reached only through blocking::offload, or an inline slow read \
-                 starves every other collector (issue #35)",
+                 sampler reached only through blocking::offload_coalesced, or an inline slow \
+                 read starves every other collector (issue #35)",
                 relative.display()
             ));
         }
@@ -295,18 +303,17 @@ fn collectors_do_not_block_the_runtime_with_os_reads() -> Result<()> {
 /// The `system.process` collector accumulates a monotonic CPU counter from per-PID deltas,
 /// so the order of "sample" and "publish the new baseline" is load-bearing.
 ///
-/// Two collections can overlap: the scrape gate reopens the moment a scrape times out
-/// (issue #34) and a `spawn_blocking` sample that has already started cannot be aborted, so
-/// an abandoned scrape's walk keeps running alongside the next one. If the sample happened
-/// outside the baseline lock, the newer pass could publish its baseline first, the older
-/// pass would then count no delta and overwrite the baseline with its own lower totals, and
-/// the pass after that would re-count the interval between them — inflating
+/// The one-slot submission guard prevents normal scrape-driven overlap. The baseline lock is
+/// still a necessary defence for direct/internal calls and future refactors: if a sample
+/// happened outside it, a newer pass could publish its baseline first, the older pass would
+/// then count no delta and overwrite the baseline with its own lower totals, and the pass
+/// after that would re-count the interval between them — inflating
 /// `pg_system_process_group_cpu_seconds_total` above the CPU actually consumed.
 ///
-/// The lock is a `try_lock`: an overlapping collection skips rather than queueing, so a
-/// sample that outlives its scrape cannot pile tasks onto the blocking pool. The skip path
-/// is pinned behaviourally by `a_concurrent_collection_skips_instead_of_interleaving_samples`
-/// in process.rs; this guard pins the shape that behaviour depends on.
+/// The lock is a `try_lock`: an overlapping direct collection skips rather than queueing. The
+/// skip path is pinned behaviourally by
+/// `a_concurrent_collection_skips_instead_of_interleaving_samples` in process.rs; this guard
+/// pins the shape that behaviour depends on. The outer slot provides the blocking-pool bound.
 ///
 /// This is a source-order assertion rather than a race reproduction: the interleaving needs
 /// a pause between the sample and the lock, which cannot be injected from outside, and a
@@ -335,11 +342,9 @@ fn process_group_locks_the_cpu_baseline_before_sampling() -> Result<()> {
         .next()
         .unwrap_or_default();
 
-    let lock_at = ["self.prev_cpu.try_lock()", "self.prev_cpu.lock()"]
-        .iter()
-        .filter_map(|needle| body.find(needle))
-        .min()
-        .ok_or_else(|| anyhow!("collect_stats_with no longer locks prev_cpu"))?;
+    let lock_at = body
+        .find("self.prev_cpu.try_lock()")
+        .ok_or_else(|| anyhow!("collect_stats_with must take prev_cpu with try_lock"))?;
     let sample_at = body
         .find("let samples = sample();")
         .ok_or_else(|| anyhow!("collect_stats_with no longer samples through its closure"))?;
@@ -365,6 +370,32 @@ fn process_group_locks_the_cpu_baseline_before_sampling() -> Result<()> {
         return Err(anyhow!(
             "collect_stats no longer routes sample_processes through collect_stats_with: the \
              production sampler would bypass the baseline lock (issues #34, #35)"
+        ));
+    }
+
+    let code_lines = production_source
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with("//"));
+    for call in code_lines
+        .clone()
+        .filter(|line| line.contains("sample_processes(") && !line.contains("fn sample_processes"))
+    {
+        if !call.starts_with("self.collect_stats_with(|| sample_processes(") {
+            return Err(anyhow!(
+                "unexpected process sampler call site '{call}': production sampling must happen \
+                 inside collect_stats_with so prev_cpu is already locked"
+            ));
+        }
+    }
+
+    let sampler_uses = code_lines
+        .filter(|line| line.contains("sample_processes"))
+        .count();
+    if sampler_uses != 4 {
+        return Err(anyhow!(
+            "expected exactly four sample_processes references (Linux/FreeBSD definitions and \
+             their locked call sites), found {sampler_uses}"
         ));
     }
 
@@ -398,12 +429,12 @@ fn smaps_rollup_stays_behind_the_pss_opt_in() -> Result<()> {
     };
 
     let readers: Vec<&str> = code_lines()
-        .filter(|line| line.contains("/proc/{pid}/smaps_rollup"))
+        .filter(|line| line.contains("/smaps_rollup") || line.contains("\"smaps_rollup\""))
         .collect();
 
     if readers.len() != 1 {
         return Err(anyhow!(
-            "expected exactly one /proc/<pid>/smaps_rollup read in process.rs (inside \
+            "expected exactly one smaps_rollup reference in production code (the read inside \
              read_pss_bytes), found {}: {readers:?}",
             readers.len()
         ));
@@ -446,6 +477,39 @@ fn smaps_rollup_stays_behind_the_pss_opt_in() -> Result<()> {
             "process.rs no longer dispatches the default RSS source to the rss reader; PSS must \
              not become the default again (issue #35)"
         ));
+    }
+
+    Ok(())
+}
+
+/// The gate must reopen when its request ends even though server-side cancellation or a
+/// non-cancellable blocking sample may still be finishing. Keep the operator documentation
+/// aligned with that deliberately overlapping lifetime model.
+#[test]
+fn scrape_gate_documentation_matches_release_and_connection_semantics() -> Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let readme = std::fs::read_to_string(root.join("README.md"))?;
+    let normalized = readme.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    if normalized
+        .contains("keeps the scrape gate closed until in-flight collector work has unwound")
+    {
+        return Err(anyhow!(
+            "README still describes the pre-#34 gate lifetime; the request-owned gate now \
+             reopens before non-cancellable work and server cancellation finish"
+        ));
+    }
+    for required in [
+        "request-owned scrape gate is released immediately",
+        "operational estimate, not a hard server-side bound",
+        "A role limit is the hard backstop",
+    ] {
+        if !normalized.contains(required) {
+            return Err(anyhow!(
+                "README no longer documents the gate/connection overlap accurately; missing \
+                 text: {required:?}"
+            ));
+        }
     }
 
     Ok(())

@@ -45,6 +45,8 @@ pub struct ProcessCollector {
     open_fds: IntGauge,
     start_time_seconds: Gauge,
     system: Arc<Mutex<SystemState>>,
+    /// Caps blocking OS sampling at one submitted task across overlapping scrapes.
+    sample_slot: Arc<tokio::sync::Mutex<()>>,
     pid: Pid,
 }
 
@@ -135,6 +137,7 @@ impl ProcessCollector {
             open_fds,
             start_time_seconds,
             system,
+            sample_slot: Arc::new(tokio::sync::Mutex::new(())),
             pid,
         }
     }
@@ -255,7 +258,12 @@ impl Collector for ProcessCollector {
             // where every file I/O is taxed (issue #34 saw a fanotify agent add ~1.7 cores
             // of overhead) it is the same stall in miniature.
             let collector = self.clone();
-            blocking::offload("metrics.process", move || collector.collect_stats()).await?;
+            let _ = blocking::offload_coalesced(
+                "metrics.process",
+                &self.sample_slot,
+                move || collector.collect_stats(),
+            )
+            .await?;
             Ok(Collected::Fresh)
         })
     }

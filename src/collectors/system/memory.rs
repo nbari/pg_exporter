@@ -54,6 +54,8 @@ pub struct MemoryCollector {
     swap_used: IntGauge,
     swap_free: IntGauge,
     system: Arc<Mutex<System>>,
+    /// Caps blocking OS sampling at one submitted task across overlapping scrapes.
+    sample_slot: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Default for MemoryCollector {
@@ -129,6 +131,7 @@ impl MemoryCollector {
             swap_used,
             swap_free,
             system,
+            sample_slot: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -181,7 +184,12 @@ impl Collector for MemoryCollector {
         Box::pin(async move {
             // Blocking sysinfo refresh: never run this on a runtime worker (issue #35).
             let collector = self.clone();
-            blocking::offload("system.memory", move || collector.collect_stats()).await?;
+            let _ = blocking::offload_coalesced(
+                "system.memory",
+                &self.sample_slot,
+                move || collector.collect_stats(),
+            )
+            .await?;
             Ok(Collected::Fresh)
         })
     }

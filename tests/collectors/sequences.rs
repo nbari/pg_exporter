@@ -7,20 +7,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static SEQUENCE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-/// Serializes the tests that touch sequences in the shared database.
-///
-/// The `sequences` collector reads `pg_sequences`, which resolves `last_value` per sequence
-/// via `pg_sequence_last_value(oid)`. If a sibling test drops a sequence in the window
-/// between the catalog scan and that call, `PostgreSQL` raises
-/// `could not open relation with OID <n>`. These tests all share one database, and the
-/// collector treats a failure of *every* enumerated database as fatal — with a single
-/// database that is one transient race away from a hard error, which made CI fail
-/// intermittently on different tests and different `PostgreSQL` versions.
-///
-/// Holding this for the whole test keeps sequence DDL and sequence scrapes from
-/// overlapping. It is not a workaround for a product bug: dropping a sequence mid-scrape is
-/// a genuine race that only this test file creates at speed.
-static SEQUENCE_DDL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+// Sequence fixtures live in per-test databases because other collector tests create and
+// drop `SERIAL`-backed tables in the shared `postgres` database. `pg_sequences` resolves a
+// sequence's value after its catalog scan; concurrent implicit-sequence DDL can therefore
+// make that database task fail with a vanished OID. Keeping the assertion target in a
+// database owned for the whole test makes the result independent of unrelated parallel DDL.
 
 fn next_sequence_name(prefix: &str) -> String {
     let counter = SEQUENCE_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -49,16 +40,6 @@ async fn create_sequence(pool: &sqlx::PgPool, sequence_name: &str, max_value: i6
     Ok(())
 }
 
-async fn drop_sequence(pool: &sqlx::PgPool, sequence_name: &str) -> Result<()> {
-    let qualified = qualified_sequence_name(sequence_name);
-    sqlx::query(sqlx::AssertSqlSafe(&*format!(
-        "DROP SEQUENCE IF EXISTS {qualified}"
-    )))
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
 async fn advance_sequence(pool: &sqlx::PgPool, sequence_name: &str) -> Result<i64> {
     let qualified = qualified_sequence_name(sequence_name);
     let row = sqlx::query("SELECT nextval($1::regclass)::bigint AS value")
@@ -75,7 +56,11 @@ fn metric_has_label(metric: &Metric, name: &str, value: &str) -> bool {
         .any(|label| label.name() == name && label.value() == value)
 }
 
-fn sequence_metric_value(registry: &Registry, sequence_name: &str) -> Option<f64> {
+fn sequence_metric_value(
+    registry: &Registry,
+    database_name: &str,
+    sequence_name: &str,
+) -> Option<f64> {
     for family in registry.gather() {
         if family.name() != "pg_sequence_used_ratio" {
             continue;
@@ -84,7 +69,7 @@ fn sequence_metric_value(registry: &Registry, sequence_name: &str) -> Option<f64
         for metric in family.get_metric() {
             if metric_has_label(metric, "sequencename", sequence_name)
                 && metric_has_label(metric, "schemaname", "public")
-                && metric_has_label(metric, "datname", "postgres")
+                && metric_has_label(metric, "datname", database_name)
             {
                 return Some(metric.get_gauge().value());
             }
@@ -113,48 +98,53 @@ async fn test_sequences_name_and_default_disabled() {
 
 #[tokio::test]
 async fn test_sequences_collect_returns_ok_without_panicking() -> Result<()> {
-    let _serial = SEQUENCE_DDL_LOCK.lock().await;
     let pool = common::create_test_pool().await?;
+    let test_db = common::IsolatedTestDatabase::new("sequences_empty").await?;
     let registry = Registry::new();
     let collector = SequencesCollector::new();
 
     collector.register_metrics(&registry)?;
     collector.collect(&pool).await?;
 
+    test_db.cleanup().await?;
     pool.close().await;
     Ok(())
 }
 
 #[tokio::test]
 async fn test_sequences_low_min_ratio_exports_advanced_sequence() -> Result<()> {
-    let _serial = SEQUENCE_DDL_LOCK.lock().await;
     let pool = common::create_test_pool().await?;
+    let test_db = common::IsolatedTestDatabase::new("sequences_advanced").await?;
     let sequence_name = next_sequence_name("advanced");
-    create_sequence(&pool, &sequence_name, 10).await?;
-    advance_sequence(&pool, &sequence_name).await?;
+    create_sequence(test_db.pool(), &sequence_name, 10).await?;
+    advance_sequence(test_db.pool(), &sequence_name).await?;
 
     let registry = Registry::new();
     let collector = SequencesCollector::with_min_ratio(0.0);
     collector.register_metrics(&registry)?;
     collector.collect(&pool).await?;
 
-    let value = sequence_metric_value(&registry, &sequence_name);
+    let value = sequence_metric_value(&registry, test_db.database_name(), &sequence_name);
     assert!(
         value.is_some(),
         "pg_sequence_used_ratio should include the advanced test sequence"
     );
 
-    drop_sequence(&pool, &sequence_name).await?;
+    test_db.cleanup().await?;
     pool.close().await;
     Ok(())
 }
 
 #[tokio::test]
 async fn test_sequences_default_threshold_suppresses_fresh_low_usage_sequence() -> Result<()> {
-    let _serial = SEQUENCE_DDL_LOCK.lock().await;
     let pool = common::create_test_pool().await?;
+    let test_db = common::IsolatedTestDatabase::new("sequences_fresh").await?;
     let sequence_name = next_sequence_name("fresh");
-    create_sequence(&pool, &sequence_name, 1_000_000).await?;
+    let sentinel_name = next_sequence_name("fresh_sentinel");
+    create_sequence(test_db.pool(), &sequence_name, 1_000_000).await?;
+    create_sequence(test_db.pool(), &sentinel_name, 4).await?;
+    advance_sequence(test_db.pool(), &sentinel_name).await?;
+    advance_sequence(test_db.pool(), &sentinel_name).await?;
 
     let registry = Registry::new();
     let collector = SequencesCollector::new();
@@ -162,36 +152,42 @@ async fn test_sequences_default_threshold_suppresses_fresh_low_usage_sequence() 
     collector.collect(&pool).await?;
 
     assert!(
-        sequence_metric_value(&registry, &sequence_name).is_none(),
+        sequence_metric_value(&registry, test_db.database_name(), &sequence_name).is_none(),
         "fresh low-usage sequence should be filtered by the default 0.5 threshold"
     );
+    assert_eq!(
+        sequence_metric_value(&registry, test_db.database_name(), &sentinel_name),
+        Some(0.5),
+        "sentinel sequence must prove the isolated database was sampled successfully"
+    );
 
-    drop_sequence(&pool, &sequence_name).await?;
+    test_db.cleanup().await?;
     pool.close().await;
     Ok(())
 }
 
 #[tokio::test]
 async fn test_sequences_used_ratio_type_conversion_is_finite() -> Result<()> {
-    let _serial = SEQUENCE_DDL_LOCK.lock().await;
     let pool = common::create_test_pool().await?;
+    let test_db = common::IsolatedTestDatabase::new("sequences_ratio").await?;
     let sequence_name = next_sequence_name("ratio");
-    create_sequence(&pool, &sequence_name, 4).await?;
-    advance_sequence(&pool, &sequence_name).await?;
-    advance_sequence(&pool, &sequence_name).await?;
+    create_sequence(test_db.pool(), &sequence_name, 4).await?;
+    advance_sequence(test_db.pool(), &sequence_name).await?;
+    advance_sequence(test_db.pool(), &sequence_name).await?;
 
     let registry = Registry::new();
     let collector = SequencesCollector::with_min_ratio(0.0);
     collector.register_metrics(&registry)?;
     collector.collect(&pool).await?;
 
-    let value = sequence_metric_value(&registry, &sequence_name).unwrap_or(-1.0);
+    let value =
+        sequence_metric_value(&registry, test_db.database_name(), &sequence_name).unwrap_or(-1.0);
     assert!(
         value.is_finite() && (value - 0.5).abs() < 0.000_001,
         "expected pg_sequence_used_ratio to convert bigint values to 0.5, got {value}"
     );
 
-    drop_sequence(&pool, &sequence_name).await?;
+    test_db.cleanup().await?;
     pool.close().await;
     Ok(())
 }

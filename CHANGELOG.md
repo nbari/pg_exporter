@@ -73,7 +73,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lock, so the newer pass could publish its baseline first, the older pass would
   then count no delta and overwrite the baseline with its own lower totals, and
   the next pass re-counted the interval between them. The lock now spans the
-  sample, which also stops two concurrent walks from doubling the `/proc` load.
+  sample, and the one-slot pre-submission guard prevents ordinary scrape-driven
+  overlap from submitting a second `/proc` walk.
 
   Measured effect of the collector being pathological on the affected host:
   `/metrics` went from `504` after 15.002 s with **0 metrics** and 59–100% CPU,
@@ -104,28 +105,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   incident those metrics exist to diagnose. An unobserved drop now increments the new
   `pg_exporter_collector_scrape_aborted_total{collector}` counter and sets
   `last_scrape_success` to `0`. The duration is still observed, but it now means
-  "time until the abort", which is what a stalled collector looks like.
+  "time until the abort", which is what a stalled collector looks like. Collector panics
+  are caught at the per-collector boundary and recorded as errors, so they cannot be
+  misclassified as aborts or cancel unrelated collectors.
 
 - **A slow or hung OS read can no longer pile tasks onto the blocking pool.** A
   `spawn_blocking` task that has started cannot be cancelled, so once the [#34] fix made
   the scrape gate reopen on timeout, a sample that outlives its scrape — an
   over-timeout PSS walk, or `ssl_cert_file` on a hung network mount — would accumulate
-  one queued blocking-pool task per scrape, without bound. Sampling is now coalesced:
-  the process-group collector takes its baseline lock with `try_lock` and a scrape that
-  finds a sample already running skips its own (the in-flight one publishes newer data
-  anyway), and the TLS certificate read holds a one-permit slot so a hung read leaks
-  exactly one blocking thread instead of one per scrape. Overlapping CPU-baseline
-  samples remain correctly ordered; the regression is pinned by a deterministic test
-  rather than a timing one.
+  one queued blocking-pool task per scrape, without bound. Every current OS-reading
+  sub-collector now acquires a one-slot guard before `spawn_blocking`, so a hung read leaks
+  exactly one blocking thread per collector instead of one per scrape. The process-group
+  collector additionally takes its baseline lock with `try_lock` for direct/internal calls;
+  overlapping CPU-baseline samples remain correctly ordered, and the regression is pinned by
+  a deterministic test rather than a timing one.
 
 ### Changed
 
 - **Dependencies**: refreshed to the latest compatible versions — `tower-http` 0.7.0 -> 0.7.1
   in the manifest, plus lockfile bumps across the tree including `rustls` 0.23.43 -> 0.23.44,
   `hyper` 1.11.0 -> 1.11.1, `h2` 0.4.16 -> 0.4.19, `uuid` 1.24.1 -> 1.26.0, `mio` 1.2.2 -> 1.2.3
-  and `tokio-rustls` 0.26.4 -> 0.26.5. Two transitive crates stay pinned: `matchit` is held at
-  0.8.4 by an exact `=0.8.4` requirement in `axum` 0.8.9, and `crypto-common` 0.1.x is held by
-  `digest` 0.10 via `sqlx`; forcing it would downgrade `generic-array`.
+  `tokio-rustls` 0.26.4 -> 0.26.5, `serde_with` 3.22.0 -> 3.23.0, and `darling` 0.23.0 ->
+  0.24.1. Two transitive crates stay pinned: `matchit` is held at 0.8.4 by an exact `=0.8.4`
+  requirement in `axum` 0.8.9, and `crypto-common` 0.1.x is held by `digest` 0.10 via `sqlx`;
+  forcing it would downgrade `generic-array`.
 
 ### Removed
 

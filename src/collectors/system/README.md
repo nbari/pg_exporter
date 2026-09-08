@@ -102,13 +102,13 @@ cardinality stays constant regardless of how many backends exist.
 > if you also pass `--collector.exporter`; read the magnitude from `_sum / _count`,
 > because the histogram's top bucket is 5 s and a PSS walk simply lands in `+Inf`.
 >
-> If a walk outlives its scrape (timeout, or a second scraper arriving while one is
-> running), the overlapping scrape **skips** its sample and serves the previously
-> published values instead of queueing another walk — a started `spawn_blocking` task
-> cannot be cancelled, so queueing would pile walks onto the blocking pool without
-> bound. Skipped samples are invisible in the gauges themselves (they just go stale
-> for one interval); watch `pg_exporter_collector_scrape_aborted_total{collector=
-> "system"}` for scrapes that timed out mid-walk.
+> If any system OS sample outlives its scrape, the overlapping scrape **skips** that
+> sub-collector before submitting another blocking task and serves its previously published
+> values. A started `spawn_blocking` task cannot be cancelled, so every system sub-collector
+> has a one-slot submission guard. Skipped samples are invisible in the gauges themselves
+> (they go stale until the in-flight sample publishes); watch
+> `pg_exporter_collector_scrape_aborted_total{collector="system"}` for scrapes that timed out
+> while system collection was in flight.
 
 ## Interpreting the Counters
 

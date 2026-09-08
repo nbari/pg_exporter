@@ -75,8 +75,9 @@
 /// # }
 /// ```
 ///
-/// The critical section is tiny - just reading process stats from the OS.
-/// Lock contention is minimal since scrapes happen every 15-60 seconds.
+/// The read is normally small, but OS access has no hard latency bound. Collection therefore
+/// uses a pre-submission coalescing slot: an overlapping scrape keeps the last snapshot instead
+/// of queueing another blocking task behind this mutex.
 ///
 /// # Example Usage
 ///

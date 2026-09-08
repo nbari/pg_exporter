@@ -298,6 +298,8 @@ pub struct CpuCollector {
     /// Last raw OS values by CPU and mode. Exported counters advance only by
     /// positive deltas so kernel accounting regressions cannot create spikes.
     raw_cpu_seconds: Arc<Mutex<HashMap<String, HashMap<&'static str, f64>>>>,
+    /// Caps blocking OS sampling at one submitted task across overlapping scrapes.
+    sample_slot: Arc<tokio::sync::Mutex<()>>,
     /// Ensures the "CPU counters unsupported on this platform" warning is logged
     /// at most once per process instead of on every scrape.
     unsupported_warned: Arc<AtomicBool>,
@@ -348,6 +350,7 @@ impl CpuCollector {
             ))
             .expect("pg_system_load15"),
             raw_cpu_seconds: Arc::new(Mutex::new(HashMap::new())),
+            sample_slot: Arc::new(tokio::sync::Mutex::new(())),
             unsupported_warned: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -515,7 +518,12 @@ impl Collector for CpuCollector {
         Box::pin(async move {
             // Blocking /proc and sysctl reads: never run these on a runtime worker (issue #35).
             let collector = self.clone();
-            blocking::offload("system.cpu", move || collector.collect_stats()).await?;
+            let _ = blocking::offload_coalesced(
+                "system.cpu",
+                &self.sample_slot,
+                move || collector.collect_stats(),
+            )
+            .await?;
             Ok(Collected::Fresh)
         })
     }
