@@ -354,7 +354,7 @@ The following collectors are available:
 * `--collector.statements` [statements](src/collectors/statements/README.md) - Query performance metrics from `pg_stat_statements` (see [detailed guide](src/collectors/statements/README.md))
 * `--collector.tls` [tls](src/collectors/tls/mod.rs) - SSL/TLS certificate monitoring and connection encryption stats (PostgreSQL 14+)
 * `--collector.exporter` [exporter](src/collectors/exporter/mod.rs) - Exporter self-monitoring (process metrics, scrape performance, cardinality tracking)
-* `--collector.system` [system](src/collectors/system/README.md) - **Host** CPU and memory for the machine running the exporter (Linux/FreeBSD): node_exporter-style **per-core** `pg_system_cpu_seconds_total{cpu,mode}` counters, `pg_system_load1/5/15`, and `pg_system_memory_*`/`pg_system_swap_*` byte gauges, plus a `postgres*` process-group aggregate (`pg_system_process_group_cpu_seconds_total`, `pg_system_process_group_memory_bytes` — RSS by default, PSS via `--system.process-memory=pss` — and `pg_system_process_group_count`, all labeled `group="postgres"`) that answers "is PostgreSQL itself eating the box, or a noisy neighbour?". Reads only the OS (`/proc/stat`, sysctls, `sysinfo`) — **no** database queries or connections. CPU cardinality is bounded per host (modes × cores) and does not scale with database count. Enable only when the exporter is **co-located** with PostgreSQL; do **not** enable it for managed services like RDS/Aurora (the numbers would describe the exporter's host, not the DB server).
+* `--collector.system` [system](src/collectors/system/README.md) - **Host** CPU and memory for the machine running the exporter (Linux/FreeBSD): node_exporter-style **per-core** `pg_system_cpu_seconds_total{cpu,mode}` counters, `pg_system_load1/5/15`, and `pg_system_memory_*`/`pg_system_swap_*` byte gauges, plus a `postgres*` process-group aggregate (`pg_system_process_group_cpu_seconds_total`, `pg_system_process_group_memory_bytes` — private RSS by default, PSS via `--system.process-memory=pss` — and `pg_system_process_group_count`, all labeled `group="postgres"`) that answers "is PostgreSQL itself eating the box, or a noisy neighbour?". Reads only the OS (`/proc/stat`, sysctls, `sysinfo`) — **no** database queries or connections. CPU cardinality is bounded per host (modes × cores) and does not scale with database count. Enable only when the exporter is **co-located** with PostgreSQL; do **not** enable it for managed services like RDS/Aurora (the numbers would describe the exporter's host, not the DB server).
 
 You can enable `--collector.<name>` or disable `--no-collector.<name>` For example,
 to disable the `vacuum` collector:
@@ -377,8 +377,10 @@ The `system` collector emits node_exporter-style per-core CPU counters
 (`sum without(cpu) ...`), so there is no flag to configure. Its cardinality is bounded per host
 (modes × cores) and does not grow with the number of databases. It also aggregates the host CPU
 and memory of all `postgres*` processes into a fixed `group="postgres"` series (no per-PID label);
-on Linux the memory figure is RSS (`/proc/<pid>/statm`) by default. Pass
-`--system.process-memory=pss` to report PSS instead (`shared_buffers` counted once across backends,
+on Linux the memory figure is private resident memory (`resident − shared` from
+`/proc/<pid>/statm`) by default, so `shared_buffers` is excluded instead of being charged once
+per backend. Pass
+`--system.process-memory=pss` to report PSS instead (shared pages divided proportionally,
 requires running as `postgres`/root) — but note PSS reads `/proc/<pid>/smaps_rollup`, which forces a
 full page-table walk per process and took 13.9 s per scrape on a 253-backend production primary.
 

@@ -13152,7 +13152,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "description": "Resident memory of the whole postgres* process group (pg_system_process_group_memory_bytes). On Linux this is RSS from /proc/<pid>/statm by default (which over-counts shared memory, since shared_buffers is charged to every backend). Start the exporter with --system.process-memory=pss to report PSS (proportional set size) instead, counting shared_buffers once across all backends; PSS requires running as the postgres user or root and is much more expensive to collect, as /proc/<pid>/smaps_rollup forces a full page-table walk per process. On FreeBSD this is summed RSS. The right axis shows the live postgres* process count. Requires --collector.system on a co-located host (not RDS/Aurora).",
+          "description": "Private resident memory of the whole postgres* process group (pg_system_process_group_memory_bytes). On Linux this is resident minus shared pages from /proc/<pid>/statm by default, so shared_buffers is excluded instead of being charged to every backend and the gauge tracks the backends' own work_mem/sort/hash usage. Start the exporter with --system.process-memory=pss to report PSS (proportional set size) instead, counting shared_buffers once across all backends; PSS requires running as the postgres user or root and is much more expensive to collect, as /proc/<pid>/smaps_rollup forces a full page-table walk per process. On FreeBSD this is summed RSS, which over-counts shared memory. The right axis shows the live postgres* process count. Requires --collector.system on a co-located host (not RDS/Aurora).",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -13259,7 +13259,7 @@
               },
               "expr": "pg_system_process_group_memory_bytes{group=\"postgres\", job=\"$job\", instance=\"$instance\"}",
               "refId": "A",
-              "legendFormat": "postgres memory (PSS/RSS)"
+              "legendFormat": "postgres memory"
             },
             {
               "datasource": {

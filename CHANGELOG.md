@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] - 2026-09-09
+
+### Fixed
+
+- **`pg_system_process_group_memory_bytes` no longer multiplies `shared_buffers`
+  by backend count** ([#36]). The default introduced in 0.19.0 summed `statm`
+  *resident* pages
+  across every `postgres*` process, which charges `shared_buffers` to every
+  backend that has touched it: on a 208-backend primary with
+  `shared_buffers = 15939MB` the gauge reported **312 GiB on a 93.8 GiB host
+  (3.3× physical RAM)**, moved with connection count rather than memory
+  pressure, and made any RAM-threshold alert fire permanently. The default now
+  reports **private resident memory** — `resident − shared`, read from the same
+  `statm` line, so the cost stays `O(processes)` and the [#35] regression cannot
+  return through this path. On that primary the value drops from 312 GiB to
+  1.3 GiB — the memory that actually grows with `work_mem`, sorts and hash
+  joins. The result is anonymous RSS, so copy-on-write pages inherited from the
+  postmaster are still charged per backend, but that residual is bounded by the
+  postmaster's footprint rather than by `shared_buffers`. `shared_buffers` is
+  static configuration and remains available via `pg_settings`. No metric was
+  renamed; the `--system.process-memory=pss` opt-in is unchanged when
+  `smaps_rollup` is readable, and its privilege-less fallback now reports the
+  same private figure as the default instead of full RSS.
+
+  The split is **Linux-only**: FreeBSD samples through `sysinfo`, which exposes
+  RSS alone, so that platform still charges `shared_buffers` to every backend —
+  the metric help, `src/collectors/system/README.md` and the Grafana panel
+  description now say so explicitly. The dashboard panel also drops its
+  now-wrong `(PSS/RSS)` legend suffix; no query, layout or metric name changed.
+
+[#36]: https://github.com/nbari/pg_exporter/issues/36
+
 ## [0.19.0] - 2026-09-08
 
 ### Fixed

@@ -24,8 +24,9 @@ pub struct SequencesConfig {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SystemConfig {
-    /// Where `--collector.system` reads process-group memory from. Defaults to RSS
-    /// because PSS costs `O(processes × resident pages)`; see issue #35.
+    /// Where `--collector.system` reads process-group memory from. Defaults to private
+    /// RSS (`resident − shared` from `statm`); PSS costs
+    /// `O(processes × resident pages)`. See issues #35 and #36.
     pub process_memory: ProcessMemorySource,
 }
 

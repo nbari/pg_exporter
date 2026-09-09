@@ -11,16 +11,22 @@
 //!   churn (backends coming and going) never makes the group counter go
 //!   backwards; use `rate()` to get "cores consumed by `PostgreSQL`".
 //! - **Memory** is `pg_system_process_group_memory_bytes`. On Linux this defaults
-//!   to **RSS** (`/proc/<pid>/statm`), one cheap read per process. Because RSS
-//!   charges every shared page to every process that maps it, summing across
-//!   backends over-counts `shared_buffers`. `--system.process-memory=pss`
-//!   switches to **PSS** (`/proc/<pid>/smaps_rollup`), which divides shared pages
-//!   proportionally and so does not double-count shared memory — but it makes the
-//!   kernel walk every page-table entry of every mapping and cost
-//!   `O(processes × resident pages)` (see [`ProcessMemorySource`] for the
-//!   production measurements behind issue #35). PSS also requires the exporter to
-//!   run as the `postgres` user or root; unreadable processes fall back to RSS.
-//!   On FreeBSD there is no cheap PSS, so this is always the summed **RSS**.
+//!   to the group's **private resident memory**: `resident − shared` from
+//!   `/proc/<pid>/statm`, one cheap read per process. Shared pages are excluded
+//!   precisely because summing raw RSS charged `shared_buffers` to every backend
+//!   that had touched it, so the group total reached several times the machine's
+//!   physical RAM and moved with connection count instead of memory pressure
+//!   (issue #36). What remains is the memory that actually grows with `work_mem`,
+//!   sorts and hash joins; `shared_buffers` itself is static configuration,
+//!   already exported via `pg_settings`. `--system.process-memory=pss` switches to
+//!   **PSS** (`/proc/<pid>/smaps_rollup`), which divides shared pages
+//!   proportionally — but it makes the kernel walk every page-table entry of
+//!   every mapping and cost `O(processes × resident pages)` (see
+//!   [`ProcessMemorySource`] for the production measurements behind issue #35).
+//!   PSS also requires the exporter to run as the `postgres` user or root;
+//!   unreadable processes fall back to the `statm` read. On FreeBSD there is no
+//!   cheap PSS or per-process shared split, so this is always the summed **RSS**,
+//!   which still over-counts shared memory.
 //! - **Count** is `pg_system_process_group_count`, the number of matched
 //!   processes.
 //!
@@ -59,15 +65,24 @@ const GROUP: &str = "postgres";
 /// accuracy. See [`ProcessMemorySource::Pss`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ProcessMemorySource {
-    /// **Default.** Resident set size, read from `/proc/<pid>/statm`.
+    /// **Default.** Private resident memory: `resident − shared` from `/proc/<pid>/statm`.
     ///
     /// One short, world-readable line per process that the kernel answers from already
     /// maintained counters, so cost is `O(processes)` and independent of how much memory
-    /// each backend has touched. Summing RSS across backends **over-counts** shared
-    /// memory: every backend that has faulted in a `shared_buffers` page counts that page
-    /// in full, so the group total can exceed the machine's memory on a large instance.
-    /// Read it as an upper bound, and use `pg_system_memory_used_bytes` for the truth
-    /// about the host.
+    /// each backend has touched. Subtracting the `shared` field keeps `shared_buffers`
+    /// out of the group total: raw RSS charged it to every backend that had faulted it
+    /// in, so the summed gauge reported 3.3× physical RAM on a 208-backend primary and
+    /// tracked connection count instead of memory pressure (issue #36). What remains is
+    /// each backend's own memory — the quantity that grows with `work_mem`, sorts, hash
+    /// joins and leaks.
+    ///
+    /// The result is anonymous RSS: copy-on-write pages inherited from the postmaster
+    /// are still charged to every backend, but that residual is bounded by the
+    /// postmaster's own footprint rather than by `shared_buffers`. `shared` also covers
+    /// genuinely private file-backed mappings, so a backend that maps a large file
+    /// privately is under-counted by at most that mapping. Both errors are bounded and
+    /// small; the pre-#36 over-count was unbounded and grew linearly with
+    /// `max_connections`.
     #[default]
     Rss,
     /// Proportional set size, read from `/proc/<pid>/smaps_rollup`. **Opt-in: expensive.**
@@ -129,7 +144,7 @@ fn to_i64(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
 
-/// One sampled process: its PID, cumulative CPU seconds, and resident bytes.
+/// One sampled process: its PID, cumulative CPU seconds, and memory bytes.
 struct ProcSample {
     pid: u32,
     cpu_seconds: f64,
@@ -162,10 +177,18 @@ fn parse_pss_kb(smaps_rollup: &str) -> Option<u64> {
         .and_then(|value| value.parse::<u64>().ok())
 }
 
-/// Extracts resident pages (field 2) from a `/proc/<pid>/statm` line.
+/// Extracts private resident pages from a `/proc/<pid>/statm` line: field 2
+/// (`resident`) minus field 3 (`shared`), saturating at zero.
+///
+/// Raw resident pages charge every shared page to every process that maps it, so
+/// summing them across backends counted `shared_buffers` once per connection and
+/// the group gauge exceeded physical RAM several times over (issue #36).
 #[cfg(target_os = "linux")]
-fn parse_statm_resident_pages(statm: &str) -> Option<u64> {
-    statm.split_whitespace().nth(1)?.parse::<u64>().ok()
+fn parse_statm_private_pages(statm: &str) -> Option<u64> {
+    let mut fields = statm.split_whitespace().skip(1);
+    let resident: u64 = fields.next()?.parse().ok()?;
+    let shared: u64 = fields.next()?.parse().ok()?;
+    Some(resident.saturating_sub(shared))
 }
 
 /// Returns the clock-tick frequency (`_SC_CLK_TCK`) used to scale `/proc` CPU
@@ -196,12 +219,13 @@ fn read_pss_bytes(pid: u32) -> Option<u64> {
     parse_pss_kb(&content).map(|kb| kb.saturating_mul(1024))
 }
 
-/// Reads RSS (bytes) for one PID from the world-readable `statm`. This is the default
-/// source, and the fallback when PSS is requested but not readable.
+/// Reads private resident memory (bytes) for one PID from the world-readable
+/// `statm`. This is the default source, and the fallback when PSS is requested
+/// but not readable.
 #[cfg(target_os = "linux")]
-fn read_rss_bytes(pid: u32, page_size: u64) -> Option<u64> {
+fn read_private_bytes(pid: u32, page_size: u64) -> Option<u64> {
     let content = std::fs::read_to_string(format!("/proc/{pid}/statm")).ok()?;
-    parse_statm_resident_pages(&content).map(|pages| pages.saturating_mul(page_size))
+    parse_statm_private_pages(&content).map(|pages| pages.saturating_mul(page_size))
 }
 
 /// Chooses between the two readers for `source`, and applies the PSS fallback.
@@ -211,16 +235,16 @@ fn read_rss_bytes(pid: u32, page_size: u64) -> Option<u64> {
 /// page-table walk of issue #35. Taking them as arguments also makes the dispatch testable
 /// without reading a live process, whose footprint moves between reads.
 #[cfg(target_os = "linux")]
-fn select_memory_source<P, R>(source: ProcessMemorySource, pss: P, rss: R) -> u64
+fn select_memory_source<P, R>(source: ProcessMemorySource, pss: P, statm: R) -> u64
 where
     P: FnOnce() -> Option<u64>,
     R: FnOnce() -> Option<u64>,
 {
     match source {
-        ProcessMemorySource::Rss => rss(),
+        ProcessMemorySource::Rss => statm(),
         // PSS is unreadable without privileges on that process; fall back rather than
         // reporting nothing.
-        ProcessMemorySource::Pss => pss().or_else(rss),
+        ProcessMemorySource::Pss => pss().or_else(statm),
     }
     .unwrap_or(0)
 }
@@ -231,7 +255,7 @@ fn read_memory_bytes(pid: u32, page_size: u64, source: ProcessMemorySource) -> u
     select_memory_source(
         source,
         || read_pss_bytes(pid),
-        || read_rss_bytes(pid, page_size),
+        || read_private_bytes(pid, page_size),
     )
 }
 
@@ -316,15 +340,16 @@ fn sample_processes(system: &Mutex<System>, prefix: &str) -> Vec<ProcSample> {
 ///
 /// **Metrics (labeled `group="postgres"`):**
 /// - `pg_system_process_group_cpu_seconds_total` (counter, seconds)
-/// - `pg_system_process_group_memory_bytes` (gauge; RSS by default, PSS on Linux via
-///   `--system.process-memory=pss`)
+/// - `pg_system_process_group_memory_bytes` (gauge; private resident memory from
+///   `statm` by default on Linux, PSS via `--system.process-memory=pss`)
 /// - `pg_system_process_group_count` (gauge)
 #[derive(Clone)]
 pub struct ProcessGroupCollector {
     cpu_seconds: CounterVec,
     memory_bytes: IntGaugeVec,
     proc_count: IntGaugeVec,
-    /// Where the memory gauge is read from; RSS by default (see issue #35).
+    /// Where the memory gauge is read from; private resident memory from `statm`
+    /// by default (issues #35, #36).
     ///
     /// Only Linux offers a choice: FreeBSD sampling goes through `sysinfo`, which exposes
     /// RSS alone, and every other platform collects nothing at all, so the field is inert
@@ -390,10 +415,10 @@ impl ProcessGroupCollector {
         let memory_bytes = IntGaugeVec::new(
             Opts::new(
                 "pg_system_process_group_memory_bytes",
-                "Resident memory of the host process group in bytes (Linux: RSS by default, \
-                 which over-counts memory shared between backends such as shared_buffers; set \
-                 --system.process-memory=pss for the shared-aware but far more expensive PSS. \
-                 FreeBSD: summed RSS)",
+                "Private resident memory of the host process group in bytes (Linux: resident \
+                 minus shared pages from /proc/<pid>/statm by default, so shared_buffers is \
+                 not multiplied by backend count; set --system.process-memory=pss for the \
+                 shared-aware but far more expensive PSS. FreeBSD: summed RSS)",
             ),
             &["group"],
         )
@@ -765,11 +790,28 @@ mod tests {
         assert_eq!(parse_pss_kb("Rss: 2048 kB\n"), None);
     }
 
+    /// Issue #36: the default read must subtract `statm`'s shared field, or the
+    /// summed gauge charges `shared_buffers` once per backend and exceeds
+    /// physical RAM several times over.
     #[cfg(target_os = "linux")]
     #[test]
-    fn parse_statm_resident_pages_reads_second_field() {
+    fn parse_statm_private_pages_subtracts_shared_from_resident() {
         // size resident shared text lib data dt
-        assert_eq!(parse_statm_resident_pages("1000 256 128 4 0 512 0"), Some(256));
+        assert_eq!(parse_statm_private_pages("1000 256 128 4 0 512 0"), Some(128));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_statm_private_pages_saturates_when_shared_exceeds_resident() {
+        // `shared` is a subset of `resident` in normal kernel accounting, but the
+        // difference must saturate rather than wrap if that ever fails to hold.
+        assert_eq!(parse_statm_private_pages("1000 100 128 4 0 512 0"), Some(0));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_statm_private_pages_rejects_truncated_line() {
+        assert_eq!(parse_statm_private_pages("1000 256"), None);
     }
 
     /// Issue #35: PSS must be opt-in. `smaps_rollup` forces a full page-table walk per
@@ -780,7 +822,7 @@ mod tests {
         assert_eq!(
             ProcessGroupCollector::new().memory_source,
             ProcessMemorySource::Rss,
-            "the process-group collector must default to the cheap statm RSS read"
+            "the process-group collector must default to the cheap statm read"
         );
     }
 
@@ -835,7 +877,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn pss_mode_reads_pss_and_falls_back_to_rss_when_it_is_unreadable() {
+    fn pss_mode_reads_pss_and_falls_back_to_statm_when_it_is_unreadable() {
         assert_eq!(
             select_memory_source(ProcessMemorySource::Pss, || Some(999), || Some(4096)),
             999,
@@ -843,8 +885,8 @@ mod tests {
              --system.process-memory=pss silently does nothing"
         );
 
-        // PSS needs privileges on the target process; an unreadable one falls back to RSS
-        // rather than dropping the process from the total.
+        // PSS needs privileges on the target process; an unreadable one falls back to the
+        // statm read rather than dropping the process from the total.
         assert_eq!(
             select_memory_source(ProcessMemorySource::Pss, || None, || Some(4096)),
             4096,
@@ -858,8 +900,9 @@ mod tests {
     }
 
     /// Smoke test over the real readers, asserting only what cannot drift: both sources
-    /// answer for a process that certainly exists, and PSS never exceeds RSS at the same
-    /// instant. No cross-read equality, so there is nothing here to flake.
+    /// answer for a process that certainly exists. No cross-source comparison — the two
+    /// count shared pages differently by design, and a live footprint moves between reads,
+    /// so there is nothing here to flake.
     #[cfg(target_os = "linux")]
     #[test]
     fn both_sources_answer_for_a_live_process() {

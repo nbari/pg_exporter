@@ -78,24 +78,35 @@ cardinality stays constant regardless of how many backends exist.
   deltas across scrapes, so backend churn never makes the counter go backwards.
   Read it as CPU-cores with `rate(...)`; divide by `pg_system_cpu_cores` for the
   busy fraction of the whole host.
-- `pg_system_process_group_memory_bytes{group="postgres"}` — resident memory of
-  the group in **bytes**.
+- `pg_system_process_group_memory_bytes{group="postgres"}` — private resident
+  memory of the group in **bytes** (summed RSS on FreeBSD).
 - `pg_system_process_group_count{group="postgres"}` — number of live `postgres*`
   processes.
 
-> **RSS by default, PSS opt-in:** on Linux the memory gauge is **RSS** (resident
-> set size) from `/proc/<pid>/statm`, a single cheap read per process. Passing
+> **Private RSS by default, PSS opt-in:** on Linux the memory gauge is the
+> group's **private resident memory** — `resident − shared` from
+> `/proc/<pid>/statm`, a single cheap read per process. The shared field is
+> subtracted because raw RSS charges `shared_buffers` to every backend that has
+> touched it: summed over 208 backends on one production primary, that reported
+> **312 GiB on a 93.8 GiB host**, and the series moved with connection count
+> rather than memory pressure (issue #36). What the gauge tracks instead is the
+> memory that grows with `work_mem`, sorts and hash joins; `shared_buffers`
+> itself is static configuration, already exported via `pg_settings`. The result
+> is anonymous RSS, so copy-on-write pages inherited from the postmaster are
+> still charged per backend — a residual bounded by the postmaster's own
+> footprint, not by `shared_buffers`. Passing
 > `--system.process-memory=pss` switches to **PSS** (proportional set size) from
 > `/proc/<pid>/smaps_rollup`, which divides shared pages proportionally so
-> `shared_buffers` is counted **once** across all backends rather than multiplied
-> per connection. PSS is more accurate but **far more expensive**: `smaps_rollup`
+> `shared_buffers` is counted **once** across all backends rather than excluded.
+> PSS is more accurate but **far more expensive**: `smaps_rollup`
 > makes the kernel walk every page-table entry of every mapping, costing
 > `O(processes × resident pages)`. On a production primary with 253 `postgres`
 > processes and `shared_buffers = 15939MB` it took **13.851 s** versus **0.016 s**
 > for the equivalent `statm` reads — 92% of a 15 s scrape budget (issue #35). PSS
 > also requires the exporter to run as the `postgres` user or as root; without
-> that permission it falls back to RSS. Only enable PSS if you have measured the
-> cost on your own host. On FreeBSD the gauge is always summed **RSS**.
+> that permission it falls back to the `statm` read. Only enable PSS if you have
+> measured the cost on your own host. On FreeBSD the gauge is always summed
+> **RSS**, which still over-counts shared memory.
 >
 > Watch `pg_exporter_collector_scrape_duration_seconds{collector="system"}` after
 > changing this. That series belongs to the `exporter` collector, so it only exists
@@ -134,6 +145,8 @@ cardinality stays constant regardless of how many backends exist.
   the fraction of the whole machine burned by `postgres*` processes; compare it
   with the host-wide busy fraction to tell `PostgreSQL` apart from a neighbour.
 - **`PostgreSQL` resident memory**:
-  `pg_system_process_group_memory_bytes{group="postgres"}` (RSS on Linux by
-  default; `--system.process-memory=pss` reports PSS instead, which avoids
-  multiplying `shared_buffers` per backend at a significant scrape cost).
+  `pg_system_process_group_memory_bytes{group="postgres"}` (private resident
+  memory on Linux by default — `shared_buffers` excluded, so the gauge tracks
+  backend-private growth instead of connection count;
+  `--system.process-memory=pss` reports PSS instead, at a significant scrape
+  cost).

@@ -95,17 +95,21 @@ fn system_process_memory_arg() -> Arg {
         .help("Source for the --collector.system process-group memory gauge (rss or pss)")
         .long_help(
             "Where --collector.system reads pg_system_process_group_memory_bytes from on Linux.\n\n\
-             rss (default): /proc/<pid>/statm. One short line per process, answered from \
-             counters the kernel already maintains, so the cost is O(processes). Summing it \
-             over-counts memory shared between backends (shared_buffers is counted once per \
-             backend that touched it), so treat the group total as an upper bound.\n\n\
+             rss (default): /proc/<pid>/statm, reporting resident minus shared pages — the \
+             group's private memory. One short line per process, answered from counters the \
+             kernel already maintains, so the cost is O(processes). Shared memory such as \
+             shared_buffers is excluded rather than charged once per backend, so the total \
+             tracks the backends' own work_mem/sort/hash usage instead of connection \
+             count.\n\n\
              pss: /proc/<pid>/smaps_rollup. Divides shared pages proportionally, so \
-             shared_buffers is counted once across the group rather than once per connection. \
+             shared_buffers is counted once across the group rather than excluded. \
              The kernel can only compute that by walking every page-table entry of every \
              mapping, making the cost O(processes x resident pages). On a production primary \
              with 253 backends and shared_buffers=15939MB this took 13.9s per scrape versus \
              0.016s for rss (~866x), consuming 92% of the default 15s scrape budget. Enable it \
-             only on instances with small shared_buffers and few connections.\n\n\
+             only on instances with small shared_buffers and few connections. A process whose \
+             smaps_rollup is unreadable (insufficient privileges) falls back to its statm \
+             figure, so a partial-permission run reports a mixed total.\n\n\
              Examples:\n\
                --system.process-memory rss\n\
                --system.process-memory pss\n\

@@ -661,10 +661,10 @@ fn smaps_rollup_stays_behind_the_pss_opt_in() -> Result<()> {
     // The dispatch itself — that the RSS arm never calls the PSS reader — is asserted
     // behaviourally by `rss_mode_never_pays_for_the_smaps_rollup_walk` in process.rs, which
     // counts calls to an injected reader. This only pins the laziness the counter relies on.
-    if !production_source.contains("ProcessMemorySource::Rss => rss()") {
+    if !production_source.contains("ProcessMemorySource::Rss => statm()") {
         return Err(anyhow!(
-            "process.rs no longer dispatches the default RSS source to the rss reader; PSS must \
-             not become the default again (issue #35)"
+            "process.rs no longer dispatches the default RSS source to the statm reader; PSS \
+             must not become the default again (issue #35)"
         ));
     }
 
