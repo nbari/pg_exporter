@@ -120,6 +120,18 @@ connection-constrained clusters (e.g. AWS RDS), that fan-out follows a strict mo
 database and can exhaust `max_connections`. This invariant is locked by
 `tests/collectors/connection.rs` (fresh backend PID per call + closed on drop); keep it green.
 
+The `index` collector discovers databases once and collects its ten metric families with
+one combined query per database. On healthy scrapes it opens one ephemeral connection per
+non-default database. Permission/feature errors can fall back to separate metric-group
+queries on that same connection; connection, lock, and timeout errors are not retried.
+Keep the broader `pg_index` scope of the invalid-index count, including partitioned index
+parents that are absent from `pg_stat_user_indexes`. Tests in `tests/index_scrape.rs` compare
+against frozen 0.20.0 SQL and verify the session/query count and readable-subset behavior.
+
+When spawning per-database tasks, wrap their futures with `permit_metrics::inherit` **before**
+passing them to Tokio. The optional task-local context attributes shared permit wait/hold
+measurements to the top-level collector; it is not inherited automatically by spawned tasks.
+
 ### Scrape Safety Model
 
 Every exporter-managed scrape connection must pass through the shared hardening in
@@ -263,7 +275,7 @@ Check actual PostgreSQL column types and add explicit casts in SQL.
 GitHub Actions automatically:
 1. Starts PostgreSQL with pg_stat_statements preloaded
 2. Creates the extension
-3. Runs all tests across PostgreSQL 16, 17, and 18
+3. Runs all tests across PostgreSQL 14, 15, 16, 17, and 18
 
 If CI fails but local tests pass, you probably don't have pg_stat_statements enabled locally.
 

@@ -430,7 +430,10 @@ impl CollectorRegistry {
             // boundary. Trait implementations normally just box an async block, but a panic
             // before returning that box must still be an error, not an unobserved timer drop.
             let collector_pool = active_pool.clone();
-            let fut = async move { collector.collect(&collector_pool).await };
+            let context = self.scraper.as_ref().and_then(|s| s.permit_context(name));
+            let fut = super::permit_metrics::scope(context, async move {
+                collector.collect(&collector_pool).await
+            });
 
             // Push an instrumented future that logs start/finish.
             tasks.push(collect_with_outcome(name, timer, fut, span));

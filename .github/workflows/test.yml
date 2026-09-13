@@ -253,3 +253,10 @@ jobs:
           # PostgreSQL; pin it to the matrix version so they cover every major.
           PG_EXPORTER_TEST_POSTGRES_TAG: ${{ matrix.postgres }}
         run: cargo test
+
+      - name: Test index and permit regressions with one database slot
+        env:
+          PG_EXPORTER_DSN: postgresql://postgres:postgres@localhost:5432/postgres
+          PG_EXPORTER_TEST_DB_CONCURRENCY: '1'
+        # The full suite above covers the default of two slots on every matrix version.
+        run: cargo test --test index_scrape

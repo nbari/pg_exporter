@@ -406,7 +406,7 @@ impl Collector for StatUserTablesCollector {
                 let shared_pool = shared_pool.clone();
                 let default_db = default_db.clone();
 
-                tasks.spawn(async move {
+                tasks.spawn(crate::collectors::permit_metrics::inherit(async move {
                     let use_shared = default_db.as_deref() == Some(datname.as_str());
 
                     let query_span = info_span!(
@@ -509,7 +509,7 @@ impl Collector for StatUserTablesCollector {
                     }
 
                     Ok::<Vec<UserTableSample>, anyhow::Error>(samples)
-                });
+                }));
             }
 
             let mut all_samples = Vec::new();

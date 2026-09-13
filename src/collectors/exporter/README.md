@@ -47,6 +47,7 @@ Tracks scrape performance and health across all collectors.
 
 **Metrics:**
 - `pg_exporter_collector_scrape_duration_seconds{collector}` - Histogram with buckets
+  - Elapsed collector time, including permit waits and shared-pool waits
   - Buckets: 1ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s
   - Automatically creates `_bucket`, `_sum`, `_count` metrics
   - Use `histogram_quantile()` for percentiles (p50, p95, p99)
@@ -55,6 +56,35 @@ Tracks scrape performance and health across all collectors.
 - `pg_exporter_collector_last_scrape_success{collector}` - Success indicator (1/0)
 - `pg_exporter_metrics_total` - ⭐ Total active time series / cardinality (matches `curl -s 0:9432/metrics | grep -vEc '^(#|\s*$)'`)
 - `pg_exporter_scrapes_total` - Total scrapes performed
+
+**Database permit timing (issues #37/#38):**
+
+- `pg_exporter_collector_permit_wait_seconds{collector}` measures each attempt to acquire
+  the global non-default-database permit.
+- `pg_exporter_collector_permit_hold_seconds{collector}` measures each acquired permit's
+  lifetime: connection establishment, database work, and cleanup. It is not SQL time alone.
+
+Both are histograms with the same buckets as scrape duration. A cancelled/failed wait records
+time until cancellation/failure, and a dropped held permit records time until release, once.
+Labels identify the top-level `index`, `stat`, `sequences`, or `vacuum` collector. Series appear
+after that collector first uses a non-default-database permit; ordinary activity collection
+and default-database queries do not use this limiter. Metrics require `--collector.exporter`.
+
+Waiting tasks overlap with one another and with running tasks. Their summed durations can
+exceed the collector's elapsed time. **Do not subtract these sums or histogram quantiles from
+scrape duration.** Compare per-operation wait and hold times to distinguish contention from
+time occupying a database slot. The existing elapsed-time histogram and its success, error,
+and abort semantics are unchanged.
+
+```promql
+# Mean wait per acquisition attempt; omit intervals with no attempts.
+rate(pg_exporter_collector_permit_wait_seconds_sum[5m])
+  / (rate(pg_exporter_collector_permit_wait_seconds_count[5m]) > 0)
+
+# Mean time occupying a permit, including connection setup.
+rate(pg_exporter_collector_permit_hold_seconds_sum[5m])
+  / (rate(pg_exporter_collector_permit_hold_seconds_count[5m]) > 0)
+```
 
 **Implementation:**
 - RAII `ScrapeTimer` for automatic duration recording

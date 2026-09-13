@@ -51,7 +51,7 @@ With neither a runtime nor `PG_EXPORTER_DSN`, they skip — unless `CI=true` or
 ### CI Testing
 
 The CI pipeline automatically:
-- Tests against PostgreSQL 16, 17, and 18
+- Tests against PostgreSQL 14, 15, 16, 17, and 18
 - Installs and configures pg_stat_statements extension
 - Runs all integration tests
 
@@ -202,6 +202,27 @@ PG_EXPORTER_DSN=postgresql://postgres:postgres@localhost:55416/postgres cargo te
 check. It also verifies JSON validity, the `job`/`instance`/`database` template
 variables, and job-filter coverage, which the Rust tests do not.
 
+## Index and Permit Timing Regressions
+
+`tests/index_scrape.rs` runs in its own process so configuration in process-wide cells does
+not race unrelated tests. It compares all ten index metrics against the frozen pre-merge SQL
+in `tests/collectors/index/reference.sql`, checks exactly one session and one healthy query
+per non-default database, and exercises permissions, retirement, and top-level timing labels.
+The workload must actually produce scans and invalid indexes before assertions run.
+
+CI runs it at both connection limits on every PostgreSQL matrix version. To repeat in DevPod:
+
+```sh
+PG_EXPORTER_TEST_DB_CONCURRENCY=1 cargo test --test index_scrape
+PG_EXPORTER_TEST_DB_CONCURRENCY=2 cargo test --test index_scrape
+```
+
+Use the compose `PG_EXPORTER_DSN` inside DevPod; on the host explicitly set the local test
+DSN as above. Permit timing unit tests use a paused clock and controlled semaphore admission
+to verify attribution, concurrent waits, cancellation, and release without timing thresholds.
+The dashboard fixture also creates a non-default database so permit metrics are tested on a
+clean PostgreSQL instance, not only on a populated developer cluster.
+
 ## Test Coverage Requirements
 
 Before merging:
@@ -235,7 +256,7 @@ SELECT * FROM pg_extension;
 
 `pg_exporter` supports PostgreSQL 14 and newer.
 
-The test matrix currently covers PostgreSQL 16, 17, and 18. Some features may vary across supported versions:
+The test matrix currently covers PostgreSQL 14, 15, 16, 17, and 18. Some features may vary across supported versions:
 
 - `pg_stat_checkpointer` - Added in PostgreSQL 17
 - Use explicit version guards only for features that vary across supported versions

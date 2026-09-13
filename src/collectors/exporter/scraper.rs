@@ -1,6 +1,9 @@
 use crate::collectors::Collected;
+use crate::collectors::permit_metrics::{DURATION_BUCKETS, PermitContext, PermitMetrics};
 use anyhow::Result;
+use once_cell::sync::OnceCell;
 use prometheus::{CounterVec, GaugeVec, HistogramVec, IntGauge, Opts, Registry};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Tracks scrape performance and metrics cardinality
@@ -14,10 +17,18 @@ use std::time::Instant;
 /// ## Per-Collector Performance
 ///
 /// - `pg_exporter_collector_scrape_duration_seconds{collector}` (Histogram)
-///   - Time spent scraping each collector
+///   - Elapsed time scraping each collector, including queue and pool waits
 ///   - Buckets: 1ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s
 ///   - Use `histogram_quantile()` for percentiles (p50, p95, p99)
 ///   - Example: `histogram_quantile(0.99, rate(pg_exporter_collector_scrape_duration_seconds_bucket[5m]))`
+///
+/// - `pg_exporter_collector_permit_wait_seconds{collector}` (Histogram)
+///   - Time per non-default-database permit acquisition attempt, including cancellation
+/// - `pg_exporter_collector_permit_hold_seconds{collector}` (Histogram)
+///   - Time per held permit, including connection setup and database work
+///   - Both use the duration buckets and top-level collector names
+///   - Concurrent operations overlap: their sums/quantiles cannot be subtracted
+///     from collector elapsed time; default-database pool work is not measured here
 ///
 /// - `pg_exporter_collector_scrape_errors_total{collector}` (Counter)
 ///   - Total errors per collector since start
@@ -109,6 +120,7 @@ use std::time::Instant;
 /// ```
 #[derive(Clone)]
 pub struct ScraperCollector {
+    permit_metrics: Arc<OnceCell<PermitMetrics>>,
     // Per-collector metrics
     scrape_duration_seconds: HistogramVec,
     scrape_errors_total: CounterVec,
@@ -141,7 +153,7 @@ impl ScraperCollector {
                 "pg_exporter_collector_scrape_duration_seconds",
                 "Time spent scraping each collector in seconds",
             )
-            .buckets(vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]),
+            .buckets(DURATION_BUCKETS.to_vec()),
             &["collector"],
         )
         .expect("pg_exporter_collector_scrape_duration_seconds");
@@ -196,6 +208,7 @@ impl ScraperCollector {
         .expect("pg_exporter_scrapes_total");
 
         Self {
+            permit_metrics: Arc::new(OnceCell::new()),
             scrape_duration_seconds,
             scrape_errors_total,
             scrape_aborted_total,
@@ -204,6 +217,12 @@ impl ScraperCollector {
             metrics_total,
             scrapes_total,
         }
+    }
+
+    pub(crate) fn permit_context(&self, collector: &'static str) -> Option<PermitContext> {
+        self.permit_metrics
+            .get()
+            .map(|metrics| metrics.context(collector))
     }
 
     /// Returns the total number of scrapes performed
@@ -307,6 +326,10 @@ impl ScraperCollector {
     ///
     /// Returns an error if any metric fails to register
     pub fn register(&self, registry: &Registry) -> Result<()> {
+        // Initialize in the fallible registration path, without adding constructor panics.
+        self.permit_metrics
+            .get_or_try_init(PermitMetrics::new)?
+            .register(registry)?;
         registry.register(Box::new(self.scrape_duration_seconds.clone()))?;
         registry.register(Box::new(self.scrape_errors_total.clone()))?;
         registry.register(Box::new(self.scrape_aborted_total.clone()))?;
@@ -327,7 +350,10 @@ impl crate::collectors::Collector for ScraperCollector {
         self.register(registry)
     }
 
-    fn collect_once<'a>(&'a self, _pool: &'a sqlx::PgPool) -> futures::future::BoxFuture<'a, Result<Collected>> {
+    fn collect_once<'a>(
+        &'a self,
+        _pool: &'a sqlx::PgPool,
+    ) -> futures::future::BoxFuture<'a, Result<Collected>> {
         // ScraperCollector doesn't scrape from PostgreSQL
         // It's updated by other collectors via start_scrape(), update_metrics_count(), etc.
         Box::pin(async move { Ok(Collected::Fresh) })
@@ -335,6 +361,9 @@ impl crate::collectors::Collector for ScraperCollector {
 
     /// Removes every labeled series this collector owns.
     fn reset_metrics(&self) {
+        if let Some(metrics) = self.permit_metrics.get() {
+            metrics.reset();
+        }
         self.scrape_duration_seconds.reset();
         self.scrape_errors_total.reset();
         self.scrape_aborted_total.reset();
@@ -434,7 +463,10 @@ mod tests {
             .find(|m| m.name() == "pg_exporter_collector_scrape_duration_seconds")
             .expect("duration metric should exist");
 
-        let metric = duration_metric.get_metric().first().expect("metric should have at least one sample");
+        let metric = duration_metric
+            .get_metric()
+            .first()
+            .expect("metric should have at least one sample");
         assert_eq!(
             metric.get_histogram().get_sample_count(),
             1,
@@ -462,8 +494,14 @@ mod tests {
             .find(|m| m.name() == "pg_exporter_collector_scrape_errors_total")
             .expect("error metric should exist");
 
-        let metric = error_metric.get_metric().first().expect("metric should have at least one sample");
-        assert!((metric.get_counter().value() - 1.0).abs() < f64::EPSILON, "Should record exactly one error");
+        let metric = error_metric
+            .get_metric()
+            .first()
+            .expect("metric should have at least one sample");
+        assert!(
+            (metric.get_counter().value() - 1.0).abs() < f64::EPSILON,
+            "Should record exactly one error"
+        );
 
         // Verify NO success duration was recorded (bug fix check)
         let duration_metric = metrics
@@ -474,7 +512,11 @@ mod tests {
             let metrics = m.get_metric();
             if !metrics.is_empty() {
                 assert_eq!(
-                    metrics.first().expect("metric should have at least one sample").get_histogram().get_sample_count(),
+                    metrics
+                        .first()
+                        .expect("metric should have at least one sample")
+                        .get_histogram()
+                        .get_sample_count(),
                     0,
                     "Should not record duration on error"
                 );

@@ -12,10 +12,7 @@
 
 use super::super::common;
 use anyhow::Result;
-use pg_exporter::collectors::{
-    Collector,
-    index::{IndexStatsCollector, UnusedIndexCollector},
-};
+use pg_exporter::collectors::{Collector, index::IndexCollector};
 use prometheus::Registry;
 use prometheus::proto::MetricFamily;
 
@@ -81,7 +78,7 @@ async fn test_index_stats_collects_from_other_database() -> Result<()> {
     // Collect against the DEFAULT (postgres) pool — not the isolated DB.
     let pool = common::create_test_pool().await?;
     let registry = Registry::new();
-    let collector = IndexStatsCollector::new();
+    let collector = IndexCollector::new();
     collector.register_metrics(&registry)?;
     collector.collect(&pool).await?;
 
@@ -146,7 +143,7 @@ async fn test_unused_index_collects_from_other_database() -> Result<()> {
 
     let pool = common::create_test_pool().await?;
     let registry = Registry::new();
-    let collector = UnusedIndexCollector::new();
+    let collector = IndexCollector::new();
     collector.register_metrics(&registry)?;
     collector.collect(&pool).await?;
 
@@ -196,7 +193,7 @@ async fn test_index_collectors_cover_multiple_databases() -> Result<()> {
 
     let pool = common::create_test_pool().await?;
     let registry = Registry::new();
-    let collector = IndexStatsCollector::new();
+    let collector = IndexCollector::new();
     collector.register_metrics(&registry)?;
     // Must not error even though it fans out across every database.
     collector.collect(&pool).await?;

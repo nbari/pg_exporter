@@ -14473,7 +14473,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "description": "Time spent collecting metrics from PostgreSQL per collector.\n\nGOAL: < 1 second per collector\n\nUse to identify slow collectors.",
+          "description": "Elapsed time per collector, including global database-permit waits and shared-pool waits. Successful scrapes and time until abort are observed; ordinary collector errors do not add duration samples.\n\nPair with Database Permit Wait and Hold Time to distinguish contention from work occupying a database slot. Concurrent task times overlap, so do not subtract permit sums or quantiles from this duration.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -14563,6 +14563,78 @@
             }
           ],
           "title": "Collector Scrape Duration",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Mean time per non-default-database permit operation. Wait measures acquisition attempts; hold includes connection setup, database work and cleanup. Cancelled operations contribute time until cancellation.\n\nHigh wait indicates contention for --collectors.max-db-concurrency. High hold indicates time occupying a database slot, not SQL execution alone. Default-database pool work is not included.\n\nConcurrent operations overlap: these durations cannot be subtracted from collector scrape duration. No series means the collector has not used a non-default-database permit; intervals with no observations are omitted.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "unit": "s",
+              "min": 0,
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 0,
+                "spanNulls": false,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 213
+          },
+          "id": 2005,
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true,
+              "calcs": [
+                "last",
+                "mean"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "10.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "rate(pg_exporter_collector_permit_wait_seconds_sum{job=\"$job\", instance=\"$instance\"}[5m]) / (rate(pg_exporter_collector_permit_wait_seconds_count{job=\"$job\", instance=\"$instance\"}[5m]) > 0)",
+              "legendFormat": "{{collector}} wait",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "expr": "rate(pg_exporter_collector_permit_hold_seconds_sum{job=\"$job\", instance=\"$instance\"}[5m]) / (rate(pg_exporter_collector_permit_hold_seconds_count{job=\"$job\", instance=\"$instance\"}[5m]) > 0)",
+              "legendFormat": "{{collector}} hold",
+              "refId": "B"
+            }
+          ],
+          "title": "Database Permit Wait and Hold Time",
           "type": "timeseries"
         },
         {

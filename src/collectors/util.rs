@@ -61,7 +61,11 @@ const DEFAULT_APPLICATION_NAME: &str = env!("CARGO_PKG_NAME");
 
 /// A permit proving a non-default-database scrape query has been admitted by the global
 /// concurrency limiter.
-pub type DbQueryPermit = OwnedSemaphorePermit;
+pub struct DbQueryPermit {
+    // Release the permit even when collection fails or its task is aborted.
+    _permit: OwnedSemaphorePermit,
+    _hold_observation: Option<super::permit_metrics::PermitObservation>,
+}
 
 #[inline]
 #[must_use]
@@ -595,12 +599,28 @@ fn validate_connect_timeout_budget_for(
 ///
 /// Returns an error if the limiter has been closed.
 pub async fn acquire_db_query_permit() -> Result<DbQueryPermit> {
-    DB_QUERY_SEMAPHORE
+    let limiter = DB_QUERY_SEMAPHORE
         .get_or_init(|| Arc::new(Semaphore::new(get_max_db_concurrency())))
-        .clone()
+        .clone();
+    acquire_db_query_permit_from(limiter).await
+}
+
+async fn acquire_db_query_permit_from(limiter: Arc<Semaphore>) -> Result<DbQueryPermit> {
+    let context = super::permit_metrics::current_context();
+    let wait = context
+        .as_ref()
+        .and_then(super::permit_metrics::PermitContext::start_wait);
+    let permit = limiter
         .acquire_owned()
         .await
-        .map_err(|_| anyhow!("database query concurrency semaphore closed"))
+        .map_err(|_| anyhow!("database query concurrency semaphore closed"))?;
+    drop(wait);
+    Ok(DbQueryPermit {
+        _permit: permit,
+        _hold_observation: context
+            .as_ref()
+            .and_then(super::permit_metrics::PermitContext::start_hold),
+    })
 }
 
 /// Initialize (idempotent) the base connect options from the provided DSN (`SecretString`).
@@ -673,6 +693,187 @@ pub async fn open_db_connection(datname: &str, _permit: &DbQueryPermit) -> Resul
             )
         })??;
     Ok(conn)
+}
+
+#[cfg(test)]
+mod permit_timing_tests {
+    use super::acquire_db_query_permit_from;
+    use crate::collectors::permit_metrics::{PermitMetrics, inherit, scope};
+    use anyhow::{Result, anyhow, ensure};
+    use prometheus::Registry;
+    use std::{sync::Arc, time::Duration};
+    use tokio::{sync::Semaphore, time::advance};
+
+    fn assert_observation(
+        registry: &Registry,
+        phase: &str,
+        collector: &str,
+        count: u64,
+        seconds: f64,
+    ) -> Result<()> {
+        let families = registry.gather();
+        let name = format!("pg_exporter_collector_permit_{phase}_seconds");
+        let histogram = families
+            .iter()
+            .find(|f| f.name() == name)
+            .and_then(|f| {
+                f.get_metric().iter().find(|m| {
+                    m.get_label()
+                        .iter()
+                        .any(|l| l.name() == "collector" && l.value() == collector)
+                })
+            })
+            .ok_or_else(|| anyhow!("missing {name} for {collector}"))?
+            .get_histogram();
+        ensure!(
+            histogram.get_sample_count() == count,
+            "unexpected observation count"
+        );
+        ensure!(
+            (histogram.get_sample_sum() - seconds).abs() < 1e-9,
+            "{collector} {phase}: expected {seconds}, got {}",
+            histogram.get_sample_sum()
+        );
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn contention_separates_wait_from_hold_and_keeps_owner() -> Result<()> {
+        let metrics = PermitMetrics::new()?;
+        let registry = Registry::new();
+        metrics.register(&registry)?;
+        let limiter = Arc::new(Semaphore::new(1));
+        let stat = scope(
+            Some(metrics.context("stat")),
+            acquire_db_query_permit_from(Arc::clone(&limiter)),
+        )
+        .await?;
+        advance(Duration::from_secs(2)).await;
+        let mut index = Box::pin(scope(
+            Some(metrics.context("index")),
+            acquire_db_query_permit_from(Arc::clone(&limiter)),
+        ));
+        assert!(futures::poll!(&mut index).is_pending());
+        advance(Duration::from_secs(3)).await;
+        drop(stat);
+        let index = index.await?;
+        advance(Duration::from_secs(2)).await;
+        drop(index);
+        assert_eq!(limiter.available_permits(), 1);
+        assert_observation(&registry, "wait", "stat", 1, 0.0)?;
+        assert_observation(&registry, "hold", "stat", 1, 5.0)?;
+        assert_observation(&registry, "wait", "index", 1, 3.0)?;
+        assert_observation(&registry, "hold", "index", 1, 2.0)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_wait_records_once_without_a_hold_or_permit_leak() -> Result<()> {
+        let metrics = PermitMetrics::new()?;
+        let registry = Registry::new();
+        metrics.register(&registry)?;
+        let limiter = Arc::new(Semaphore::new(1));
+        let held = acquire_db_query_permit_from(Arc::clone(&limiter)).await?;
+        let mut pending = Box::pin(scope(
+            Some(metrics.context("index")),
+            acquire_db_query_permit_from(Arc::clone(&limiter)),
+        ));
+        assert!(futures::poll!(&mut pending).is_pending());
+        advance(Duration::from_secs(4)).await;
+        drop(pending);
+        assert_observation(&registry, "wait", "index", 1, 4.0)?;
+        assert!(
+            registry
+                .gather()
+                .iter()
+                .all(|f| f.name() != "pg_exporter_collector_permit_hold_seconds")
+        );
+        drop(held);
+        assert_eq!(limiter.available_permits(), 1);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn aborted_spawn_inherits_context_and_releases_held_permit() -> Result<()> {
+        let metrics = PermitMetrics::new()?;
+        let registry = Registry::new();
+        metrics.register(&registry)?;
+        let limiter = Arc::new(Semaphore::new(1));
+        let child_limiter = Arc::clone(&limiter);
+        let (ready, acquired) = tokio::sync::oneshot::channel();
+        scope(Some(metrics.context("sequences")), async move {
+            let child = tokio::spawn(inherit(async move {
+                let _permit = acquire_db_query_permit_from(child_limiter).await?;
+                let _ = ready.send(());
+                std::future::pending::<()>().await;
+                Ok::<_, anyhow::Error>(())
+            }));
+            acquired.await?;
+            advance(Duration::from_secs(5)).await;
+            child.abort();
+            ensure!(child.await.is_err(), "child must be cancelled");
+            Ok::<_, anyhow::Error>(())
+        })
+        .await?;
+        assert_eq!(limiter.available_permits(), 1);
+        assert_observation(&registry, "wait", "sequences", 1, 0.0)?;
+        assert_observation(&registry, "hold", "sequences", 1, 5.0)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn contexts_are_registry_local_and_optional() -> Result<()> {
+        let a = PermitMetrics::new()?;
+        let b = PermitMetrics::new()?;
+        let registry_a = Registry::new();
+        let registry_b = Registry::new();
+        a.register(&registry_a)?;
+        b.register(&registry_b)?;
+        let limiter = Arc::new(Semaphore::new(1));
+        let held = scope(
+            Some(a.context("index")),
+            acquire_db_query_permit_from(Arc::clone(&limiter)),
+        )
+        .await?;
+        advance(Duration::from_secs(1)).await;
+        drop(held);
+        let held = scope(
+            Some(b.context("index")),
+            acquire_db_query_permit_from(Arc::clone(&limiter)),
+        )
+        .await?;
+        advance(Duration::from_secs(2)).await;
+        drop(held);
+        drop(scope(None, acquire_db_query_permit_from(limiter)).await?);
+        assert_observation(&registry_a, "hold", "index", 1, 1.0)?;
+        assert_observation(&registry_b, "hold", "index", 1, 2.0)?;
+        a.reset();
+        assert!(registry_a.gather().is_empty());
+        assert_observation(&registry_b, "hold", "index", 1, 2.0)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closed_limiter_records_failed_wait_without_a_hold() -> Result<()> {
+        let metrics = PermitMetrics::new()?;
+        let registry = Registry::new();
+        metrics.register(&registry)?;
+        let limiter = Arc::new(Semaphore::new(1));
+        limiter.close();
+        assert!(
+            scope(
+                Some(metrics.context("vacuum")),
+                acquire_db_query_permit_from(limiter)
+            )
+            .await
+            .is_err()
+        );
+        assert_observation(&registry, "wait", "vacuum", 1, 0.0)?;
+        assert!(
+            registry
+                .gather()
+                .iter()
+                .all(|f| f.name() != "pg_exporter_collector_permit_hold_seconds")
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]

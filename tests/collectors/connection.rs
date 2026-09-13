@@ -1,6 +1,6 @@
 //! Regression tests for the per-database connection model.
 //!
-//! The multi-database collectors (`stat`, `index`, `index_unused`) must open per-database
+//! The multi-database collectors (`stat`, `index`, `sequences`) must open per-database
 //! connections **ephemerally** — one connection per scrape query, closed on drop — via
 //! `util::open_db_connection`. They must NOT cache a pool/connection per database: doing so
 //! reintroduces connection-per-database accumulation that can exhaust `max_connections` on
@@ -80,7 +80,7 @@ async fn open_db_connection_is_fresh_and_ephemeral() -> Result<()> {
 /// The number of per-database connections open at any instant must never exceed the
 /// configured concurrency limit.
 ///
-/// Every multi-database fan-out collector (`stat`, `index`, `index_unused`) gates its
+/// Every multi-database fan-out collector (`stat`, `index`, `sequences`) gates its
 /// ephemeral `open_db_connection` calls behind the global `acquire_db_query_permit()`
 /// semaphore. That semaphore is what bounds the exporter's per-database connection
 /// footprint to the concurrency limit *regardless of how many databases exist in the

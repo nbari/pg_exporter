@@ -1,18 +1,18 @@
 use super::super::common;
 use anyhow::Result;
-use pg_exporter::collectors::{Collector, index::IndexStatsCollector};
+use pg_exporter::collectors::{Collector, index::IndexCollector};
 use prometheus::Registry;
 
 #[tokio::test]
 async fn test_index_stats_collector_name() {
-    let collector = IndexStatsCollector::new();
-    assert_eq!(collector.name(), "index_stats");
+    let collector = IndexCollector::new();
+    assert_eq!(collector.name(), "index");
 }
 
 #[tokio::test]
 async fn test_index_stats_collector_registers_without_error() -> Result<()> {
     let registry = Registry::new();
-    let collector = IndexStatsCollector::new();
+    let collector = IndexCollector::new();
 
     collector.register_metrics(&registry)?;
     Ok(())
@@ -22,7 +22,7 @@ async fn test_index_stats_collector_registers_without_error() -> Result<()> {
 async fn test_index_stats_collector_has_all_metrics_after_collection() -> Result<()> {
     let pool = common::create_test_pool().await?;
     let registry = Registry::new();
-    let collector = IndexStatsCollector::new();
+    let collector = IndexCollector::new();
 
     collector.register_metrics(&registry)?;
     collector.collect(&pool).await?;
@@ -70,7 +70,7 @@ async fn test_index_stats_collector_has_all_metrics_after_collection() -> Result
 async fn test_index_stats_collector_valid_is_non_negative() -> Result<()> {
     let pool = common::create_test_pool().await?;
     let registry = Registry::new();
-    let collector = IndexStatsCollector::new();
+    let collector = IndexCollector::new();
 
     collector.register_metrics(&registry)?;
     collector.collect(&pool).await?;
@@ -92,7 +92,7 @@ async fn test_index_stats_collector_valid_is_non_negative() -> Result<()> {
 async fn test_index_stats_collector_scans_is_non_negative() -> Result<()> {
     let pool = common::create_test_pool().await?;
     let registry = Registry::new();
-    let collector = IndexStatsCollector::new();
+    let collector = IndexCollector::new();
 
     collector.register_metrics(&registry)?;
     collector.collect(&pool).await?;
@@ -114,7 +114,7 @@ async fn test_index_stats_collector_scans_is_non_negative() -> Result<()> {
 async fn test_index_stats_collector_size_is_non_negative() -> Result<()> {
     let pool = common::create_test_pool().await?;
     let registry = Registry::new();
-    let collector = IndexStatsCollector::new();
+    let collector = IndexCollector::new();
 
     collector.register_metrics(&registry)?;
     collector.collect(&pool).await?;
@@ -136,7 +136,7 @@ async fn test_index_stats_collector_size_is_non_negative() -> Result<()> {
 async fn test_index_stats_collector_block_io_is_non_negative() -> Result<()> {
     let pool = common::create_test_pool().await?;
     let registry = Registry::new();
-    let collector = IndexStatsCollector::new();
+    let collector = IndexCollector::new();
 
     collector.register_metrics(&registry)?;
     collector.collect(&pool).await?;
@@ -169,7 +169,7 @@ async fn test_index_stats_collector_block_io_is_non_negative() -> Result<()> {
 #[tokio::test]
 async fn test_index_stats_collector_handles_concurrent_collection() -> Result<()> {
     let pool = common::create_test_pool().await?;
-    let collector = IndexStatsCollector::new();
+    let collector = IndexCollector::new();
 
     let handles: Vec<_> = (0..5)
         .map(|_| {

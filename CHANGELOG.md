@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Separate per-collector database-permit wait and hold histograms, plus a Grafana
+  panel, to diagnose contention on the global cross-database concurrency limit
+  ([#37]). The existing scrape-duration histogram remains elapsed time, including
+  waits. Hold time includes connection setup and database work; concurrent permit
+  measurements overlap and cannot be subtracted from elapsed scrape time.
+
+### Fixed
+
+- The `index` collector now discovers databases once and gathers its ten metrics
+  in one query on one connection per database ([#38]). Non-default connections
+  remain ephemeral and globally concurrency-limited. Metric names, labels and
+  values are preserved, including the broader invalid-index catalog scope. A
+  readability-only fallback retains independently accessible metric groups on the
+  same connection; timeouts and connection failures are not retried.
+
+[#37]: https://github.com/nbari/pg_exporter/issues/37
+[#38]: https://github.com/nbari/pg_exporter/issues/38
+
 ## [0.20.0] - 2026-09-09
 
 ### Fixed

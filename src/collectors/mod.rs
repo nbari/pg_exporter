@@ -120,6 +120,8 @@ pub(crate) const NO_LABELS: [&str; 0] = [];
 /// Runs collectors' blocking OS reads on Tokio's blocking pool (issue #35).
 pub(crate) mod blocking;
 
+pub(crate) mod permit_metrics;
+
 // Make utils available to all collectors (exclusions, etc.)
 pub mod util;
 
@@ -157,7 +159,7 @@ const fn all_databases_failed(num_dbs: usize, failed_db_count: usize) -> bool {
 /// Maximum number of non-default-database scrape queries that may run concurrently across
 /// the whole exporter.
 ///
-/// The multi-database collectors (`index_stats`, `index_unused`, `stat_user_tables`)
+/// The multi-database collectors (`index`, `stat`, `sequences`)
 /// open one connection per database (a `PostgreSQL` connection is bound to a single
 /// database). Without a cap, a cluster with N databases would open ~N connections
 /// simultaneously on every scrape — linear in the database count — which can exhaust

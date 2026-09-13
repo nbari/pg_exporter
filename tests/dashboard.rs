@@ -298,6 +298,8 @@ async fn scrape_all_with_fixtures() -> Result<(BTreeSet<String>, i32)> {
         .fetch_one(&pool)
         .await?;
 
+    // Permit telemetry needs a real non-default database, including on a clean CI server.
+    let permit_db = common::IsolatedTestDatabase::new("dashboard_permits").await?;
     seed_scrape_fixtures(&pool).await?;
 
     let all: Vec<String> = COLLECTOR_NAMES.iter().map(|n| (*n).to_string()).collect();
@@ -307,8 +309,10 @@ async fn scrape_all_with_fixtures() -> Result<(BTreeSet<String>, i32)> {
     // Drop the fixtures even if the scrape failed, so a failure here cannot leave the
     // shared database polluted for every other test.
     let cleanup = drop_scrape_fixtures(&pool).await;
+    let permit_cleanup = permit_db.cleanup().await;
     pool.close().await;
     cleanup?;
+    permit_cleanup?;
 
     Ok((exposed_metric_names(&scraped?), version))
 }

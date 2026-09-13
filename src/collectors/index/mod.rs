@@ -1,8 +1,8 @@
+mod pg_stat_user_indexes;
 mod stats;
 mod unused;
 
-pub use stats::IndexStatsCollector;
-pub use unused::UnusedIndexCollector;
+pub use pg_stat_user_indexes::PgStatUserIndexesCollector;
 
 use crate::collectors::{Collected, Collector};
 use anyhow::Result;
@@ -25,19 +25,22 @@ use tracing_futures::Instrument as _;
 /// Helps identify maintenance opportunities and problematic schemas that impact `query` performance.
 /// Unused indexes consume disk space and slow down write operations (INSERT/UPDATE/DELETE).
 /// Invalid indexes (from failed CREATE INDEX CONCURRENTLY) need to be dropped and recreated.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct IndexCollector {
     subs: Vec<Arc<dyn Collector + Send + Sync>>,
+}
+
+impl Default for IndexCollector {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl IndexCollector {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            subs: vec![
-                Arc::new(IndexStatsCollector::new()),
-                Arc::new(UnusedIndexCollector::new()),
-            ],
+            subs: vec![Arc::new(PgStatUserIndexesCollector::new())],
         }
     }
 }
@@ -47,12 +50,7 @@ impl Collector for IndexCollector {
         "index"
     }
 
-    #[instrument(
-        skip(self, registry),
-        level = "info",
-        err,
-        fields(collector = "index")
-    )]
+    #[instrument(skip(self, registry), level = "info", err, fields(collector = "index"))]
     fn register_metrics(&self, registry: &Registry) -> Result<()> {
         for sub in &self.subs {
             let span = info_span!("collector.register_metrics", sub_collector = %sub.name());
@@ -128,4 +126,3 @@ mod tests {
         assert!(!collector.enabled_by_default());
     }
 }
-

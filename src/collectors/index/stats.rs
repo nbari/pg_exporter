@@ -1,16 +1,10 @@
-use crate::collectors::util::{
-    acquire_db_query_permit, get_default_database, get_excluded_databases, open_db_connection,
-};
-use crate::collectors::{Collected, Collector, all_databases_failed, i64_to_f64};
-use anyhow::{Result, anyhow};
-use futures::future::BoxFuture;
+use crate::collectors::i64_to_f64;
+use anyhow::Result;
 use prometheus::{GaugeVec, Opts, Registry};
-use sqlx::{PgPool, Row, postgres::PgRow};
-use tokio::task::JoinSet;
-use tracing::{debug, error, info_span, instrument};
-use tracing_futures::Instrument as _;
+use sqlx::{Row, postgres::PgRow};
+use tracing::debug;
 
-/// Collector for index usage statistics from `pg_stat_user_indexes`
+/// Metric group for index usage statistics from `pg_stat_user_indexes`.
 ///
 /// **What it measures:**
 /// Tracks index usage patterns including scan counts, tuples read/fetched, and size metrics.
@@ -24,8 +18,8 @@ use tracing_futures::Instrument as _;
 /// - `pg_index_valid`: Count of valid user indexes
 ///
 /// **Multi-database:**
-/// `pg_stat_user_indexes` is a per-database catalog, so this collector iterates every
-/// connectable, non-excluded database (like `pg_stat_user_tables`) and labels each series
+/// The shared index collector queries `pg_stat_user_indexes` in every
+/// connectable, non-excluded database and labels each series
 /// by `datname`. Connecting to a single database (e.g. `postgres`) is therefore enough to
 /// observe index metrics across the whole cluster.
 ///
@@ -35,7 +29,7 @@ use tracing_futures::Instrument as _;
 /// - Large indexes with low usage suggest schema optimization opportunities
 /// - High `tuples_read` vs `tuples_fetched` ratio may indicate inefficient index usage
 #[derive(Clone)]
-pub struct IndexStatsCollector {
+pub(super) struct IndexStatsMetrics {
     scans: GaugeVec,
     tuples_read: GaugeVec,
     tuples_fetched: GaugeVec,
@@ -45,7 +39,7 @@ pub struct IndexStatsCollector {
     idx_blks_hit: GaugeVec,
 }
 
-impl Default for IndexStatsCollector {
+impl Default for IndexStatsMetrics {
     fn default() -> Self {
         Self::new()
     }
@@ -55,9 +49,8 @@ const INDEX_STATS_LABELS: [&str; 1] = ["datname"];
 
 /// Per-database aggregate of index usage statistics.
 ///
-/// `pg_stat_user_indexes` only lists indexes in the current database, so this query is
-/// executed once per database and tagged with `current_database()`.
-const INDEX_STATS_QUERY: &str = r"
+/// Original query retained for the readability-only compatibility fallback.
+pub(super) const INDEX_STATS_QUERY: &str = r"
     SELECT
         current_database() AS datname,
         COALESCE(SUM(s.idx_scan), 0)::bigint AS total_scans,
@@ -74,7 +67,7 @@ const INDEX_STATS_QUERY: &str = r"
     ";
 
 #[derive(Clone, Debug)]
-struct IndexStatsSample {
+pub(super) struct IndexStatsSample {
     datname: String,
     scans: i64,
     tuples_read: i64,
@@ -85,8 +78,8 @@ struct IndexStatsSample {
     idx_blks_hit: i64,
 }
 
-impl IndexStatsCollector {
-    /// Creates a new `IndexStatsCollector`
+impl IndexStatsMetrics {
+    /// Creates a new `IndexStatsMetrics`
     ///
     /// # Panics
     ///
@@ -154,7 +147,7 @@ impl IndexStatsCollector {
         }
     }
 
-    fn reset_all(&self) {
+    pub(super) fn reset_all(&self) {
         self.scans.reset();
         self.tuples_read.reset();
         self.tuples_fetched.reset();
@@ -164,7 +157,7 @@ impl IndexStatsCollector {
         self.idx_blks_hit.reset();
     }
 
-    fn sample_from_row(row: &PgRow) -> Result<IndexStatsSample> {
+    pub(super) fn sample_from_row(row: &PgRow) -> Result<IndexStatsSample> {
         Ok(IndexStatsSample {
             datname: row
                 .try_get::<Option<String>, _>("datname")?
@@ -180,12 +173,8 @@ impl IndexStatsCollector {
     }
 }
 
-impl Collector for IndexStatsCollector {
-    fn name(&self) -> &'static str {
-        "index_stats"
-    }
-
-    fn register_metrics(&self, registry: &Registry) -> Result<()> {
+impl IndexStatsMetrics {
+    pub(super) fn register_metrics(&self, registry: &Registry) -> Result<()> {
         registry.register(Box::new(self.scans.clone()))?;
         registry.register(Box::new(self.tuples_read.clone()))?;
         registry.register(Box::new(self.tuples_fetched.clone()))?;
@@ -196,180 +185,40 @@ impl Collector for IndexStatsCollector {
         Ok(())
     }
 
-    #[instrument(
-        skip(self, pool),
-        level = "info",
-        err,
-        fields(collector = "index_stats", otel.kind = "internal")
-    )]
-    fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
-        Box::pin(async move {
-            // 1) Discover connectable, non-excluded databases via the shared pool.
-            let excluded = get_excluded_databases().to_vec();
-            let db_list_span = info_span!(
-                "db.query",
-                otel.kind = "client",
-                db.system = "postgresql",
-                db.operation = "SELECT",
-                db.statement = "SELECT datname FROM pg_database WHERE datallowconn ...",
-                db.sql.table = "pg_database"
-            );
-            let dbs: Vec<String> = sqlx::query_scalar(
-                r"
-                SELECT datname
-                FROM pg_database
-                WHERE datallowconn
-                  AND NOT datistemplate
-                  AND NOT (datname = ANY($1))
-                ORDER BY datname
-                ",
-            )
-            .bind(&excluded)
-            .fetch_all(pool)
-            .instrument(db_list_span)
-            .await?;
-
-            let shared_pool = pool.clone();
-            let default_db = get_default_database().map(std::string::ToString::to_string);
-
-            // 2) One task per DB. The default DB reuses the shared pool; every other database
-            // must pass through the global per-database connection limiter.
-            let mut tasks: JoinSet<Result<Option<IndexStatsSample>>> = JoinSet::new();
-
-            let num_dbs = dbs.len();
-            for datname in dbs {
-                let shared_pool = shared_pool.clone();
-                let default_db = default_db.clone();
-
-                tasks.spawn(async move {
-                    let use_shared = default_db.as_deref() == Some(datname.as_str());
-
-                    let query_span = info_span!(
-                        "db.query",
-                        otel.kind = "client",
-                        db.system = "postgresql",
-                        db.operation = "SELECT",
-                        db.statement = "SELECT ... FROM pg_stat_user_indexes",
-                        db.sql.table = "pg_stat_user_indexes",
-                        datname = %datname,
-                        reuse_pool = use_shared
-                    );
-
-                    let db_query_permit = if use_shared {
-                        None
-                    } else {
-                        Some(acquire_db_query_permit().await.map_err(|e| {
-                            anyhow!("index_stats: failed to acquire database query permit: {e}")
-                        })?)
-                    };
-
-                    let row_res: anyhow::Result<Option<PgRow>> = if use_shared {
-                        sqlx::query(INDEX_STATS_QUERY)
-                            .fetch_optional(&shared_pool)
-                            .instrument(query_span)
-                            .await
-                            .map_err(Into::into)
-                    } else {
-                        let Some(permit) = db_query_permit.as_ref() else {
-                            return Err(anyhow!("index_stats: missing database query permit"));
-                        };
-                        match open_db_connection(&datname, permit).await {
-                            Ok(mut conn) => sqlx::query(INDEX_STATS_QUERY)
-                                .fetch_optional(&mut conn)
-                                .instrument(query_span)
-                                .await
-                                .map_err(Into::into),
-                            Err(e) => Err(e),
-                        }
-                    };
-
-                    match row_res? {
-                        Some(row) => Ok(Some(Self::sample_from_row(&row)?)),
-                        None => Ok(None),
-                    }
-                });
-            }
-
-            let mut all_samples = Vec::new();
-            let mut failures = Vec::new();
-            let mut failed_db_count = 0;
-            while let Some(joined) = tasks.join_next().await {
-                match joined {
-                    Ok(Ok(Some(sample))) => all_samples.push(sample),
-                    Ok(Ok(None)) => {}
-                    Ok(Err(e)) => {
-                        error!(error=?e, "index_stats: task returned error");
-                        failures.push(e.to_string());
-                        failed_db_count += 1;
-                    }
-                    Err(e) => {
-                        error!(error=?e, "index_stats: task join error");
-                        failures.push(e.to_string());
-                        failed_db_count += 1;
-                    }
-                }
-            }
-
-            if all_databases_failed(num_dbs, failed_db_count) {
-                return Err(anyhow!(
-                    "index_stats collection failed for ALL {failed_db_count} database task(s): {}",
-                    failures.join("; ")
-                ));
-            }
-
-            if !failures.is_empty() {
-                error!(
-                    failed_databases = failed_db_count,
-                    errors = %failures.join("; "),
-                    "index_stats: continuing with partial snapshot after per-database failures"
-                );
-            }
-
-            self.reset_all();
-
-            for sample in &all_samples {
-                let labels = [sample.datname.as_str()];
-                self.scans
-                    .with_label_values(&labels)
-                    .set(i64_to_f64(sample.scans));
-                self.tuples_read
-                    .with_label_values(&labels)
-                    .set(i64_to_f64(sample.tuples_read));
-                self.tuples_fetched
-                    .with_label_values(&labels)
-                    .set(i64_to_f64(sample.tuples_fetched));
-                self.size_bytes
-                    .with_label_values(&labels)
-                    .set(i64_to_f64(sample.size_bytes));
-                self.valid
-                    .with_label_values(&labels)
-                    .set(i64_to_f64(sample.valid));
-                self.idx_blks_read
-                    .with_label_values(&labels)
-                    .set(i64_to_f64(sample.idx_blks_read));
-                self.idx_blks_hit
-                    .with_label_values(&labels)
-                    .set(i64_to_f64(sample.idx_blks_hit));
-
-                debug!(
-                    datname = %sample.datname,
-                    scans = sample.scans,
-                    size_bytes = sample.size_bytes,
-                    "updated pg_index stats metrics"
-                );
-            }
-
-            Ok(Collected::Fresh)
-        })
-    }
-
-    /// Delegates to the existing full reset.
-    fn reset_metrics(&self) {
+    pub(super) fn publish(&self, all_samples: &[IndexStatsSample]) {
         self.reset_all();
-    }
 
-    fn enabled_by_default(&self) -> bool {
-        false
+        for sample in all_samples {
+            let labels = [sample.datname.as_str()];
+            self.scans
+                .with_label_values(&labels)
+                .set(i64_to_f64(sample.scans));
+            self.tuples_read
+                .with_label_values(&labels)
+                .set(i64_to_f64(sample.tuples_read));
+            self.tuples_fetched
+                .with_label_values(&labels)
+                .set(i64_to_f64(sample.tuples_fetched));
+            self.size_bytes
+                .with_label_values(&labels)
+                .set(i64_to_f64(sample.size_bytes));
+            self.valid
+                .with_label_values(&labels)
+                .set(i64_to_f64(sample.valid));
+            self.idx_blks_read
+                .with_label_values(&labels)
+                .set(i64_to_f64(sample.idx_blks_read));
+            self.idx_blks_hit
+                .with_label_values(&labels)
+                .set(i64_to_f64(sample.idx_blks_hit));
+
+            debug!(
+                datname = %sample.datname,
+                scans = sample.scans,
+                size_bytes = sample.size_bytes,
+                "updated pg_index stats metrics"
+            );
+        }
     }
 }
 
@@ -378,15 +227,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_index_stats_collector_name() {
-        let collector = IndexStatsCollector::new();
-        assert_eq!(collector.name(), "index_stats");
-    }
-
-    #[test]
     fn test_index_stats_collector_registers() {
         let registry = Registry::new();
-        let collector = IndexStatsCollector::new();
+        let collector = IndexStatsMetrics::new();
         assert!(collector.register_metrics(&registry).is_ok());
     }
 
