@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   values are preserved, including the broader invalid-index catalog scope. A
   readability-only fallback retains independently accessible metric groups on the
   same connection; timeouts and connection failures are not retried.
+- Per-database `index` failures retain the full error chain in partial-failure logs
+  and failed-scrape errors, including both the database name and underlying cause.
 
 [#37]: https://github.com/nbari/pg_exporter/issues/37
 [#38]: https://github.com/nbari/pg_exporter/issues/38

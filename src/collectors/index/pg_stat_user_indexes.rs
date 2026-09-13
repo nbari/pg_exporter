@@ -91,8 +91,9 @@ impl Snapshot {
                 }
             }
             Err(error) => {
-                self.stats_errors.push(error.to_string());
-                self.unused_errors.push(error.to_string());
+                let message = format!("{error:#}");
+                self.stats_errors.push(message.clone());
+                self.unused_errors.push(message);
             }
         }
     }
@@ -252,6 +253,38 @@ impl Collector for PgStatUserIndexesCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn database_failure_preserves_error_chain_in_logs_and_scrape_errors() -> Result<()> {
+        let error = anyhow::Error::from(sqlx::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "connection refused",
+        )))
+        .context("opening database connection")
+        .context("index database \"example\"");
+        let mut snapshot = Snapshot::default();
+        snapshot.record(Err(error));
+
+        // These vectors are logged on partial failure and included in the scrape
+        // error on total failure. Neither may lose the context or the root cause.
+        for errors in [&snapshot.stats_errors, &snapshot.unused_errors] {
+            assert_eq!(errors.len(), 1);
+            let message = errors.first().ok_or_else(|| anyhow!("missing database error"))?;
+            assert!(message.contains("index database \"example\""), "{message}");
+            assert!(message.contains("opening database connection"), "{message}");
+            assert!(message.contains("connection refused"), "{message}");
+        }
+        snapshot.validate(2)?;
+        let message = snapshot
+            .validate(1)
+            .err()
+            .ok_or_else(|| anyhow!("total database failure must fail the scrape"))?
+            .to_string();
+        assert!(message.contains("index database \"example\""), "{message}");
+        assert!(message.contains("opening database connection"), "{message}");
+        assert!(message.contains("connection refused"), "{message}");
+        Ok(())
+    }
 
     #[test]
     fn failed_groups_are_accounted_independently() -> Result<()> {

@@ -62,7 +62,7 @@ Clippy, or tests fail locally.
 - Handle missing extensions and version-specific features gracefully.
 - Keep behavior resilient when PostgreSQL is unavailable. `pg_up` should reflect DB state without crashing the exporter.
 - **Per-database connections must stay ephemeral.** The multi-database collectors (`stat`,
-  `index`, `index_unused`) query non-default databases via `util::open_db_connection`, which
+  `index`, `sequences`) query non-default databases via `util::open_db_connection`, which
   opens a connection per scrape query and closes it on drop. Do **not** reintroduce a
   per-database connection/pool cache: caching pins ~one persistent connection per database,
   so the exporter's connection footprint would grow with the database count and exhaust
@@ -115,7 +115,8 @@ source view, whose struct is named after it:
 - `stat_io/mod.rs` (umbrella `StatIoCollector`) + `stat_io/pg_stat_io.rs` (`PgStatIoCollector`)
 - `statements/mod.rs` + `statements/pg_statements.rs` (`PgStatementsCollector`)
 - `stat/mod.rs` + `stat/user_tables.rs` (`StatUserTablesCollector`)
-- `index/mod.rs` + `index/stats.rs` + `index/unused.rs`
+- `index/mod.rs` + `index/pg_stat_user_indexes.rs` (`PgStatUserIndexesCollector`),
+  with metric groups in `index/stats.rs` and `index/unused.rs`
 
 This is enforced by `collector_mod_rs_is_a_thin_umbrella` in
 [tests/collector_safety.rs](tests/collector_safety.rs): a collector `mod.rs` that contains
