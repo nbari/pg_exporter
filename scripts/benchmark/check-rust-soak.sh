@@ -2,21 +2,27 @@
 
 set -euo pipefail
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 BENCH_RUST_SSH="${BENCH_RUST_SSH:-10.246.1.90}"
 BENCH_DB_SSH="${BENCH_DB_SSH:-10.246.1.92}"
 BENCH_METRICS_SSH="${BENCH_METRICS_SSH:-10.246.1.93}"
 BENCH_SSH_CONFIG="${BENCH_SSH_CONFIG:-}"
+BENCH_SSH_USER="${BENCH_SSH_USER:-devops}"
+BENCH_SSH_PORT="${BENCH_SSH_PORT:-31025}"
 PROM_JOB="${PROM_JOB:-pg_exporter_rust}"
 BENCH_RUST_DB_CLIENT_ADDR="${BENCH_RUST_DB_CLIENT_ADDR:-${BENCH_RUST_SSH}}"
 LOCAL_ARTIFACT_ROOT="${LOCAL_ARTIFACT_ROOT:-bench-artifacts/rust-soak}"
 RUN_ID=""
 FETCH_ARTIFACTS=false
+FINALIZE=false
 
 SSH_OPTS=()
 if [[ -n "${BENCH_SSH_CONFIG}" ]]; then
     SSH_OPTS+=(-F "${BENCH_SSH_CONFIG}")
 fi
 SSH_OPTS+=(
+    -o "User=${BENCH_SSH_USER}"
+    -o "Port=${BENCH_SSH_PORT}"
     -o BatchMode=yes
     -o ConnectTimeout=10
     -o ControlMaster=no
@@ -28,11 +34,12 @@ usage() {
 Check status of a running Rust soak run.
 
 Usage:
-  $(basename "$0") --run-id ID
+  $(basename "$0") --run-id ID [--fetch|--finalize]
 
 Options:
   --run-id ID      Run id produced by run-rust-soak.sh
   --fetch          Copy current logs and CSV files into the local artifact directory
+  --finalize       Fetch evidence, validate a finished run, and clean runtime state
   --help           Show this help
 USAGE
 }
@@ -58,6 +65,11 @@ parse_args() {
             FETCH_ARTIFACTS=true
             shift
             ;;
+        --finalize)
+            FETCH_ARTIFACTS=true
+            FINALIZE=true
+            shift
+            ;;
         --help|-h)
             usage
             exit 0
@@ -77,6 +89,14 @@ parse_args() {
     fi
     if ! [[ "${RUN_ID}" =~ ^[A-Za-z0-9._-]+$ ]]; then
         err "--run-id may contain only letters, numbers, dots, underscores, and dashes"
+        exit 1
+    fi
+    if ! [[ "${BENCH_SSH_USER}" =~ ^[A-Za-z_][A-Za-z0-9._-]*$ ]]; then
+        err "BENCH_SSH_USER contains invalid characters"
+        exit 1
+    fi
+    if ! [[ "${BENCH_SSH_PORT}" =~ ^[0-9]+$ ]] || (( BENCH_SSH_PORT < 1 || BENCH_SSH_PORT > 65535 )); then
+        err "BENCH_SSH_PORT must be an integer between 1 and 65535"
         exit 1
     fi
 }
@@ -104,9 +124,26 @@ main() {
     local overall_status=0
     local measurement_profile="legacy_adversarial"
     local run_meta="${LOCAL_ARTIFACT_ROOT}/${RUN_ID}/run-meta.txt"
+    local db_name="pgbench_test"
+    local expected_version=""
+    local eligible_nondefault_databases="0"
+    local state_contents=""
+    local run_status="unknown"
     if [[ -f "${run_meta}" ]]; then
         measurement_profile=$(sed -n 's/^measurement_profile=//p' "${run_meta}" | head -n 1)
         measurement_profile="${measurement_profile:-legacy_adversarial}"
+        db_name=$(sed -n 's/^db_name=//p' "${run_meta}" | head -n 1)
+        db_name="${db_name:-pgbench_test}"
+        expected_version=$(sed -n 's/^expected_exporter_version=//p' "${run_meta}" | head -n 1)
+        eligible_nondefault_databases=$(sed -n 's/^eligible_nondefault_databases=//p' "${run_meta}" | head -n 1)
+        eligible_nondefault_databases="${eligible_nondefault_databases:-0}"
+    elif [[ "${FINALIZE}" == true ]]; then
+        err "Cannot finalize without local run metadata: ${run_meta}"
+        exit 1
+    fi
+    if [[ "${FINALIZE}" == true ]]; then
+        mkdir -p "${LOCAL_ARTIFACT_ROOT}/${RUN_ID}"
+        exec > >(tee "${LOCAL_ARTIFACT_ROOT}/${RUN_ID}/validation-summary.txt") 2>&1
     fi
     local db_log="/tmp/pg_exporter_rust_soak_${RUN_ID}.log"
     local db_pid="/tmp/pg_exporter_rust_soak_${RUN_ID}.pid"
@@ -117,14 +154,26 @@ main() {
     local state_file="/tmp/pg_exporter_rust_soak_${RUN_ID}_state.env"
 
     echo "== Run progress =="
+    state_contents=$(ssh_run "${BENCH_DB_SSH}" \
+        "set -euo pipefail; \
+         if [ -f '${state_file}' ]; then cat '${state_file}'; else echo 'status=missing'; fi")
+    printf '%s\n' "${state_contents}"
+    run_status=$(printf '%s\n' "${state_contents}" | sed -n 's/^status=//p' | head -n 1)
+    run_status="${run_status:-unknown}"
     ssh_run "${BENCH_DB_SSH}" \
         "set -euo pipefail; \
          if [ -f '${state_file}' ]; then \
-             cat '${state_file}'; \
              end=\$(awk -F= '\$1 == \"phase_ends_epoch\" {print \$2}' '${state_file}'); \
              now=\$(date +%s); \
              if [ -n \"\${end}\" ] && [ \"\${end}\" -gt \"\${now}\" ]; then echo phase_remaining_seconds=\$((end - now)); else echo phase_remaining_seconds=0; fi; \
-         else echo 'state file not found'; fi"
+         else echo phase_remaining_seconds=0; fi"
+    if [[ "${run_status}" == failed || "${run_status}" == missing ]]; then
+        overall_status=1
+    fi
+    if [[ "${FINALIZE}" == true && "${run_status}" == running ]]; then
+        err "Run ${RUN_ID} is still active; refusing to finalize"
+        exit 1
+    fi
 
     echo ""
     echo "== Exporter process =="
@@ -190,7 +239,7 @@ main() {
         "set -euo pipefail; \
          if [ ! -f '${sampler_csv}' ]; then echo 'sampler CSV not found'; exit 1; fi; \
          awk_status=0; \
-         awk -F, 'NR == 1 { next } { \
+         awk -F, -v strict='${run_status}' 'NR == 1 { next } { \
              rows++; \
              if (\$2 == \"\") exporter_missing++; else if (\$2 + 0 != 1) exporter_down++; \
              if (\$3 == \"\") pg_missing++; else if (\$3 + 0 != 1) pg_down++; \
@@ -221,11 +270,16 @@ main() {
              printf \"rss_window_mib samples=%d first_avg=%.2f last_avg=%.2f delta=%.2f\\n\", \
                  window, window ? rss_first_window_sum / window / 1048576 : 0, window ? rss_last_window_sum / window / 1048576 : 0, \
                  window ? (rss_last_window_sum - rss_first_window_sum) / window / 1048576 : 0; \
+             rss_first_window_avg = window ? rss_first_window_sum / window : 0; \
+             rss_last_window_avg = window ? rss_last_window_sum / window : 0; \
+             rss_leak = strict == \"complete\" && window > 0 && rss_last_window_avg > rss_first_window_avg * 1.20 && rss_last_window_avg - rss_first_window_avg > 16777216; \
+             fd_growth = strict == \"complete\" && fd_samples > 0 && fd_last > fd_first + 2; \
+             scrape_slow = strict == \"complete\" && scrape_samples > 0 && scrape_max >= 15; \
              printf \"cpu_percent avg=%.2f max=%.2f fds first=%d last=%d max=%d\\n\", \
                  cpu_samples ? cpu_sum / cpu_samples : 0, cpu_max, fd_first, fd_last, fd_max; \
-             printf \"scrape_duration_s avg=%.4f max=%.4f\\n\", \
-                 scrape_samples ? scrape_sum / scrape_samples : 0, scrape_max; \
-             exit(rows == 0 || exporter_down > 0 || exporter_missing > 0 || pg_down > 0 || pg_missing > 0) \
+             printf \"scrape_duration_s avg=%.4f max=%.4f rss_leak=%d fd_growth=%d scrape_slow=%d\\n\", \
+                 scrape_samples ? scrape_sum / scrape_samples : 0, scrape_max, rss_leak, fd_growth, scrape_slow; \
+             exit(rows == 0 || exporter_down > 0 || exporter_missing > 0 || pg_down > 0 || pg_missing > 0 || rss_leak || fd_growth || scrape_slow) \
          }' '${sampler_csv}' || awk_status=\$?; \
          tail -n 3 '${sampler_csv}'; \
          exit \"\${awk_status}\""; then
@@ -282,6 +336,132 @@ main() {
              echo 'sampler CSV not found'; \
          fi"
 
+    if [[ "${measurement_profile}" == multi_database_permit_v3 ]]; then
+        echo ""
+        echo "== 0.21 multi-database permit signals =="
+        local strict_validation=0
+        if [[ "${run_status}" == complete || "${run_status}" == failed ]]; then
+            strict_validation=1
+        fi
+        if ! [[ "${eligible_nondefault_databases}" =~ ^[0-9]+$ ]] \
+            || (( eligible_nondefault_databases <= 0 )); then
+            err "Invalid eligible database count in ${run_meta}: ${eligible_nondefault_databases}"
+            overall_status=1
+        elif ! ssh "${SSH_OPTS[@]}" "${BENCH_METRICS_SSH}" \
+            "SAMPLER_CSV='${sampler_csv}' ELIGIBLE='${eligible_nondefault_databases}' STRICT='${strict_validation}' bash -s" <<'REMOTE_PERMIT_CHECK'
+set -euo pipefail
+
+if [[ ! -f "${SAMPLER_CSV}" ]]; then
+    echo 'sampler CSV not found'
+    exit 1
+fi
+
+awk -F, -v eligible="${ELIGIBLE}" -v strict="${STRICT}" '
+    function numeric(value) {
+        return value ~ /^-?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$/
+    }
+    NR == 1 {
+        for (i = 1; i <= NF; i++) column[$i] = i
+        required = "exporter_process_start_time_seconds exporter_scrapes_total collector_errors_total collector_aborted_total target_scrape_p95_5m_s"
+        split(required, required_names, " ")
+        for (i in required_names) if (!(required_names[i] in column)) missing_header++
+        split("index stat sequences", collectors, " ")
+        for (i = 1; i <= 3; i++) {
+            name = collectors[i]
+            for (j = 1; j <= 7; j++) {
+                if (j == 1) suffix = "mean_duration_5m_s"
+                else if (j == 2) suffix = "p95_duration_5m_s"
+                else if (j == 3) suffix = "success"
+                else if (j == 4) suffix = "permit_wait_mean_5m_s"
+                else if (j == 5) suffix = "permit_hold_mean_5m_s"
+                else if (j == 6) suffix = "permit_wait_count"
+                else suffix = "permit_hold_count"
+                if (!((name "_" suffix) in column)) missing_header++
+            }
+        }
+        next
+    }
+    {
+        rows++
+        process_start = $(column["exporter_process_start_time_seconds"])
+        scrapes = $(column["exporter_scrapes_total"])
+        errors = $(column["collector_errors_total"])
+        aborted = $(column["collector_aborted_total"])
+        target_p95 = $(column["target_scrape_p95_5m_s"])
+        if (!numeric(process_start) || !numeric(scrapes) || !numeric(errors) || !numeric(aborted)) {
+            core_signal_failures++
+        }
+        if (rows == 1) {
+            first_process_start = process_start
+            first_scrapes = scrapes
+            first_errors = errors
+            first_aborted = aborted
+        }
+        last_process_start = process_start
+        last_scrapes = scrapes
+        last_errors = errors
+        last_aborted = aborted
+        if (numeric(target_p95)) {
+            target_p95_samples++
+            if (target_p95 + 0 > target_p95_max) target_p95_max = target_p95 + 0
+        }
+        for (i = 1; i <= 3; i++) {
+            name = collectors[i]
+            success = $(column[name "_success"])
+            wait_mean = $(column[name "_permit_wait_mean_5m_s"])
+            hold_mean = $(column[name "_permit_hold_mean_5m_s"])
+            wait_count = $(column[name "_permit_wait_count"])
+            hold_count = $(column[name "_permit_hold_count"])
+            if (!numeric(success) || success + 0 != 1) success_failures[name]++
+            if (!numeric(wait_count) || !numeric(hold_count)) count_failures[name]++
+            if (numeric(wait_mean) && numeric(hold_mean)) {
+                timing_samples[name]++
+                wait_sum[name] += wait_mean
+                hold_sum[name] += hold_mean
+                if (wait_mean + 0 > wait_max[name]) wait_max[name] = wait_mean + 0
+                if (hold_mean + 0 > hold_max[name]) hold_max[name] = hold_mean + 0
+            }
+            if (rows == 1) {
+                first_wait[name] = wait_count
+                first_hold[name] = hold_count
+            }
+            last_wait[name] = wait_count
+            last_hold[name] = hold_count
+        }
+    }
+    END {
+        failed = (missing_header > 0 || rows == 0 || core_signal_failures > 0)
+        if (first_process_start != last_process_start) failed = 1
+        if (last_errors + 0 != first_errors + 0 || last_aborted + 0 != first_aborted + 0) failed = 1
+        scrape_delta = last_scrapes - first_scrapes
+        printf "samples=%d eligible_nondefault=%d process_start_changed=%d errors_delta=%.0f aborted_delta=%.0f scrapes_delta=%.0f target_p95_samples=%d target_scrape_p95_max_s=%.4f core_signal_failures=%d\n",
+            rows, eligible, first_process_start != last_process_start, last_errors - first_errors,
+            last_aborted - first_aborted, scrape_delta, target_p95_samples, target_p95_max,
+            core_signal_failures
+        if (strict && (target_p95_samples == 0 || target_p95_max >= 12)) failed = 1
+        for (i = 1; i <= 3; i++) {
+            name = collectors[i]
+            wait_delta = last_wait[name] - first_wait[name]
+            hold_delta = last_hold[name] - first_hold[name]
+            holds_per_scrape = scrape_delta > 0 ? hold_delta / scrape_delta : 0
+            printf "%s timing_samples=%d wait_avg_s=%.6f wait_max_s=%.6f hold_avg_s=%.6f hold_max_s=%.6f wait_delta=%.0f hold_delta=%.0f holds_per_scrape=%.2f success_failures=%d count_failures=%d\n",
+                name, timing_samples[name], timing_samples[name] ? wait_sum[name] / timing_samples[name] : 0,
+                wait_max[name], timing_samples[name] ? hold_sum[name] / timing_samples[name] : 0,
+                hold_max[name], wait_delta, hold_delta, holds_per_scrape, success_failures[name],
+                count_failures[name]
+            if (success_failures[name] > 0 || count_failures[name] > 0) failed = 1
+            if (strict && (timing_samples[name] == 0 || wait_delta != hold_delta || scrape_delta <= 0 ||
+                holds_per_scrape < eligible * 0.90 || holds_per_scrape > eligible * 1.10)) failed = 1
+        }
+        exit(failed)
+    }
+' "${SAMPLER_CSV}"
+REMOTE_PERMIT_CHECK
+        then
+            overall_status=1
+        fi
+    fi
+
     echo ""
     echo "== Prometheus health =="
     ssh_run "${BENCH_METRICS_SSH}" \
@@ -317,6 +497,28 @@ main() {
         echo ""
         echo "== Fetching artifacts =="
         fetch_artifacts
+    fi
+
+    if [[ "${FINALIZE}" == true ]]; then
+        local cleanup_args=(--cleanup-only --run-id "${RUN_ID}" --db "${db_name}")
+        if [[ -n "${expected_version}" ]]; then
+            cleanup_args+=(--expected-version "${expected_version}")
+        fi
+        if [[ "${run_status}" != complete ]]; then
+            err "Run ended with status=${run_status}; evidence was fetched before cleanup"
+            overall_status=1
+        fi
+        echo ""
+        echo "== Final runtime cleanup =="
+        if ! "${SCRIPT_DIR}/run-rust-soak.sh" "${cleanup_args[@]}"; then
+            overall_status=1
+        fi
+    fi
+
+    if (( overall_status == 0 )); then
+        echo "Soak validation passed"
+    else
+        err "Soak validation failed"
     fi
 
     return "${overall_status}"

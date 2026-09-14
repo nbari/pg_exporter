@@ -9,6 +9,8 @@ BENCH_RUST_SSH="${BENCH_RUST_SSH:-10.246.1.90}"
 BENCH_DB_SSH="${BENCH_DB_SSH:-10.246.1.92}"
 BENCH_METRICS_SSH="${BENCH_METRICS_SSH:-10.246.1.93}"
 BENCH_SSH_CONFIG="${BENCH_SSH_CONFIG:-}"
+BENCH_SSH_USER="${BENCH_SSH_USER:-devops}"
+BENCH_SSH_PORT="${BENCH_SSH_PORT:-31025}"
 PROM_JOB="${PROM_JOB:-pg_exporter_rust}"
 BENCH_RUST_INSTANCE="${BENCH_RUST_INSTANCE:-${BENCH_RUST_SSH}:9432}"
 BENCH_DB_NODE_INSTANCE="${BENCH_DB_NODE_INSTANCE:-${BENCH_DB_SSH}:9100}"
@@ -19,6 +21,7 @@ BENCH_RUST_DB_CLIENT_ADDR="${BENCH_RUST_DB_CLIENT_ADDR:-${BENCH_RUST_SSH}}"
 DB_NAME="${DB_NAME:-pgbench_test}"
 DB_COUNT="${DB_COUNT:-1}"
 DB_SCALE="${DB_SCALE:-20}"
+MIN_NONDEFAULT_DATABASES="${BENCH_MIN_NONDEFAULT_DATABASES:-1}"
 CALIBRATION_SECONDS="${BENCH_CALIBRATION_SECONDS:-180}"
 HOURS=24
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -27,8 +30,12 @@ EXPECTED_EXPORTER_VERSION="${EXPECTED_EXPORTER_VERSION:-$(sed -n 's/^version = "
 DEPLOY_DASHBOARD=true
 CONFIGURE_EXPORTER=true
 PREFLIGHT_ONLY=false
+CLEANUP_ONLY=false
 CALIBRATED_CLIENTS=""
 CALIBRATION_RESULT=""
+ELIGIBLE_NONDEFAULT_DATABASES=""
+CLEANUP_RESULT="not_run"
+ROLLBACK_ON_EXIT=false
 
 CALIBRATION_CLIENT_CANDIDATES=(8 6 4 2)
 CALIBRATION_DB_CPU_AVG_MAX="0.75"
@@ -40,6 +47,8 @@ if [[ -n "${BENCH_SSH_CONFIG}" ]]; then
     SSH_OPTS+=(-F "${BENCH_SSH_CONFIG}")
 fi
 SSH_OPTS+=(
+    -o "User=${BENCH_SSH_USER}"
+    -o "Port=${BENCH_SSH_PORT}"
     -o BatchMode=yes
     -o ConnectTimeout=10
     -o ControlMaster=no
@@ -58,9 +67,12 @@ Options:
   --run-id ID               Custom run id (default: UTC timestamp)
   --db NAME                 Database name prefix (default: ${DB_NAME})
   --db-count N              Number of databases to create/benchmark (default: ${DB_COUNT})
+  --min-nondefault-databases N
+                            Required connectable non-default databases (default: ${MIN_NONDEFAULT_DATABASES})
   --scale N                 pgbench scale if init is needed (default: ${DB_SCALE})
   --expected-version V      Required remote pg_exporter version (default: ${EXPECTED_EXPORTER_VERSION})
   --preflight-only          Validate hosts, tools, version, and Prometheus, then exit
+  --cleanup-only            Clean verified soak runtime state, then exit
   --no-dashboard-deploy     Do not copy dashboard to metrics VM
   --no-exporter-config      Do not apply soak collector override on rust VM
   --help                    Show this help
@@ -73,7 +85,11 @@ Prometheus label overrides:
   BENCH_RUST_METRICS_URL    Direct probe URL (default: ${BENCH_RUST_METRICS_URL})
   BENCH_RUST_DB_CLIENT_ADDR PostgreSQL client address for the Rust exporter (default: ${BENCH_RUST_DB_CLIENT_ADDR})
   BENCH_SSH_CONFIG          Optional ssh_config path for SSH and SCP
+  BENCH_SSH_USER            SSH user for all benchmark hosts (default: ${BENCH_SSH_USER})
+  BENCH_SSH_PORT            SSH port for all benchmark hosts (default: ${BENCH_SSH_PORT})
   BENCH_CALIBRATION_SECONDS Seconds per pgbench calibration candidate (default: ${CALIBRATION_SECONDS})
+  BENCH_MIN_NONDEFAULT_DATABASES
+                            Required connectable non-default databases (default: ${MIN_NONDEFAULT_DATABASES})
 USAGE
 }
 
@@ -110,6 +126,10 @@ parse_args() {
             DB_COUNT="$2"
             shift 2
             ;;
+        --min-nondefault-databases)
+            MIN_NONDEFAULT_DATABASES="$2"
+            shift 2
+            ;;
         --scale)
             DB_SCALE="$2"
             shift 2
@@ -120,6 +140,10 @@ parse_args() {
             ;;
         --preflight-only)
             PREFLIGHT_ONLY=true
+            shift
+            ;;
+        --cleanup-only)
+            CLEANUP_ONLY=true
             shift
             ;;
         --no-dashboard-deploy)
@@ -152,12 +176,24 @@ validate_inputs() {
         err "--db-count must be a positive integer"
         exit 1
     fi
+    if ! [[ "${MIN_NONDEFAULT_DATABASES}" =~ ^[0-9]+$ ]] || (( MIN_NONDEFAULT_DATABASES <= 0 )); then
+        err "--min-nondefault-databases must be a positive integer"
+        exit 1
+    fi
     if ! [[ "${DB_SCALE}" =~ ^[0-9]+$ ]] || (( DB_SCALE <= 0 )); then
         err "--scale must be a positive integer"
         exit 1
     fi
     if ! [[ "${CALIBRATION_SECONDS}" =~ ^[0-9]+$ ]] || (( CALIBRATION_SECONDS < 60 )); then
         err "BENCH_CALIBRATION_SECONDS must be an integer of at least 60 seconds"
+        exit 1
+    fi
+    if ! [[ "${BENCH_SSH_USER}" =~ ^[A-Za-z_][A-Za-z0-9._-]*$ ]]; then
+        err "BENCH_SSH_USER contains invalid characters"
+        exit 1
+    fi
+    if ! [[ "${BENCH_SSH_PORT}" =~ ^[0-9]+$ ]] || (( BENCH_SSH_PORT < 1 || BENCH_SSH_PORT > 65535 )); then
+        err "BENCH_SSH_PORT must be an integer between 1 and 65535"
         exit 1
     fi
     if ! [[ "${RUN_ID}" =~ ^[A-Za-z0-9._-]+$ ]]; then
@@ -205,7 +241,8 @@ preflight() {
     ssh_run "${BENCH_METRICS_SSH}" "echo metrics_ok >/dev/null"
 
     log "Checking db tooling on ${BENCH_DB_SSH}"
-    ssh_run "${BENCH_DB_SSH}" "command -v pgbench >/dev/null && command -v psql >/dev/null"
+    ssh_run "${BENCH_DB_SSH}" \
+        "command -v pgbench >/dev/null && command -v psql >/dev/null && command -v setsid >/dev/null && command -v ps >/dev/null && command -v pgrep >/dev/null"
 
     log "Checking exporter host tooling and release version on ${BENCH_RUST_SSH}"
     ssh_run "${BENCH_RUST_SSH}" \
@@ -220,19 +257,186 @@ preflight() {
     fi
 
     log "Checking Prometheus and Grafana tooling on ${BENCH_METRICS_SSH}"
-    ssh_run "${BENCH_METRICS_SSH}" "command -v curl >/dev/null && command -v jq >/dev/null"
+    ssh_run "${BENCH_METRICS_SSH}" \
+        "command -v curl >/dev/null && command -v jq >/dev/null && command -v setsid >/dev/null && command -v ps >/dev/null && command -v pgrep >/dev/null"
     ssh_run "${BENCH_METRICS_SSH}" \
         "curl -fsS http://127.0.0.1:9090/api/v1/query --get --data-urlencode query=up >/dev/null"
     ssh_run "${BENCH_METRICS_SSH}" \
         "set -euo pipefail; \
          curl -fsS http://127.0.0.1:9090/api/v1/query --get \
-             --data-urlencode 'query=up{job=\"${PROM_JOB}\",instance=\"${BENCH_RUST_INSTANCE}\"}' | \
-             jq -e '.status == \"success\" and (.data.result | length == 1) and .data.result[0].value[1] == \"1\"' >/dev/null; \
-         curl -fsS http://127.0.0.1:9090/api/v1/query --get \
              --data-urlencode 'query=node_memory_MemAvailable_bytes{instance=\"${BENCH_DB_NODE_INSTANCE}\"}' | \
              jq -e '.status == \"success\" and (.data.result | length == 1)' >/dev/null"
 
+    # A stale soak override may make the current exporter target unhealthy. A
+    # real launch cleans that state and then uses wait_for_prometheus_target to
+    # validate the fresh configuration. The read-only preflight still verifies
+    # the existing target end to end.
+    if [[ "${PREFLIGHT_ONLY}" != true ]]; then
+        log "Preflight passed exporter_version=${remote_version} prometheus_job=${PROM_JOB} db_node_instance=${BENCH_DB_NODE_INSTANCE}"
+        return
+    fi
+    ssh_run "${BENCH_METRICS_SSH}" \
+        "set -euo pipefail; \
+         curl -fsS http://127.0.0.1:9090/api/v1/query --get \
+             --data-urlencode 'query=up{job=\"${PROM_JOB}\",instance=\"${BENCH_RUST_INSTANCE}\"}' | \
+             jq -e '.status == \"success\" and (.data.result | length == 1) and .data.result[0].value[1] == \"1\"' >/dev/null"
+
     log "Preflight passed exporter_version=${remote_version} prometheus_job=${PROM_JOB} exporter_instance=${BENCH_RUST_INSTANCE} db_node_instance=${BENCH_DB_NODE_INSTANCE}"
+}
+
+assert_run_id_unused() {
+    if [[ -e "${LOCAL_ARTIFACT_ROOT}/${RUN_ID}" ]]; then
+        err "Local artifact directory already exists for run id ${RUN_ID}"
+        exit 1
+    fi
+
+    if ! ssh_run "${BENCH_DB_SSH}" \
+        "test ! -e '/tmp/pg_exporter_rust_soak_${RUN_ID}.sh' && \
+         test ! -e '/tmp/pg_exporter_rust_soak_${RUN_ID}.log' && \
+         test ! -e '/tmp/pg_exporter_rust_soak_${RUN_ID}.pid'"; then
+        err "DB-host files already exist for run id ${RUN_ID}"
+        exit 1
+    fi
+    if ! ssh_run "${BENCH_METRICS_SSH}" \
+        "test ! -e '/tmp/pg_exporter_rust_soak_sampler_${RUN_ID}.sh' && \
+         test ! -e '/tmp/pg_exporter_rust_soak_sampler_${RUN_ID}.log' && \
+         test ! -e '/tmp/pg_exporter_rust_soak_sampler_${RUN_ID}.pid'"; then
+        err "Metrics-host files already exist for run id ${RUN_ID}"
+        exit 1
+    fi
+}
+
+cleanup_previous_runtime() {
+    log "Cleaning verified soak runtime state while preserving historical logs"
+
+    ssh "${SSH_OPTS[@]}" "${BENCH_DB_SSH}" \
+        "DB_NAME='${DB_NAME}' RUN_ID='${RUN_ID}' bash -s" <<'REMOTE_DB_CLEANUP'
+set -euo pipefail
+
+stop_recorded_processes() {
+    local pid_file pid command pgid
+    for pid_file in /tmp/pg_exporter_rust_soak_*.pid; do
+        [[ -e "${pid_file}" ]] || continue
+        pid=$(tr -dc '0-9' < "${pid_file}")
+        [[ -n "${pid}" && -r "/proc/${pid}/cmdline" ]] || continue
+        command=$(tr '\0' ' ' < "/proc/${pid}/cmdline")
+        case "${command}" in
+        *'/tmp/pg_exporter_rust_soak_'*'.sh'*)
+            pgid=$(ps -o pgid= -p "${pid}" | tr -d ' ')
+            if [[ "${pgid}" == "${pid}" && "${pgid}" -gt 1 ]]; then
+                kill -TERM -- "-${pgid}" 2>/dev/null || true
+            else
+                kill -TERM "${pid}" 2>/dev/null || true
+            fi
+            ;;
+        *)
+            printf 'Skipping recycled pid %s from %s: %s\n' "${pid}" "${pid_file}" "${command}" >&2
+            ;;
+        esac
+    done
+}
+
+stop_recorded_processes
+
+# The workload's EXIT trap restores table reloptions across every benchmark
+# database. Give that bounded cleanup time to finish before checking for a
+# leftover process; PostgreSQL sessions are terminated below as a final guard.
+for _ in {1..30}; do
+    if ! pgrep -f '^bash /tmp/pg_exporter_rust_soak_[A-Za-z0-9._-]+\.sh$' >/dev/null; then
+        break
+    fi
+    sleep 1
+done
+
+sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -Atqc \
+    "SELECT pg_terminate_backend(pid)
+       FROM pg_stat_activity
+      WHERE application_name LIKE 'pg_exporter_soak_%'
+        AND pid <> pg_backend_pid()" >/dev/null
+
+while IFS= read -r database; do
+    [[ -n "${database}" ]] || continue
+    if sudo -u postgres psql -d "${database}" -Atqc \
+        "SELECT to_regclass('public.pgbench_accounts') IS NOT NULL" | grep -qx t; then
+        sudo -u postgres psql -d "${database}" -v ON_ERROR_STOP=1 -c \
+            "ALTER TABLE public.pgbench_accounts RESET (
+                autovacuum_enabled,
+                autovacuum_vacuum_scale_factor,
+                autovacuum_vacuum_threshold,
+                autovacuum_analyze_scale_factor,
+                autovacuum_analyze_threshold
+            )" >/dev/null
+    fi
+done < <(
+    sudo -u postgres psql -d postgres -Atqc \
+        "SELECT datname
+           FROM pg_database
+          WHERE datallowconn
+            AND NOT datistemplate
+            AND datname ~ '^${DB_NAME}(_[0-9]+)?$'
+          ORDER BY datname"
+)
+
+if pgrep -af '^bash /tmp/pg_exporter_rust_soak_[A-Za-z0-9._-]+\.sh$' >/dev/null; then
+    echo 'A soak workload process is still active after cleanup' >&2
+    exit 1
+fi
+
+session_count=$(sudo -u postgres psql -d postgres -Atqc \
+    "SELECT count(*)::bigint FROM pg_stat_activity WHERE application_name LIKE 'pg_exporter_soak_%'")
+[[ "${session_count}" == 0 ]]
+REMOTE_DB_CLEANUP
+
+    ssh "${SSH_OPTS[@]}" "${BENCH_METRICS_SSH}" "bash -s" <<'REMOTE_METRICS_CLEANUP'
+set -euo pipefail
+
+for pid_file in /tmp/pg_exporter_rust_soak_sampler_*.pid; do
+    [[ -e "${pid_file}" ]] || continue
+    pid=$(tr -dc '0-9' < "${pid_file}")
+    [[ -n "${pid}" && -r "/proc/${pid}/cmdline" ]] || continue
+    command=$(tr '\0' ' ' < "/proc/${pid}/cmdline")
+    case "${command}" in
+    *'/tmp/pg_exporter_rust_soak_sampler_'*'.sh'*)
+        pgid=$(ps -o pgid= -p "${pid}" | tr -d ' ')
+        if [[ "${pgid}" == "${pid}" && "${pgid}" -gt 1 ]]; then
+            kill -TERM -- "-${pgid}" 2>/dev/null || true
+        else
+            kill -TERM "${pid}" 2>/dev/null || true
+        fi
+        ;;
+    *)
+        printf 'Skipping recycled pid %s from %s: %s\n' "${pid}" "${pid_file}" "${command}" >&2
+        ;;
+    esac
+done
+for _ in {1..5}; do
+    if ! pgrep -f '^bash /tmp/pg_exporter_rust_soak_sampler_[A-Za-z0-9._-]+\.sh$' >/dev/null; then
+        break
+    fi
+    sleep 1
+done
+
+if pgrep -af '^bash /tmp/pg_exporter_rust_soak_sampler_[A-Za-z0-9._-]+\.sh$' >/dev/null; then
+    echo 'A soak sampler process is still active after cleanup' >&2
+    exit 1
+fi
+REMOTE_METRICS_CLEANUP
+
+    ssh_run "${BENCH_RUST_SSH}" \
+        "set -euo pipefail; \
+         override=/etc/systemd/system/pg_exporter.service.d/soak.conf; \
+         if sudo test -f \"\${override}\"; then \
+             archived=/tmp/pg_exporter-soak.conf.${RUN_ID}.\$(date -u +%Y%m%dT%H%M%SZ).disabled; \
+             sudo mv \"\${override}\" \"\${archived}\"; \
+             echo archived_override=\${archived}; \
+             sudo systemctl daemon-reload; \
+             sudo systemctl restart pg_exporter; \
+         fi; \
+         systemctl is-active pg_exporter; \
+         sudo test ! -e \"\${override}\""
+
+    CLEANUP_RESULT="runtime_state_clean"
+    log "Cleanup gate passed"
 }
 
 deploy_dashboard() {
@@ -426,7 +630,8 @@ calibrate_workload() {
         calibration_log="/tmp/pg_exporter_rust_soak_${RUN_ID}_calibration_${clients}.log"
         log "Calibration candidate clients=${clients} threads=${threads}"
         ssh_run "${BENCH_DB_SSH}" \
-            "sudo -u postgres pgbench -h localhost -p 5432 -U postgres -c '${clients}' -j '${threads}' -T '${CALIBRATION_SECONDS}' --progress=60 '${target_db}' > '${calibration_log}' 2>&1"
+            "sudo -u postgres env PGAPPNAME='pg_exporter_soak_calibration_${RUN_ID}' \
+             pgbench -h localhost -p 5432 -U postgres -c '${clients}' -j '${threads}' -T '${CALIBRATION_SECONDS}' --progress=60 '${target_db}' > '${calibration_log}' 2>&1"
 
         cpu_avg=$(prometheus_query_value \
             "avg_over_time((1 - avg(rate(node_cpu_seconds_total{instance=\"${BENCH_DB_NODE_INSTANCE}\",mode=\"idle\"}[1m])))[$range:15s])")
@@ -470,6 +675,44 @@ prepare_db() {
              sudo -u postgres psql -v ON_ERROR_STOP=1 -d \"\${target_db}\" -c \
                  \"CREATE TABLE IF NOT EXISTS pg_exporter_soak_lock_target (id bigint PRIMARY KEY);\" >/dev/null; \
          done"
+}
+
+verify_database_coverage() {
+    ELIGIBLE_NONDEFAULT_DATABASES=$(ssh_run "${BENCH_DB_SSH}" \
+        "sudo -u postgres psql -d postgres -Atqc \"
+            SELECT count(*)::bigint
+              FROM pg_database
+             WHERE datallowconn
+               AND NOT datistemplate
+               AND datname <> current_database()
+        \"")
+    ELIGIBLE_NONDEFAULT_DATABASES=$(printf '%s' "${ELIGIBLE_NONDEFAULT_DATABASES}" | tr -d '\r\n')
+    if ! [[ "${ELIGIBLE_NONDEFAULT_DATABASES}" =~ ^[0-9]+$ ]]; then
+        err "Could not determine the number of eligible non-default databases"
+        exit 1
+    fi
+    if (( ELIGIBLE_NONDEFAULT_DATABASES < MIN_NONDEFAULT_DATABASES )); then
+        err "Only ${ELIGIBLE_NONDEFAULT_DATABASES} eligible non-default databases are available; ${MIN_NONDEFAULT_DATABASES} required"
+        exit 1
+    fi
+    log "Database coverage passed eligible_nondefault=${ELIGIBLE_NONDEFAULT_DATABASES} required=${MIN_NONDEFAULT_DATABASES}"
+}
+
+verify_permit_telemetry() {
+    log "Checking 0.21.0 permit telemetry for multi-database collectors"
+    ssh_run "${BENCH_METRICS_SSH}" \
+        "set -euo pipefail; \
+         wait_series=\$(curl -fsS http://127.0.0.1:9090/api/v1/query --get \
+             --data-urlencode 'query=count(pg_exporter_collector_permit_wait_seconds_count{job=\"${PROM_JOB}\",instance=\"${BENCH_RUST_INSTANCE}\",collector=~\"index|stat|sequences\"} > 0)' | \
+             jq -r '.data.result[0].value[1] // \"\"'); \
+         hold_series=\$(curl -fsS http://127.0.0.1:9090/api/v1/query --get \
+             --data-urlencode 'query=count(pg_exporter_collector_permit_hold_seconds_count{job=\"${PROM_JOB}\",instance=\"${BENCH_RUST_INSTANCE}\",collector=~\"index|stat|sequences\"} > 0)' | \
+             jq -r '.data.result[0].value[1] // \"\"'); \
+         if [ \"\${wait_series}\" != 3 ] || [ \"\${hold_series}\" != 3 ]; then \
+             echo \"permit telemetry incomplete: wait_series=\${wait_series:-missing} hold_series=\${hold_series:-missing}\" >&2; \
+             exit 1; \
+         fi; \
+         echo \"permit telemetry ready: wait_series=\${wait_series} hold_series=\${hold_series}\""
 }
 
 write_remote_workload_script() {
@@ -528,7 +771,8 @@ psql_exec() {
     for i in \$(seq 1 \${DB_COUNT}); do
         local target_db="\${DB_NAME}"
         if [ \${DB_COUNT} -gt 1 ]; then target_db="\${DB_NAME}_\${i}"; fi
-        sudo -u postgres psql -v ON_ERROR_STOP=1 -d "\${target_db}" -c "\${sql}" >/dev/null
+        sudo -u postgres env PGAPPNAME="pg_exporter_soak_workload_\${RUN_ID}" \
+            psql -v ON_ERROR_STOP=1 -d "\${target_db}" -c "\${sql}" >/dev/null
     done
 }
 
@@ -547,9 +791,11 @@ run_pgbench() {
         if (( slice <= 0 )); then break; fi
         
         if [[ -n "\${mode}" ]]; then
-            sudo -u postgres pgbench -h localhost -p 5432 -U postgres "\${mode}" -c "\${clients}" -j "\${threads}" -T "\${slice}" --progress=60 "\${target_db}"
+            sudo -u postgres env PGAPPNAME="pg_exporter_soak_workload_\${RUN_ID}" \
+                pgbench -h localhost -p 5432 -U postgres "\${mode}" -c "\${clients}" -j "\${threads}" -T "\${slice}" --progress=60 "\${target_db}"
         else
-            sudo -u postgres pgbench -h localhost -p 5432 -U postgres -c "\${clients}" -j "\${threads}" -T "\${slice}" --progress=60 "\${target_db}"
+            sudo -u postgres env PGAPPNAME="pg_exporter_soak_workload_\${RUN_ID}" \
+                pgbench -h localhost -p 5432 -U postgres -c "\${clients}" -j "\${threads}" -T "\${slice}" --progress=60 "\${target_db}"
         fi
     done
 }
@@ -559,7 +805,8 @@ run_heavy_query_loop() {
     local stop_at=\$((\$(date +%s) + duration))
     while (( \$(date +%s) < stop_at )); do
         local target_db=\$(get_random_db)
-        sudo -u postgres psql -v ON_ERROR_STOP=1 -d "\${target_db}" -c \
+        sudo -u postgres env PGAPPNAME="pg_exporter_soak_workload_\${RUN_ID}" \
+            psql -v ON_ERROR_STOP=1 -d "\${target_db}" -c \
             "SELECT aid, sum(abalance) FROM pgbench_accounts GROUP BY aid ORDER BY sum(abalance) DESC LIMIT 50;" >/dev/null
         sleep 2
     done
@@ -580,14 +827,16 @@ run_lock_storm() {
 
         locker() {
             while (( \$(date +%s) < slice_stop )); do
-                sudo -u postgres psql -v ON_ERROR_STOP=1 -d "\${target_db}" -c \
+                sudo -u postgres env PGAPPNAME="pg_exporter_soak_workload_\${RUN_ID}" \
+                    psql -v ON_ERROR_STOP=1 -d "\${target_db}" -c \
                     "BEGIN; UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = 1; SELECT pg_sleep(20); ROLLBACK;" >/dev/null
             done
         }
 
         waiter() {
             while (( \$(date +%s) < slice_stop )); do
-                sudo -u postgres psql -v ON_ERROR_STOP=0 -d "\${target_db}" -c \
+                sudo -u postgres env PGAPPNAME="pg_exporter_soak_workload_\${RUN_ID}" \
+                    psql -v ON_ERROR_STOP=0 -d "\${target_db}" -c \
                     "SET lock_timeout='5s'; UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = 1;" >/dev/null 2>&1 || true
                 sleep 0.2
             done
@@ -611,7 +860,8 @@ monitor_exporter_connections() {
     while true; do
         local ts sample
         ts="\$(date -u +%FT%TZ)"
-        if sample="\$(sudo -u postgres psql -d postgres -AtF, -v ON_ERROR_STOP=1 -c \
+        if sample="\$(sudo -u postgres env PGAPPNAME="pg_exporter_soak_monitor_\${RUN_ID}" \
+            psql -d postgres -AtF, -v ON_ERROR_STOP=1 -c \
             "SELECT count(*)::bigint,
                     count(*) FILTER (WHERE wait_event_type = 'Lock')::bigint
              FROM pg_stat_activity
@@ -704,11 +954,13 @@ mixed_phase() {
 summary() {
     log "SUMMARY top tables by dead tuples (random db)"
     local target_db=\$(get_random_db)
-    sudo -u postgres psql -d "\${target_db}" -Atc \\
+    sudo -u postgres env PGAPPNAME="pg_exporter_soak_summary_\${RUN_ID}" \
+        psql -d "\${target_db}" -Atc \\
         "SELECT relname, n_dead_tup, n_live_tup, round((n_dead_tup::numeric / NULLIF(n_live_tup + n_dead_tup,0)) * 100, 2) AS dead_pct, COALESCE(last_autovacuum::text,'null') FROM pg_stat_user_tables ORDER BY n_dead_tup DESC LIMIT 10;"
 
     log "SUMMARY top statements by total exec time (random db)"
-    sudo -u postgres psql -d "\${target_db}" -Atc \\
+    sudo -u postgres env PGAPPNAME="pg_exporter_soak_summary_\${RUN_ID}" \
+        psql -d "\${target_db}" -Atc \\
         "SELECT left(query, 120), calls, round(total_exec_time::numeric, 2) FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 10;"
 }
 
@@ -780,7 +1032,29 @@ query_one() {
     printf '%s' "\${response}" | jq -r '.data.result[0].value[1] // ""' 2>/dev/null || printf '\n'
 }
 
-echo "ts,exporter_up,pg_up,rss_bytes,cpu_percent,open_fds,scrape_duration_s,scrape_samples,dead_tup_max,locks_sum,long_query_age_s,autovacuum_ratio_max,direct_http_status,direct_scrape_duration_s,direct_curl_rc,statements_mean_duration_5m_s,statements_p95_duration_5m_s,statements_success,db_cpu_busy_ratio_5m,db_memory_available_bytes,db_load1,elapsed_seconds,remaining_seconds" > "\${OUT}"
+collector_mean() {
+    local collector="\$1"
+    query_one "sum(rate(pg_exporter_collector_scrape_duration_seconds_sum{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\",collector=\"\${collector}\"}[5m])) / (sum(rate(pg_exporter_collector_scrape_duration_seconds_count{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\",collector=\"\${collector}\"}[5m])) > 0)"
+}
+
+collector_p95() {
+    local collector="\$1"
+    query_one "histogram_quantile(0.95, sum by (le) (rate(pg_exporter_collector_scrape_duration_seconds_bucket{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\",collector=\"\${collector}\"}[5m])))"
+}
+
+permit_mean() {
+    local phase="\$1"
+    local collector="\$2"
+    query_one "sum(rate(pg_exporter_collector_permit_\${phase}_seconds_sum{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\",collector=\"\${collector}\"}[5m])) / (sum(rate(pg_exporter_collector_permit_\${phase}_seconds_count{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\",collector=\"\${collector}\"}[5m])) > 0)"
+}
+
+permit_count() {
+    local phase="\$1"
+    local collector="\$2"
+    query_one "pg_exporter_collector_permit_\${phase}_seconds_count{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\",collector=\"\${collector}\"}"
+}
+
+echo "ts,exporter_up,pg_up,rss_bytes,cpu_percent,open_fds,scrape_duration_s,scrape_samples,dead_tup_max,locks_sum,long_query_age_s,autovacuum_ratio_max,direct_http_status,direct_scrape_duration_s,direct_curl_rc,statements_mean_duration_5m_s,statements_p95_duration_5m_s,statements_success,db_cpu_busy_ratio_5m,db_memory_available_bytes,db_load1,elapsed_seconds,remaining_seconds,exporter_process_start_time_seconds,exporter_scrapes_total,collector_errors_total,collector_aborted_total,index_mean_duration_5m_s,index_p95_duration_5m_s,index_success,index_permit_wait_mean_5m_s,index_permit_hold_mean_5m_s,index_permit_wait_count,index_permit_hold_count,stat_mean_duration_5m_s,stat_p95_duration_5m_s,stat_success,stat_permit_wait_mean_5m_s,stat_permit_hold_mean_5m_s,stat_permit_wait_count,stat_permit_hold_count,sequences_mean_duration_5m_s,sequences_p95_duration_5m_s,sequences_success,sequences_permit_wait_mean_5m_s,sequences_permit_hold_mean_5m_s,sequences_permit_wait_count,sequences_permit_hold_count,target_scrape_p95_5m_s" > "\${OUT}"
 
 while (( \$(date +%s) < STOP_AT )); do
     ts="\$(date -u +%FT%TZ)"
@@ -790,6 +1064,7 @@ while (( \$(date +%s) < STOP_AT )); do
     cpu_percent="\$(query_one "pg_exporter_process_cpu_percent{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\"}")"
     open_fds="\$(query_one "pg_exporter_process_open_fds{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\"}")"
     scrape_duration="\$(query_one "scrape_duration_seconds{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\"}")"
+    target_scrape_p95="\$(query_one "quantile_over_time(0.95, scrape_duration_seconds{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\"}[5m])")"
     scrape_samples="\$(query_one "scrape_samples_scraped{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\"}")"
     dead_tup_max="\$(query_one "max(pg_stat_user_tables_n_dead_tup{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\"})")"
     locks_sum="\$(query_one "sum(pg_locks_count{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\"})")"
@@ -801,6 +1076,34 @@ while (( \$(date +%s) < STOP_AT )); do
     db_cpu_busy_ratio="\$(query_one "1 - avg(rate(node_cpu_seconds_total{instance=\"\${DB_NODE_INSTANCE}\",mode=\"idle\"}[5m]))")"
     db_memory_available="\$(query_one "node_memory_MemAvailable_bytes{instance=\"\${DB_NODE_INSTANCE}\"}")"
     db_load1="\$(query_one "node_load1{instance=\"\${DB_NODE_INSTANCE}\"}")"
+    exporter_process_start="\$(query_one "pg_exporter_process_start_time_seconds{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\"}")"
+    exporter_scrapes="\$(query_one "pg_exporter_scrapes_total{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\"}")"
+    collector_errors="\$(query_one "sum(pg_exporter_collector_scrape_errors_total{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\"}) or vector(0)")"
+    collector_aborted="\$(query_one "sum(pg_exporter_collector_scrape_aborted_total{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\"}) or vector(0)")"
+
+    index_mean_duration="\$(collector_mean index)"
+    index_p95_duration="\$(collector_p95 index)"
+    index_success="\$(query_one "pg_exporter_collector_last_scrape_success{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\",collector=\"index\"}")"
+    index_wait_mean="\$(permit_mean wait index)"
+    index_hold_mean="\$(permit_mean hold index)"
+    index_wait_count="\$(permit_count wait index)"
+    index_hold_count="\$(permit_count hold index)"
+
+    stat_mean_duration="\$(collector_mean stat)"
+    stat_p95_duration="\$(collector_p95 stat)"
+    stat_success="\$(query_one "pg_exporter_collector_last_scrape_success{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\",collector=\"stat\"}")"
+    stat_wait_mean="\$(permit_mean wait stat)"
+    stat_hold_mean="\$(permit_mean hold stat)"
+    stat_wait_count="\$(permit_count wait stat)"
+    stat_hold_count="\$(permit_count hold stat)"
+
+    sequences_mean_duration="\$(collector_mean sequences)"
+    sequences_p95_duration="\$(collector_p95 sequences)"
+    sequences_success="\$(query_one "pg_exporter_collector_last_scrape_success{job=\"\${PROM_JOB}\",instance=\"\${INSTANCE}\",collector=\"sequences\"}")"
+    sequences_wait_mean="\$(permit_mean wait sequences)"
+    sequences_hold_mean="\$(permit_mean hold sequences)"
+    sequences_wait_count="\$(permit_count wait sequences)"
+    sequences_hold_count="\$(permit_count hold sequences)"
 
     # Preserve the CSV schema used by older artifacts, but leave the direct-probe
     # columns empty. Prometheus is intentionally the only scraper during the
@@ -814,12 +1117,13 @@ while (( \$(date +%s) < STOP_AT )); do
     elapsed_seconds=\$((now_epoch - STARTED_AT))
     remaining_seconds=\$((WORKLOAD_SECONDS - elapsed_seconds))
     if (( remaining_seconds < 0 )); then remaining_seconds=0; fi
-    echo "\${ts},\${exporter_up},\${pg_up},\${rss_bytes},\${cpu_percent},\${open_fds},\${scrape_duration},\${scrape_samples},\${dead_tup_max},\${locks_sum},\${long_query_age},\${autovacuum_ratio_max},\${direct_http_status},\${direct_scrape_duration},\${direct_curl_rc},\${statements_mean_duration},\${statements_p95_duration},\${statements_success},\${db_cpu_busy_ratio},\${db_memory_available},\${db_load1},\${elapsed_seconds},\${remaining_seconds}" >> "\${OUT}"
+    echo "\${ts},\${exporter_up},\${pg_up},\${rss_bytes},\${cpu_percent},\${open_fds},\${scrape_duration},\${scrape_samples},\${dead_tup_max},\${locks_sum},\${long_query_age},\${autovacuum_ratio_max},\${direct_http_status},\${direct_scrape_duration},\${direct_curl_rc},\${statements_mean_duration},\${statements_p95_duration},\${statements_success},\${db_cpu_busy_ratio},\${db_memory_available},\${db_load1},\${elapsed_seconds},\${remaining_seconds},\${exporter_process_start},\${exporter_scrapes},\${collector_errors},\${collector_aborted},\${index_mean_duration},\${index_p95_duration},\${index_success},\${index_wait_mean},\${index_hold_mean},\${index_wait_count},\${index_hold_count},\${stat_mean_duration},\${stat_p95_duration},\${stat_success},\${stat_wait_mean},\${stat_hold_mean},\${stat_wait_count},\${stat_hold_count},\${sequences_mean_duration},\${sequences_p95_duration},\${sequences_success},\${sequences_wait_mean},\${sequences_hold_mean},\${sequences_wait_count},\${sequences_hold_count},\${target_scrape_p95}" >> "\${OUT}"
     SAMPLE_COUNT=\$((SAMPLE_COUNT + 1))
     if (( SAMPLE_COUNT % 15 == 0 )); then
-        printf '[%s] progress elapsed=%ss remaining=%ss exporter_cpu=%s%% exporter_rss=%sB exporter_fds=%s scrape=%ss\n' \
+        printf '[%s] progress elapsed=%ss remaining=%ss exporter_cpu=%s%% exporter_rss=%sB exporter_fds=%s scrape=%ss index_p95=%ss index_wait=%ss index_hold=%ss\n' \
             "\${ts}" "\${elapsed_seconds}" "\${remaining_seconds}" "\${cpu_percent:-unknown}" \
-            "\${rss_bytes:-unknown}" "\${open_fds:-unknown}" "\${scrape_duration:-unknown}"
+            "\${rss_bytes:-unknown}" "\${open_fds:-unknown}" "\${scrape_duration:-unknown}" \
+            "\${index_p95_duration:-unknown}" "\${index_wait_mean:-unknown}" "\${index_hold_mean:-unknown}"
     fi
     sleep 60
 done
@@ -842,7 +1146,7 @@ start_remote_jobs() {
 
     log "Starting phased workload on ${BENCH_DB_SSH}"
     workload_pid=$(ssh_run "${BENCH_DB_SSH}" \
-        "set -euo pipefail; nohup bash '${db_script}' > '${db_log}' 2>&1 < /dev/null & echo \$! | tee '${db_pid}'")
+        "set -euo pipefail; nohup setsid bash '${db_script}' > '${db_log}' 2>&1 < /dev/null & echo \$! | tee '${db_pid}'")
     workload_pid=$(echo "${workload_pid}" | tr -d '\r' | tail -n 1)
 
     if ! [[ "${workload_pid}" =~ ^[0-9]+$ ]]; then
@@ -852,7 +1156,7 @@ start_remote_jobs() {
 
     log "Starting Prometheus sampler on ${BENCH_METRICS_SSH}"
     sampler_pid=$(ssh_run "${BENCH_METRICS_SSH}" \
-        "set -euo pipefail; nohup bash '${sampler_script}' > '${sampler_log}' 2>&1 < /dev/null & echo \$! | tee '${sampler_pidfile}'")
+        "set -euo pipefail; nohup setsid bash '${sampler_script}' > '${sampler_log}' 2>&1 < /dev/null & echo \$! | tee '${sampler_pidfile}'")
     sampler_pid=$(echo "${sampler_pid}" | tr -d '\r' | tail -n 1)
 
     if ! [[ "${sampler_pid}" =~ ^[0-9]+$ ]]; then
@@ -865,11 +1169,13 @@ start_remote_jobs() {
     mkdir -p "${LOCAL_ARTIFACT_ROOT}/${RUN_ID}"
     cat > "${LOCAL_ARTIFACT_ROOT}/${RUN_ID}/run-meta.txt" <<META
 run_id=${RUN_ID}
-measurement_profile=reliable_single_scraper_v2
+measurement_profile=multi_database_permit_v3
 hours=${HOURS}
 db_name=${DB_NAME}
 db_count=${DB_COUNT}
 db_scale=${DB_SCALE}
+minimum_nondefault_databases=${MIN_NONDEFAULT_DATABASES}
+eligible_nondefault_databases=${ELIGIBLE_NONDEFAULT_DATABASES}
 bench_rust_ssh=${BENCH_RUST_SSH}
 bench_db_ssh=${BENCH_DB_SSH}
 bench_metrics_ssh=${BENCH_METRICS_SSH}
@@ -889,6 +1195,7 @@ sampler_pid_file=${sampler_pidfile}
 calibration_seconds=${CALIBRATION_SECONDS}
 calibrated_clients=${CALIBRATED_CLIENTS}
 calibration_result=${CALIBRATION_RESULT}
+cleanup_result=${CLEANUP_RESULT}
 fault_check_application_name=pg_exporter_soak_fault_${RUN_ID}
 connection_sampler=/tmp/pg_exporter_rust_soak_${RUN_ID}_connections.csv
 state_file=/tmp/pg_exporter_rust_soak_${RUN_ID}_state.env
@@ -907,7 +1214,27 @@ META
     echo ""
 }
 
+rollback_failed_launch() {
+    local status=$?
+    if (( status != 0 )) && [[ "${ROLLBACK_ON_EXIT}" == true ]]; then
+        err "Launch failed; retrying verified runtime cleanup"
+        set +e
+        EXPECTED_EXPORTER_VERSION="${EXPECTED_EXPORTER_VERSION}" \
+            "${BASH_SOURCE[0]}" \
+            --cleanup-only \
+            --run-id "${RUN_ID}" \
+            --db "${DB_NAME}"
+        local cleanup_status=$?
+        set -e
+        if (( cleanup_status != 0 )); then
+            err "Automatic rollback also failed; run --cleanup-only after restoring lab connectivity"
+        fi
+    fi
+    return "${status}"
+}
+
 main() {
+    trap rollback_failed_launch EXIT
     parse_args "$@"
     validate_inputs
     preflight
@@ -915,15 +1242,28 @@ main() {
         log "Preflight-only check complete; no remote state was changed"
         return
     fi
+    if [[ "${CLEANUP_ONLY}" != true ]]; then
+        assert_run_id_unused
+    fi
+    ROLLBACK_ON_EXIT=true
+    cleanup_previous_runtime
+    if [[ "${CLEANUP_ONLY}" == true ]]; then
+        ROLLBACK_ON_EXIT=false
+        log "Cleanup-only check complete"
+        return
+    fi
     deploy_dashboard
     configure_exporter
     wait_for_prometheus_target
     prepare_db
+    verify_database_coverage
     run_lock_recovery_check
+    verify_permit_telemetry
     calibrate_workload
     write_remote_workload_script
     write_remote_sampler_script
     start_remote_jobs
+    ROLLBACK_ON_EXIT=false
 }
 
 main "$@"

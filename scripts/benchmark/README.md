@@ -18,12 +18,16 @@ VM; database-host CPU and memory remain separate and come from node_exporter.
   existing Prometheus target from the metrics host. Prometheus is the only
   continuous `/metrics` scraper during the measurement window. The DB host
   independently samples `pg_stat_activity` every 30 seconds and fails the run
-  if `pg_exporter` exceeds its five-connection budget.
+  if `pg_exporter` exceeds its five-connection budget. Before launch it removes
+  verified runtime state from older soaks, restores benchmark-table reloptions,
+  and refuses to overwrite an existing run id; historical logs are preserved.
 - `check-rust-soak.sh`: Prints workload/sampler status, connection-budget and
-  lock checks, recent logs, and the accumulated comparison-signal summary for a
-  given run id.
+  lock checks, recent logs, and accumulated comparison signals. `--finalize`
+  fetches evidence, writes `validation-summary.txt`, and restores the normal
+  exporter service after a completed or failed run.
 - `rust-soak-dashboard.json`: Grafana dashboard focused on exporter reliability,
-  collector scrape cost, activity/locks/statements pressure, and vacuum debt.
+  collector scrape cost, database-permit contention, activity/locks/statements
+  pressure, and vacuum debt.
 
 ## Quick Start
 
@@ -39,9 +43,18 @@ Then choose a stable run id and start the 24-hour run:
 
 ```bash
 RUN_ID="release-$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)-$(date -u +%Y%m%dT%H%M%SZ)"
-./scripts/benchmark/run-rust-soak.sh --hours 24 --run-id "${RUN_ID}"
+./scripts/benchmark/run-rust-soak.sh \
+  --hours 24 \
+  --run-id "${RUN_ID}" \
+  --db-count 100 \
+  --min-nondefault-databases 100
 printf 'Run ID: %s\n' "${RUN_ID}"
 ```
+
+This release-qualification profile reuses `pgbench_test_1` through
+`pgbench_test_100`, initializing only missing databases, and refuses to start
+measurement unless at least 100 connectable, non-template databases other than
+the exporter default are visible.
 
 Before starting the remote jobs, the launcher may spend up to 12 minutes trying
 pgbench client counts 8, 6, 4, and 2 for three minutes each. It selects the
@@ -60,6 +73,8 @@ BENCH_RUST_SSH=10.246.1.90
 BENCH_DB_SSH=10.246.1.92
 BENCH_METRICS_SSH=10.246.1.93
 BENCH_SSH_CONFIG=~/.ssh/config
+BENCH_SSH_USER=devops
+BENCH_SSH_PORT=31025
 PROM_JOB=pg_exporter_rust
 BENCH_RUST_INSTANCE=10.246.1.90:9432
 BENCH_DB_NODE_INSTANCE=10.246.1.92:9100
@@ -67,6 +82,7 @@ BENCH_RUST_METRICS_URL=http://10.246.1.90:9432/metrics
 BENCH_RUST_DB_CLIENT_ADDR=10.246.1.90
 BENCH_GRAFANA_URL=http://10.246.1.93:3000
 BENCH_CALIBRATION_SECONDS=180
+BENCH_MIN_NONDEFAULT_DATABASES=1
 ```
 
 Override the SSH endpoints separately from Prometheus's `instance` labels. This
@@ -128,6 +144,14 @@ After the run, collect the remote logs, CSV samples, state, and exporter journal
 ./scripts/benchmark/check-rust-soak.sh --run-id <RUN_ID> --fetch
 ```
 
+Once the state is `complete` or `failed`, finalize the run. Evidence is fetched
+before runtime cleanup, and the command returns non-zero if an acceptance check
+or cleanup fails:
+
+```bash
+./scripts/benchmark/check-rust-soak.sh --run-id <RUN_ID> --finalize
+```
+
 ## Acceptance Checks
 
 A healthy completed soak should have:
@@ -137,6 +161,12 @@ A healthy completed soak should have:
 - exporter PostgreSQL connections never above the five-connection budget;
 - no soak-owned exclusive-lock session during the measurement;
 - no unexplained collector error growth or sustained scrape-duration increase;
+- no exporter restart or increase in collector abort counters;
+- `index`, `stat`, and `sequences` permit wait/hold observations remain balanced;
+- permit holds per scrape for each multi-database collector stay within 10% of
+  the eligible non-default database count (`index` must not return to two
+  operations per database);
+- target scrape p95 stays below 12 seconds;
 - RSS and open FDs that settle rather than grow monotonically across phases;
 - CPU increases that correlate with workload phases and returns toward the
   baseline afterward;
@@ -147,24 +177,34 @@ The isolated pre-measurement fault check may observe a bounded `200`, `503`, or
 It must recover to a complete successful scrape within 60 seconds. Any `503` or
 `504` during the measured soak is a failure.
 
-## Restore the Exporter Service
+## Cleanup and Restore the Exporter Service
 
-After artifacts are collected, remove the soak-specific collector override if
-the lab should return to its normal service configuration:
+Prefer `check-rust-soak.sh --finalize`, which fetches evidence before restoring
+the service. To clean verified runtime state without fetching or validating a
+run, use:
 
 ```bash
-ssh 10.246.1.90 \
-  'sudo mv /etc/systemd/system/pg_exporter.service.d/soak.conf /tmp/pg_exporter-soak.conf.disabled && \
-   sudo systemctl daemon-reload && sudo systemctl restart pg_exporter'
+./scripts/benchmark/run-rust-soak.sh \
+  --cleanup-only \
+  --run-id <RUN_ID> \
+  --db pgbench_test
 ```
 
-The Prometheus sampler keeps the legacy direct-probe fields at columns 13-15
-empty for artifact compatibility. It does not call `/metrics`: a second scraper
-would exercise the single-scrape gate and manufacture `503` responses. The
-remaining comparison signals include the statements collector's 5-minute mean
-and p95 duration, last-scrape success, and the database host's 5-minute busy CPU
-ratio, available memory, and load average. This makes completed runs
-self-contained even after Prometheus retention expires.
+Cleanup stops only PID-file processes whose command line matches the soak
+scripts, terminates PostgreSQL sessions with the soak application-name prefix,
+restores autovacuum reloptions on the named benchmark databases, and archives
+the soak systemd override under `/tmp`. Existing logs and benchmark databases
+are retained. If preparation or remote job startup fails after cleanup begins,
+the launcher automatically retries this cleanup path before exiting.
+
+The `multi_database_permit_v3` sampler keeps the legacy direct-probe fields at
+columns 13-15 empty for artifact compatibility. It does not call `/metrics`: a
+second scraper would exercise the single-scrape gate and manufacture `503`
+responses. Appended fields preserve exporter restart/error/abort counters and
+the elapsed, permit-wait, permit-hold, and observation-count signals for
+`index`, `stat`, and `sequences`. This makes completed runs self-contained even
+after Prometheus retention expires; the checker remains compatible with older
+artifact schemas.
 
 ## pg_stat_statements Spill Regression
 

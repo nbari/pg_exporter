@@ -20,6 +20,7 @@ use std::collections::BTreeSet;
 mod common;
 
 const DASHBOARD: &str = include_str!("../grafana/dashboard.json");
+const SOAK_DASHBOARD: &str = include_str!("../scripts/benchmark/rust-soak-dashboard.json");
 
 /// Metrics whose `PostgreSQL` source only produces rows under conditions a local
 /// single-node test instance cannot create on demand. They are still required to
@@ -29,6 +30,10 @@ const DASHBOARD: &str = include_str!("../grafana/dashboard.json");
 /// Every entry needs a reason. If a metric can be observed locally, it does not
 /// belong here.
 const CONDITIONAL_METRICS: &[(&str, &str)] = &[
+    (
+        "pg_exporter_collector_scrape_errors_total",
+        "counter vector has no labeled series until a collector error occurs",
+    ),
     (
         "pg_blocked_sessions",
         "requires a session blocked on a lock",
@@ -241,9 +246,9 @@ async fn drop_scrape_fixtures(pool: &sqlx::PgPool) -> Result<()> {
 
 /// Panel queries reference metrics by name; label matchers are stripped first so
 /// that regex label *values* are never mistaken for metric names.
-fn dashboard_metric_names() -> Result<BTreeSet<String>> {
+fn metric_names_from_dashboard(contents: &str, path: &str) -> Result<BTreeSet<String>> {
     let dashboard: Value =
-        serde_json::from_str(DASHBOARD).context("grafana/dashboard.json is not valid JSON")?;
+        serde_json::from_str(contents).with_context(|| format!("{path} is not valid JSON"))?;
     let labels = Regex::new(r"\{[^}]*\}")?;
     let metric = Regex::new(r"\b(?:pg|postgres)_[a-z0-9_]+")?;
 
@@ -268,6 +273,15 @@ fn dashboard_metric_names() -> Result<BTreeSet<String>> {
         }
     }
 
+    Ok(names)
+}
+
+fn dashboard_metric_names() -> Result<BTreeSet<String>> {
+    let mut names = metric_names_from_dashboard(DASHBOARD, "grafana/dashboard.json")?;
+    names.extend(metric_names_from_dashboard(
+        SOAK_DASHBOARD,
+        "scripts/benchmark/rust-soak-dashboard.json",
+    )?);
     Ok(names)
 }
 

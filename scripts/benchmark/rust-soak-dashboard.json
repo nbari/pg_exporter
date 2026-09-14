@@ -578,6 +578,101 @@
       ],
       "title": "Database Host Available Memory",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-local"
+      },
+      "description": "Mean time per non-default-database permit operation for the multi-database collectors. Wait is queue time; hold includes connection setup and database work. Concurrent operations overlap and must not be subtracted from collector elapsed time.",
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 60
+      },
+      "id": 19,
+      "targets": [
+        {
+          "expr": "sum by (collector) (rate(pg_exporter_collector_permit_wait_seconds_sum{job=\"pg_exporter_rust\",instance=~\"$instance\",collector=~\"index|stat|sequences\"}[5m])) / (sum by (collector) (rate(pg_exporter_collector_permit_wait_seconds_count{job=\"pg_exporter_rust\",instance=~\"$instance\",collector=~\"index|stat|sequences\"}[5m])) > 0)",
+          "legendFormat": "{{collector}} wait",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (collector) (rate(pg_exporter_collector_permit_hold_seconds_sum{job=\"pg_exporter_rust\",instance=~\"$instance\",collector=~\"index|stat|sequences\"}[5m])) / (sum by (collector) (rate(pg_exporter_collector_permit_hold_seconds_count{job=\"pg_exporter_rust\",instance=~\"$instance\",collector=~\"index|stat|sequences\"}[5m])) > 0)",
+          "legendFormat": "{{collector}} hold",
+          "refId": "B"
+        }
+      ],
+      "title": "Database Permit Wait and Hold",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-local"
+      },
+      "description": "Successful non-default database permit holds divided by completed exporter scrapes. Each collector should stay near the eligible non-default database count. An index value near twice that count indicates the duplicate connection/query regression.",
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 68
+      },
+      "id": 20,
+      "targets": [
+        {
+          "expr": "sum by (collector) (rate(pg_exporter_collector_permit_hold_seconds_count{job=\"pg_exporter_rust\",instance=~\"$instance\",collector=~\"index|stat|sequences\"}[5m])) / scalar(rate(pg_exporter_scrapes_total{job=\"pg_exporter_rust\",instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{collector}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Database Operations per Scrape",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-local"
+      },
+      "description": "Elapsed p95 for the collectors that compete for the global non-default-database concurrency limiter. Compare this with permit wait and hold time to separate queueing from work.",
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 68
+      },
+      "id": 21,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, collector) (rate(pg_exporter_collector_scrape_duration_seconds_bucket{job=\"pg_exporter_rust\",instance=~\"$instance\",collector=~\"index|stat|sequences\"}[5m])))",
+          "legendFormat": "p95 {{collector}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Multi-Database Collector Duration",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",
