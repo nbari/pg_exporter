@@ -117,7 +117,7 @@ jobs:
           psql -h localhost -U postgres -d postgres -c "SELECT COUNT(*) FROM pg_stat_statements;"
 
       - name: Run tests
-        run: cargo test --verbose -- --nocapture
+        run: cargo test --locked --all-features --verbose -- --nocapture
         env:
           PG_EXPORTER_DSN: postgresql://postgres:postgres@localhost:5432/postgres
           PG_EXPORTER_REQUIRE_TESTCONTAINERS: '1'

@@ -35,7 +35,8 @@ test: clippy fmt
     scripts/setup-local-test-db.sh || (echo "❌ Test database setup failed. Fix the issues above before running tests." && exit 1); \
   fi
   @echo "🔧 Using local test database (overriding .envrc)..."
-  PG_EXPORTER_DSN="postgresql://postgres:${PGPASSWORD:-postgres}@${PG_HOST:-localhost}:${PG_PORT:-5432}/postgres" cargo test -- --nocapture
+  PG_EXPORTER_DSN="postgresql://postgres:${PGPASSWORD:-postgres}@${PG_HOST:-localhost}:${PG_PORT:-5432}/postgres" cargo test --locked -- --nocapture
+  PG_EXPORTER_DSN="postgresql://postgres:${PGPASSWORD:-postgres}@${PG_HOST:-localhost}:${PG_PORT:-5432}/postgres" cargo test --locked --features telemetry -- --nocapture
 
 # Run only the replication topology integration test (primary+replica via testcontainers)
 test-replica:
@@ -83,7 +84,8 @@ test-replica:
 
 # Linting
 clippy:
-  cargo clippy --all-targets --all-features
+  cargo clippy --locked --all-targets
+  cargo clippy --locked --all-targets --all-features
 
 # Formatting check
 fmt:
@@ -91,7 +93,7 @@ fmt:
 
 # Coverage report
 coverage:
-  CARGO_INCREMENTAL=0 RUSTFLAGS='-Cinstrument-coverage' LLVM_PROFILE_FILE='coverage-%p-%m.profraw' cargo test
+  CARGO_INCREMENTAL=0 RUSTFLAGS='-Cinstrument-coverage' LLVM_PROFILE_FILE='coverage-%p-%m.profraw' cargo test --all-features
   grcov . --binary-path ./target/debug/deps/ -s . -t html --branch --ignore-not-existing --ignore '../*' --ignore "/*" -o target/coverage/html
   firefox target/coverage/html/index.html
   rm -rf *.profraw
@@ -331,12 +333,12 @@ collector-flags:
         | tr '\n' ' '
 
 # Watch for changes and run with every collector enabled
-watch:
+watch features="":
     #!/usr/bin/env bash
     set -euo pipefail
     flags=$(just collector-flags)
     echo "▶️  enabling: ${flags}"
-    cargo watch -x "run -- ${flags} -v"
+    cargo watch -x "run --features '{{features}}' -- ${flags} -v"
 
 # get metrics curl
 curl:

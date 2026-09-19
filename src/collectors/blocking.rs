@@ -30,7 +30,7 @@
 use anyhow::{Result, anyhow};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::debug;
+use tracing::{Span, debug};
 
 /// Runs already-coalesced `work` on Tokio's blocking pool and awaits the result.
 ///
@@ -43,7 +43,10 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    tokio::task::spawn_blocking(work)
+    // A blocking worker has no inherited span stack. Keep the guard inside the
+    // synchronous closure; started samples may outlive an aborted scrape.
+    let span = Span::current();
+    tokio::task::spawn_blocking(move || span.in_scope(work))
         .await
         .map_err(|error| anyhow!("{collector}: OS sampling task did not complete: {error}"))
 }
@@ -98,6 +101,52 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+
+    #[test]
+    fn blocking_sample_preserves_request_span() -> Result<()> {
+        use crate::trace_capture;
+        use tracing_futures::Instrument;
+
+        let (subscriber, observations) = trace_capture::subscriber();
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        tracing::dispatcher::with_default(&dispatch, || -> Result<()> {
+            let request = tracing::info_span!(
+                "http.server.request",
+                request_id = "blocking-probe",
+                http.route = "/metrics"
+            );
+            let request_id = request
+                .id()
+                .ok_or_else(|| anyhow!("request span disabled"))?;
+            let worker_dispatch = dispatch.clone();
+            runtime.block_on(async {
+                let slot = Arc::new(Mutex::new(()));
+                offload_coalesced("test", &slot, move || {
+                    // Match the production global subscriber's visibility, without
+                    // installing a global subscriber or entering a span in the test.
+                    tracing::dispatcher::with_default(&worker_dispatch, || {
+                        debug!(phase = "blocking", "sampled OS counters");
+                        42
+                    })
+                })
+                .instrument(request)
+                .await
+            })?;
+            let event = observations
+                .try_iter()
+                .find(|event| {
+                    event
+                        .fields
+                        .get("phase")
+                        .is_some_and(|phase| phase == "blocking")
+                })
+                .ok_or_else(|| anyhow!("blocking sample did not log"))?;
+            trace_capture::assert_request(&event, &request_id, "blocking-probe")
+        })
+    }
 
     #[tokio::test]
     async fn offload_returns_the_closure_result() -> Result<()> {

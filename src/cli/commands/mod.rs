@@ -2,6 +2,7 @@ use clap::{
     Arg, ArgAction, ColorChoice, Command,
     builder::styling::{AnsiColor, Effects, Styles},
 };
+use std::sync::LazyLock;
 
 mod collectors;
 mod options;
@@ -11,6 +12,19 @@ pub mod built_info {
     include!(concat!(env!("OUT_DIR"), "/built.rs"));
 }
 
+static LONG_VERSION: LazyLock<String> = LazyLock::new(|| {
+    let git_hash = built_info::GIT_COMMIT_HASH.unwrap_or("unknown");
+    let telemetry = if cfg!(feature = "telemetry") {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    format!(
+        "{} - {git_hash} (telemetry: {telemetry})",
+        env!("CARGO_PKG_VERSION")
+    )
+});
+
 #[must_use]
 pub fn new() -> Command {
     let styles = Styles::styled()
@@ -19,14 +33,10 @@ pub fn new() -> Command {
         .literal(AnsiColor::Blue.on_default() | Effects::BOLD)
         .placeholder(AnsiColor::Green.on_default());
 
-    let git_hash = built_info::GIT_COMMIT_HASH.unwrap_or("unknown");
-    let long_version: &'static str =
-        Box::leak(format!("{} - {}", env!("CARGO_PKG_VERSION"), git_hash).into_boxed_str());
-
     let cmd = Command::new("pg_exporter")
         .about("PostgreSQL metric exporter for Prometheus")
         .version(env!("CARGO_PKG_VERSION"))
-        .long_version(long_version)
+        .long_version(LONG_VERSION.as_str())
         .color(ColorChoice::Auto)
         .styles(styles)
         .arg(

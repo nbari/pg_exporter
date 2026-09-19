@@ -213,6 +213,9 @@ where
         .try_acquire_owned()
         .map_err(|_| ScrapeError::Busy)?;
 
+    // Capture on the caller: spawned tasks do not inherit the request's tracing span.
+    let scrape = scrape.instrument(Span::current());
+
     // Dropped at the end of this statement on timeout, which aborts the scrape task.
     let outcome = timeout(scrape_timeout, AbortOnDrop(tokio::spawn(scrape))).await;
 
@@ -537,6 +540,7 @@ fn count_exposed_metric_lines(buffer: &[u8]) -> usize {
 mod tests {
     use super::*;
     use crate::collectors::config::CollectorConfig;
+    use crate::trace_capture;
     use anyhow::anyhow;
     use sqlx::postgres::PgPoolOptions;
     use std::time::Duration;
@@ -852,6 +856,76 @@ metric_two 2
 
         fn gate() -> Arc<Semaphore> {
             Arc::new(Semaphore::new(1))
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn spawned_scrape_preserves_request_spans_and_events() -> anyhow::Result<()> {
+            let (subscriber, observations) = trace_capture::subscriber();
+            // All polls, including spawned tasks, see the same scoped subscriber. No
+            // entered span guard may straddle an await: instrument each future instead.
+            let _subscriber = tracing::subscriber::set_default(subscriber);
+            let gate = gate();
+            for (request_id, fail) in [("first", false), ("second", true)] {
+                let root = info_span!(parent: None, "http.server.request", request_id, http.route = "/metrics");
+                let root_id = root.id().ok_or_else(|| anyhow!("request span disabled"))?;
+                let result = run_gated_scrape(&gate, Duration::from_secs(5), async move {
+                    let (_, result) = collect_with_outcome(
+                        "trace_probe",
+                        None,
+                        async move {
+                            info!(phase = "before_yield", "collector running");
+                            tokio::task::yield_now().await;
+                            info!(phase = "after_yield", "collector resumed");
+                            if fail {
+                                Err(anyhow!("probe failure"))
+                            } else {
+                                Ok(())
+                            }
+                        },
+                        info_span!("collector.collect"),
+                    )
+                    .await;
+                    result
+                        .map(|()| Vec::new())
+                        .map_err(|error| ScrapeError::CollectorFailed(vec![error.to_string()]))
+                })
+                .instrument(root)
+                .await;
+                assert_eq!(result.is_err(), fail);
+                let records: Vec<_> = observations.try_iter().collect();
+                let collector = records
+                    .iter()
+                    .find(|record| record.name == "collector.collect")
+                    .ok_or_else(|| anyhow!("collector span missing"))?;
+                trace_capture::assert_request(collector, &root_id, request_id)?;
+                assert_eq!(collector.scope.len(), 2, "collector must be a direct child");
+                for phase in ["before_yield", "after_yield"] {
+                    let event = records
+                        .iter()
+                        .find(|record| {
+                            record.fields.get("phase").map(String::as_str) == Some(phase)
+                        })
+                        .ok_or_else(|| anyhow!("{phase} event missing"))?;
+                    trace_capture::assert_request(event, &root_id, request_id)?;
+                    assert_eq!(
+                        event.scope.last().map(|span| span.name),
+                        Some("collector.collect")
+                    );
+                }
+                if fail {
+                    let error = records
+                        .iter()
+                        .find(|record| {
+                            record
+                                .fields
+                                .get("message")
+                                .is_some_and(|message| message.contains("done: error:"))
+                        })
+                        .ok_or_else(|| anyhow!("collector error event missing"))?;
+                    trace_capture::assert_request(error, &root_id, request_id)?;
+                }
+            }
+            Ok(())
         }
 
         /// Signals on drop, so a test can observe whether a future was actually dropped

@@ -7,7 +7,7 @@ use futures::future::BoxFuture;
 use prometheus::{GaugeVec, IntGaugeVec, Opts, Registry};
 use sqlx::{PgPool, Row, postgres::PgRow};
 use tokio::task::JoinSet;
-use tracing::{debug, error, info_span, instrument};
+use tracing::{Span, debug, error, info_span, instrument};
 use tracing_futures::Instrument as _;
 
 /// Mirrors `postgres_exporter`'s `pg_stat_user_tables` collector:
@@ -406,7 +406,8 @@ impl Collector for StatUserTablesCollector {
                 let shared_pool = shared_pool.clone();
                 let default_db = default_db.clone();
 
-                tasks.spawn(crate::collectors::permit_metrics::inherit(async move {
+                // Carry tracing as well as permit attribution across the task boundary.
+                let task = crate::collectors::permit_metrics::inherit(async move {
                     let use_shared = default_db.as_deref() == Some(datname.as_str());
 
                     let query_span = info_span!(
@@ -509,7 +510,8 @@ impl Collector for StatUserTablesCollector {
                     }
 
                     Ok::<Vec<UserTableSample>, anyhow::Error>(samples)
-                }));
+                });
+                tasks.spawn(task.instrument(Span::current()));
             }
 
             let mut all_samples = Vec::new();

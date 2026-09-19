@@ -32,6 +32,7 @@ jobs:
 
     strategy:
       matrix:
+        feature-set: [default, telemetry]
         include:
           - build: linux
             os: ubuntu-latest
@@ -73,5 +74,9 @@ jobs:
 
       - name: Build Linux
         run: |
-          cargo build --release --target ${{ matrix.target }}
-        if: matrix.build == 'linux'
+          cargo build --release --locked --no-default-features --target ${{ matrix.target }}
+        if: matrix.build == 'linux' && matrix.feature-set == 'default'
+
+      - name: Build Linux with telemetry
+        run: cargo build --release --locked --features telemetry --target ${{ matrix.target }}
+        if: matrix.build == 'linux' && matrix.feature-set == 'telemetry'

@@ -2,6 +2,8 @@
 FROM rust:1-alpine AS builder
 
 ARG TARGETPLATFORM
+# Published images use the minimal default; developers may opt in when building.
+ARG CARGO_FEATURES=""
 
 # Install build dependencies (rustls only, no OpenSSL needed)
 RUN apk add --no-cache musl-dev
@@ -28,7 +30,7 @@ COPY Cargo.toml Cargo.lock build.rs ./
 RUN mkdir -p src && \
     echo 'fn main() {}' > src/main.rs && \
     . /tmp/rust_target.env && \
-    cargo build --release --target "$RUST_TARGET" && \
+    cargo build --release --locked --no-default-features --features "$CARGO_FEATURES" --target "$RUST_TARGET" && \
     rm -rf src
 
 # Copy actual source code
@@ -36,7 +38,7 @@ COPY src ./src
 
 # Build the actual application (dependencies are cached)
 RUN . /tmp/rust_target.env && \
-    cargo build --release --target "$RUST_TARGET" && \
+    cargo build --release --locked --no-default-features --features "$CARGO_FEATURES" --target "$RUST_TARGET" && \
     mkdir -p /build/output && \
     cp "/build/target/$RUST_TARGET/release/pg_exporter" /build/output/
 

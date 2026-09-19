@@ -69,8 +69,10 @@ jobs:
           components: clippy
           targets: x86_64-unknown-freebsd, x86_64-unknown-illumos
 
-      - name: Clippy
-        run: cargo clippy --all-targets --all-features
+      - name: Clippy (both feature configurations)
+        run: |
+          cargo clippy --locked --all-targets
+          cargo clippy --locked --all-targets --all-features
 
       # The system collector cfg-gates its process and CPU sampling per platform, and
       # `warnings = "deny"` turns a field read on only one of them into a compile error.
@@ -80,10 +82,12 @@ jobs:
       # Clippy rather than `cargo check`, because the lint contract is what gates merges
       # here and some of it is cfg-sensitive: the unsupported-platform `read_cpu_times`
       # returns `Ok(Vec::new())` unconditionally, which only `clippy::unnecessary_wraps`
-      # sees. Neither run passes `--all-targets --all-features`; that pulls in dev-only
+      # sees. These runs omit `--all-targets`, which pulls in dev-only
       # `aws-lc-sys`, which needs a real cross C toolchain.
       - name: Clippy (FreeBSD)
-        run: cargo clippy --target x86_64-unknown-freebsd
+        run: |
+          cargo clippy --locked --target x86_64-unknown-freebsd
+          cargo clippy --locked --target x86_64-unknown-freebsd --features telemetry
 
       # A target that is neither Linux nor FreeBSD, so it compiles the
       # `cfg(not(any(target_os = "linux", target_os = "freebsd")))` fallbacks that report
@@ -93,7 +97,9 @@ jobs:
         env:
           AR_x86_64_unknown_illumos: ar
           CC_x86_64_unknown_illumos: cc
-        run: cargo clippy --target x86_64-unknown-illumos
+        run: |
+          cargo clippy --locked --target x86_64-unknown-illumos
+          cargo clippy --locked --target x86_64-unknown-illumos --features telemetry
 
   check:
     name: Check
@@ -117,8 +123,19 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Check
-        run: cargo check
+      - name: Check both feature configurations
+        run: |
+          cargo check --locked
+          cargo check --locked --features telemetry
+
+      - name: Verify default runtime dependencies exclude OTLP
+        shell: bash
+        run: |
+          tree=$(cargo tree --locked --no-default-features --edges normal --prefix none --format '{p}')
+          if printf '%s\n' "$tree" | grep -E '^(opentelemetry[^ ]*|tracing-opentelemetry|tonic[^ ]*) v'; then
+            echo 'Default builds must not include OpenTelemetry or tonic' >&2
+            exit 1
+          fi
 
   test:
     name: Test (PostgreSQL ${{ matrix.postgres }})
@@ -252,7 +269,9 @@ jobs:
           # Testcontainers-based tests (connection_budget) spin up their own
           # PostgreSQL; pin it to the matrix version so they cover every major.
           PG_EXPORTER_TEST_POSTGRES_TAG: ${{ matrix.postgres }}
-        run: cargo test
+        run: |
+          cargo test --locked
+          cargo test --locked --features telemetry
 
       - name: Test index and permit regressions with one database slot
         env:

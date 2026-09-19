@@ -627,23 +627,65 @@ For direct checks, these commands are also part of the normal validation flow:
     cargo fmt --all -- --check
     just clippy
 
-To run with opentelemetry set the environment variable `OTEL_EXPORTER_OTLP_ENDPOINT`, for example:
+`just test` and CI validate both default and telemetry-enabled builds.
 
-    OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4317"
+## Optional OpenTelemetry tracing
 
-Then you can run the exporter and it will send traces to the specified endpoint.
+OpenTelemetry/OTLP support is a **default-off Cargo feature**. Standard release
+binaries, packages, and container images omit it. Prometheus metrics, local logs
+(`RUST_LOG` / `-v`), request spans, and `x-request-id` correlation remain available
+in every build; the collector and database-connection behavior is unchanged.
 
-To run postgres and jaeger locally
+| Build | Endpoint configured | Behavior |
+| --- | --- | --- |
+| Default | No | Local logging only |
+| Default | Yes | Local logging only; startup warning that OTEL configuration is ignored |
+| `--features telemetry` | No | Local logging only; no exporter is started |
+| `--features telemetry` | Yes | Local logging plus OTLP/gRPC traces, incoming trace context, and `x-trace-id` responses for active traces |
 
-    just postgres
-    just jaeger
-    just watch
+Build from source when you need distributed traces:
 
-For tracees add more verbosity with `-v`, for example:
+```sh
+cargo build --release --features telemetry
+./target/release/pg_exporter --version  # reports telemetry: enabled
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
+  ./target/release/pg_exporter -v
+```
 
-    cargo watch -x 'run -- --collector.vacuum -vv'
+Set `PG_EXPORTER_DSN` as usual. Use `-v` (info), `-vv` (debug), `-vvv` (trace), or
+`RUST_LOG` to enable the spans you need; the default error filter is too restrictive
+for request traces. Only OTLP/gRPC is supported. Optional
+`OTEL_EXPORTER_OTLP_HEADERS` supplies comma-separated `key=value` authentication
+metadata; HTTPS uses native certificate roots.
 
-open `jaeger` at http://localhost:16686 and select the `pg_exporter` service to see the traces.
+A default build warns once on stderr when `OTEL_EXPORTER_OTLP_ENDPOINT` is set,
+even with `RUST_LOG=off`. It never prints the endpoint or authentication values.
+Remove the unused endpoint setting or build with `--features telemetry`.
+
+For local development, use the DevPod PostgreSQL service or `just postgres` on
+the host, then start Jaeger with `just jaeger`. Point the endpoint at that Jaeger
+instance and run `just watch telemetry` (or
+`cargo watch -x 'run --features telemetry -- --collector.vacuum -vv'`). Open
+Jaeger at http://localhost:16686 and select `pg_exporter`. When running inside
+DevPod, the endpoint must be reachable from the container; its `localhost` is
+not the host running Jaeger.
+
+For a custom telemetry-enabled image:
+
+```sh
+podman build -f Containerfile --build-arg CARGO_FEATURES=telemetry -t pg-exporter:telemetry .
+```
+
+Rebuild without `--features telemetry` for a minimal binary. Setting OTEL
+variables cannot enable tracing in a binary that was built without it. Removing
+the optional stack reduces dependencies and binary size; it does not remove SQL
+work, so a large scrape-speed improvement is not guaranteed.
+
+A local x86_64 GNU/Linux release comparison (Rust 1.98.1, fat LTO, stripped)
+measured **7.65 MiB by default versus 9.55 MiB with telemetry: 19.8% smaller**,
+with 34 fewer normal dependency packages. Paired local scrapes showed no clear
+speed improvement. See [the measurement notes](CONTRIBUTING.md#telemetry-footprint)
+for the setup and limitations.
 
 ## 🤝 Contributing
 

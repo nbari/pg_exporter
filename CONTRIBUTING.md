@@ -63,7 +63,8 @@ This script will:
 ### Run Tests
 
 ```bash
-# The 'just test' command automatically uses local PostgreSQL
+# The 'just test' command checks both default and telemetry-enabled builds
+# and automatically uses local PostgreSQL
 # (overrides any PG_EXPORTER_DSN in .envrc)
 just test
 
@@ -72,6 +73,74 @@ PG_EXPORTER_DSN="postgresql://postgres:postgres@localhost:5432/postgres" cargo t
 ```
 
 **Important:** Tests always run against **local PostgreSQL** on `localhost:5432`, not remote databases. The `just test` command handles this automatically, even if you have `PG_EXPORTER_DSN` set in `.envrc`.
+
+Inside DevPod, use its bundled `postgres:5432` service and provided environment
+instead of starting a second host database.
+
+### Optional Telemetry
+
+The default build excludes the OTLP exporter and its dependencies. Build with
+`cargo build --features telemetry` or use `just watch telemetry` when debugging
+with distributed traces. An `OTEL_EXPORTER_OTLP_ENDPOINT` and `-v`/`RUST_LOG=info`
+are also needed at runtime; see [the README](README.md#optional-opentelemetry-tracing).
+`pg_exporter --version` reports whether support was compiled in.
+Without the feature, a configured `OTEL_EXPORTER_OTLP_ENDPOINT` produces a single
+startup warning on stderr, even at the default error level or `RUST_LOG=off`.
+The endpoint and authentication values are never included in that warning.
+
+Keep OTLP initialization in `src/cli/telemetry/otlp.rs` and HTTP trace propagation
+in `src/exporter/telemetry.rs`, both gated by `#[cfg(feature = "telemetry")]`.
+Ordinary `tracing` instrumentation, spawned-task span propagation, request IDs,
+and local logging must remain available without that feature. Prometheus metrics
+are not part of the optional telemetry stack.
+
+`just clippy` checks default and all-feature configurations; `just test` runs both
+test suites. When running Cargo directly inside DevPod:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets
+cargo clippy --locked --all-targets --all-features
+cargo test --locked
+cargo test --locked --features telemetry
+```
+
+#### Telemetry Footprint
+
+Local comparison on 2026-09-19, x86_64 GNU/Linux in DevPod, Rust 1.98.1,
+PostgreSQL 18.4, the same lockfile and release profile (fat LTO, one codegen unit,
+stripped symbols):
+
+| Measurement | Default | `--features telemetry` |
+| --- | ---: | ---: |
+| Binary bytes | 8,026,168 | 10,010,064 |
+| Unique normal dependency packages, including this crate | 213 | 247 |
+| Scrape median at `RUST_LOG=error` | 1.248 ms | 1.232 ms |
+| Scrape median at `RUST_LOG=info` | 1.334 ms | 1.307 ms |
+
+The default binary is 19.8% smaller. Timings are medians of six run medians,
+alternating build order, with 20 warmup requests followed by 250 sequential
+keep-alive `/metrics` requests per run. Both binaries used default collectors,
+the same local test database, no OTLP endpoint, and logs redirected to `/dev/null`.
+All runs exposed the same 73 metric families. Per-run latency ranges overlapped;
+this sample does **not** establish a runtime speedup (nor does it measure the cost
+of active OTLP export). SQL work and ordinary tracing instrumentation remain.
+
+To repeat the size comparison without overwriting your normal build artifacts:
+
+```sh
+telemetry_bench=$(mktemp -d)
+cargo build --release --locked --no-default-features --target-dir "$telemetry_bench/target"
+cp "$telemetry_bench/target/release/pg_exporter" "$telemetry_bench/default"
+cargo build --release --locked --features telemetry --target-dir "$telemetry_bench/target"
+cp "$telemetry_bench/target/release/pg_exporter" "$telemetry_bench/telemetry"
+wc -c "$telemetry_bench/default" "$telemetry_bench/telemetry"
+```
+
+Count normal dependency packages with
+`cargo tree --locked --edges normal --prefix none --no-dedupe --format '{p}' | sort -u | wc -l`,
+then repeat with `--features telemetry`. Build dependencies and dev-only crates
+are not part of that count; `testcontainers` can still pull tonic into tests.
 
 ### Required Tests for New Collectors
 
@@ -131,6 +200,28 @@ against frozen 0.20.0 SQL and verify the session/query count and readable-subset
 When spawning per-database tasks, wrap their futures with `permit_metrics::inherit` **before**
 passing them to Tokio. The optional task-local context attributes shared permit wait/hold
 measurements to the top-level collector; it is not inherited automatically by spawned tasks.
+
+Tracing context also needs explicit propagation: instrument the future with
+`Span::current()` **before** handing it to `tokio::spawn` or `JoinSet::spawn`.
+`permit_metrics::inherit` propagates permit attribution only; it does not propagate
+the request's tracing span. Keep both wrappers on per-database tasks so query spans
+and log events retain the `/metrics` request's correlation fields.
+
+`tokio::task::spawn_blocking` needs propagation too: capture `Span::current()`
+before spawning, then enter it **inside the synchronous closure**. Never hold an
+entered span guard across an await. OS samplers use `blocking::offload_coalesced`,
+which handles this centrally. A started blocking sample cannot be cancelled and
+retains its originating span until it finishes; coalescing still limits it to one
+in-flight sample per reader. With telemetry enabled, a sample that never returns
+prevents the retained spans (including the HTTP request span) from closing and
+being exported; other completed spans in that trace can still be exported.
+
+Deliberately detached work is different: statement text refreshes run under an
+explicit `statements.text_refresh` root span with a `follows_from` link to the
+originating span. That link supplies trace correlation without keeping the HTTP
+request span open after the response. Local background logs share the refresh
+span; they do not inherit the request's fields. Keep this distinction when adding
+background jobs.
 
 ### Scrape Safety Model
 

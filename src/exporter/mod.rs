@@ -15,13 +15,8 @@ use axum::{
     Extension, Router,
     body::Body,
     http::{HeaderName, HeaderValue, Request},
-    middleware::{Next, from_fn},
-    response::Response,
     routing::get,
 };
-use opentelemetry::global;
-use opentelemetry::trace::{TraceContextExt, TraceId};
-use opentelemetry_http::HeaderExtractor;
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use std::{str::FromStr, time::Duration};
@@ -31,11 +26,12 @@ use tower_http::{
     request_id::PropagateRequestIdLayer, set_header::SetRequestHeaderLayer, trace::TraceLayer,
 };
 use tracing::{Span, error, info, info_span, warn};
-use tracing_opentelemetry::OpenTelemetrySpanExt;
 use ulid::Ulid;
 
 mod handlers;
 mod shutdown;
+#[cfg(feature = "telemetry")]
+mod telemetry;
 
 pub mod built_info {
     #![allow(clippy::doc_markdown)]
@@ -122,23 +118,22 @@ fn build_router(pool: sqlx::PgPool, registry: CollectorRegistry) -> Router {
         .make_span_with(make_span)
         .on_response(on_response);
 
+    let middleware = ServiceBuilder::new()
+        .layer(SetRequestHeaderLayer::if_not_present(
+            HeaderName::from_static("x-request-id"),
+            |_req: &_| HeaderValue::from_str(Ulid::generate().to_string().as_str()).ok(),
+        ))
+        .layer(PropagateRequestIdLayer::new(HeaderName::from_static(
+            "x-request-id",
+        )))
+        .layer(trace_layer);
+    #[cfg(feature = "telemetry")]
+    let middleware = middleware.layer(axum::middleware::from_fn(telemetry::add_trace_headers));
+
     Router::new()
         .route("/metrics", get(handlers::metrics))
         .route("/health", get(handlers::health).options(handlers::health))
-        .layer(
-            ServiceBuilder::new()
-                .layer(SetRequestHeaderLayer::if_not_present(
-                    HeaderName::from_static("x-request-id"),
-                    |_req: &_| HeaderValue::from_str(Ulid::generate().to_string().as_str()).ok(),
-                ))
-                .layer(PropagateRequestIdLayer::new(HeaderName::from_static(
-                    "x-request-id",
-                )))
-                .layer(trace_layer)
-                .layer(from_fn(add_trace_headers))
-                .layer(Extension(pool))
-                .layer(Extension(registry)),
-        )
+        .layer(middleware.layer(Extension(pool)).layer(Extension(registry)))
 }
 
 async fn bind_listener(port: u16, listen: Option<String>) -> Result<(TcpListener, String)> {
@@ -234,9 +229,6 @@ fn format_list<T: std::fmt::Display>(items: &[T]) -> String {
 }
 
 fn make_span(request: &Request<Body>) -> Span {
-    let parent_cx =
-        global::get_text_map_propagator(|prop| prop.extract(&HeaderExtractor(request.headers())));
-
     let method = request.method().as_str();
 
     let path = request.uri().path();
@@ -260,6 +252,7 @@ fn make_span(request: &Request<Body>) -> Span {
     let span = info_span!(
         "http.server.request",
         otel.kind = "server",
+        otel.status_code = tracing::field::Empty,
         http.method = method,
         http.route = path,
         http.target = target,
@@ -268,7 +261,8 @@ fn make_span(request: &Request<Body>) -> Span {
         request_id = request_id,
     );
 
-    let _ = span.set_parent(parent_cx);
+    #[cfg(feature = "telemetry")]
+    telemetry::set_parent(request, &span);
 
     span
 }
@@ -280,20 +274,11 @@ fn on_response<B>(response: &axum::http::Response<B>, latency: Duration, span: &
         span.record("otel.status_code", "OK");
     }
 
-    let cx = span.context();
-    let trace_id = cx.span().span_context().trace_id();
-
     #[allow(clippy::cast_possible_truncation)]
     let elapsed_ms = latency.as_millis() as u64;
 
-    if trace_id == TraceId::INVALID {
-        info!(
-            parent: span,
-            status = response.status().as_u16(),
-            elapsed_ms,
-            "request completed"
-        );
-    } else {
+    #[cfg(feature = "telemetry")]
+    if let Some(trace_id) = telemetry::trace_id(span) {
         info!(
             parent: span,
             status = response.status().as_u16(),
@@ -301,32 +286,54 @@ fn on_response<B>(response: &axum::http::Response<B>, latency: Duration, span: &
             trace_id = %trace_id,
             "request completed"
         );
+        return;
     }
-}
-
-async fn add_trace_headers(req: Request<Body>, next: Next) -> Response {
-    let mut res = next.run(req).await;
-
-    let span = Span::current();
-
-    let cx = span.context();
-
-    // CLONE the SpanContext to avoid borrowing a temporary
-    let span_context = cx.span().span_context().clone();
-
-    if span_context.is_valid()
-        && let Ok(val) = HeaderValue::from_str(&span_context.trace_id().to_string())
-    {
-        res.headers_mut()
-            .insert(HeaderName::from_static("x-trace-id"), val);
-    }
-
-    res
+    info!(parent: span, status = response.status().as_u16(), elapsed_ms, "request completed");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_records_status_on_request_span() -> Result<()> {
+        use crate::trace_capture;
+        use anyhow::{Context as _, ensure};
+
+        let (subscriber, observations) = trace_capture::subscriber();
+        tracing::subscriber::with_default(subscriber, || -> Result<()> {
+            for (status, expected) in [(200, "OK"), (400, "OK"), (500, "ERROR"), (503, "ERROR")] {
+                let request = Request::builder()
+                    .uri("/metrics")
+                    .header("x-request-id", "status-probe")
+                    .body(Body::empty())?;
+                let span = make_span(&request);
+                let id = span.id().context("request span disabled")?;
+                let response = axum::http::Response::builder().status(status).body(())?;
+                on_response(&response, Duration::from_millis(1), &span);
+                let event = observations
+                    .try_iter()
+                    .find(|event| {
+                        event
+                            .fields
+                            .get("message")
+                            .is_some_and(|message| message == "request completed")
+                    })
+                    .context("completion log missing")?;
+                trace_capture::assert_request(&event, &id, "status-probe")?;
+                ensure!(
+                    event
+                        .scope
+                        .first()
+                        .and_then(|root| root.fields.get("otel.status_code"))
+                        .map(String::as_str)
+                        == Some(expected),
+                    "status {status} was not recorded: {event:?}"
+                );
+            }
+            Ok(())
+        })
+    }
 
     #[test]
     #[allow(clippy::unwrap_used)]

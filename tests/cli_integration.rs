@@ -11,19 +11,12 @@
 //! - Environment variable handling
 //! - Error handling and validation
 //!
-//! # Performance Optimization
-//!
-//! These tests build the binary once using `OnceLock` and reuse it across all tests,
-//! instead of calling `cargo run` for each test. This approach:
-//! - Eliminates repeated compilation checks (10x faster)
-//! - Ensures consistent binary state across tests
-//! - Avoids cargo-related environment issues
-//! - Makes tests more reliable in CI environments
+//! Cargo supplies the binary built with this test's feature set, avoiding nested
+//! builds that could silently replace a telemetry-enabled binary with a default one.
 
 use anyhow::Result;
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::OnceLock;
 use std::time::Duration;
 
 mod common;
@@ -32,35 +25,9 @@ mod common;
 // Binary Path Setup
 // ============================================================================
 
-static BINARY_PATH: OnceLock<PathBuf> = OnceLock::new();
-
-/// Get path to the `pg_exporter` binary, building it once if needed.
-///
-/// This function ensures the binary is compiled exactly once across all tests,
-/// using `OnceLock` for thread-safe lazy initialization. Subsequent calls return
-/// the cached path without rebuilding.
-fn get_binary_path() -> &'static PathBuf {
-    BINARY_PATH.get_or_init(|| {
-        // Build the binary once for all tests
-        let output = Command::new("cargo")
-            .args(["build", "--bin", "pg_exporter"])
-            .output()
-            .expect("Failed to build binary");
-
-        assert!(
-            output.status.success(),
-            "Failed to build binary:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        // Construct path to the compiled binary. Honor CARGO_TARGET_DIR (e.g. the
-        // devcontainer overrides it) and fall back to <manifest>/target otherwise.
-        let target_dir = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
-            || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"),
-            PathBuf::from,
-        );
-        target_dir.join("debug").join("pg_exporter")
-    })
+/// Cargo builds the matching binary for this integration test's feature set.
+fn get_binary_path() -> &'static Path {
+    Path::new(env!("CARGO_BIN_EXE_pg_exporter"))
 }
 
 // ============================================================================

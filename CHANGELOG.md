@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0] - 2026-09-19
+
+### Fixed
+
+- Preserve the request's tracing span when spawning a scrape ([#39]), restoring
+  collector span ancestry and request correlation on collector logs. Preserve
+  that context across the `stat` and `sequences` per-database task spawns too,
+  without changing scrape cancellation or the ephemeral connection model.
+- Carry that context into blocking OS samplers as well. Give detached statement
+  text refreshes their own root span linked to the originating span, correlating
+  background logs without extending the HTTP request span's lifetime.
+- Declare the HTTP span's status field so response callbacks actually record
+  success and server errors instead of silently discarding the updates.
+
+### Changed
+
+- Make OpenTelemetry/OTLP an opt-in `telemetry` Cargo feature. Standard binaries,
+  packages, and container images omit it and ignore OTEL environment variables,
+  with a startup stderr warning if an OTLP endpoint is configured (independent of
+  the log filter, without revealing credentials). Existing trace users must
+  rebuild with `--features telemetry`. Keep Prometheus
+  metrics, local logs, request spans, and request IDs in both builds. Report the
+  compiled capability in `--version` and validate both configurations in CI.
+- Build docs.rs documentation with all features and use the lockfile for both
+  standard local test and Clippy configurations.
+- Refresh compatible dependencies, including Clap 4.6.7 and rustls 0.23.45
+  (RUSTSEC-2026-0285). Retain published OpenTelemetry 0.32 dependencies with
+  `tracing-opentelemetry` 0.33; defer OpenTelemetry 0.33 until a compatible adapter
+  is published. Select the explicit `tls-ring` provider for OTLP TLS.
+
+[#39]: https://github.com/nbari/pg_exporter/issues/39
+
 ## [0.21.0] - 2026-09-13
 
 ### Added

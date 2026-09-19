@@ -24,8 +24,9 @@ export PG_EXPORTER_DSN="postgresql://postgres:postgres@localhost:5432/postgres"
 # Then in psql:
 # CREATE EXTENSION pg_stat_statements;
 
-# Run all tests
-cargo test
+# Run all tests in both feature configurations
+cargo test --locked
+cargo test --locked --features telemetry
 
 # Run specific collector tests
 cargo test --test collectors_tests statements
@@ -54,6 +55,8 @@ The CI pipeline automatically:
 - Tests against PostgreSQL 14, 15, 16, 17, and 18
 - Installs and configures pg_stat_statements extension
 - Runs all integration tests
+- Checks both default and telemetry-enabled builds, and guards the default
+  binary's normal dependency tree against OpenTelemetry/tonic dependencies
 
 ## Writing Collector Tests
 
@@ -222,6 +225,64 @@ DSN as above. Permit timing unit tests use a paused clock and controlled semapho
 to verify attribution, concurrent waits, cancellation, and release without timing thresholds.
 The dashboard fixture also creates a non-default database so permit metrics are tested on a
 clean PostgreSQL instance, not only on a populated developer cluster.
+
+## Scrape Tracing Regressions
+
+The registry unit test `spawned_scrape_preserves_request_spans_and_events` drives the
+real scrape gate without a database. It checks span parentage and request fields on
+events before and after a yield, including a collector error and a second request.
+`tests/scrape_tracing.rs` exercises the real registry with `stat`, `sequences`, and
+`index`, asserting query ancestry for both the default database and an isolated
+fixture database reached through ephemeral connections.
+
+Both tests use a scoped recording subscriber on a current-thread runtime: spawned
+tasks see the subscriber without inheriting an entered span from the test. This
+isolates span propagation from subscriber visibility and avoids a process-global
+subscriber interfering with other tests. They require no OTLP service.
+
+`blocking_sample_preserves_request_span` exercises the shared blocking helper
+with subscriber visibility on both threads, but no span entered by the test on
+the blocking thread. `detached_refresh_has_linked_root_without_retaining_request`
+uses a closed lazy pool to force a background failure: it checks the causal link,
+that the HTTP span closes before the task runs, and that query spans and failure
+logs belong to the refresh root. `response_records_status_on_request_span` checks
+the recorded status on successful, client-error, and server-error responses.
+
+These tracing regression tests run in **both** feature configurations: local
+request correlation must not depend on the optional OTLP exporter.
+
+Run inside DevPod against its compose PostgreSQL service:
+
+```sh
+cargo test --locked --lib
+cargo test --locked --test scrape_tracing
+```
+
+When changing task instrumentation, remove each propagation wrapper individually
+and confirm the corresponding regression fails before restoring it. A passing
+test must observe the expected spans and events, not merely accept empty output.
+
+## Telemetry Feature Tests
+
+`tests/telemetry.rs` launches Cargo's actual binary for the selected feature set.
+It checks the version capability marker, successful Prometheus scrapes, generated
+and propagated request IDs, and correlated local logs. In each build it tests
+with and without an OTLP endpoint: a remote `traceparent` becomes an `x-trace-id`
+only when telemetry is both compiled in and configured. Default builds also
+ignore malformed OTEL headers and warn once on stderr when an endpoint is set,
+including at the default log level and with `RUST_LOG=off`, without leaking
+credentials. No warning is emitted when the endpoint is absent or telemetry is
+compiled in. No external collector is needed; the configured test endpoint is a
+closed loopback port.
+
+```sh
+cargo test --locked --test telemetry
+cargo test --locked --features telemetry --test telemetry
+```
+
+Use the local test database (the compose `postgres` service inside DevPod).
+Binary integration tests must use `CARGO_BIN_EXE_pg_exporter`, not a nested
+`cargo build`, which could silently replace the selected feature configuration.
 
 ## Test Coverage Requirements
 

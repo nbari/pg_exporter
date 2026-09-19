@@ -568,9 +568,14 @@ impl PgStatementsCollector {
             return;
         };
 
+        // A separate root groups background logs without keeping the request span
+        // alive. The causal link becomes an OTLP span link when telemetry is enabled.
+        let span = info_span!(parent: None, "statements.text_refresh", collector = "pg_statements");
+        span.follows_from(tracing::Span::current());
         let task = self
             .clone()
-            .refresh_query_texts_in_background(pool.clone(), missing, in_flight);
+            .refresh_query_texts_in_background(pool.clone(), missing, in_flight)
+            .instrument(span);
         // Dropping a Tokio JoinHandle detaches the task. The task owns the pool and
         // collector handles it needs, so it can finish after this scrape returns.
         drop(tokio::spawn(task));
@@ -1170,6 +1175,60 @@ impl Collector for PgStatementsCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detached_refresh_has_linked_root_without_retaining_request() -> Result<()> {
+        use crate::trace_capture;
+        use anyhow::{Context as _, ensure};
+
+        let (subscriber, observations) = trace_capture::subscriber();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        tracing::subscriber::with_default(subscriber, || runtime.block_on(async {
+            // A closed lazy pool makes the background error path deterministic,
+            // without connecting to any database.
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgresql://localhost/postgres")?;
+            pool.close().await;
+            let collector = PgStatementsCollector::with_top_n(25);
+            let request = info_span!("http.server.request", request_id = "refresh-probe");
+            let request_id = request.id().context("request span disabled")?;
+            request.in_scope(|| collector.schedule_query_text_refresh(&pool, vec![42]));
+            drop(request);
+            ensure!(collector.text_lookup_in_flight.load(Ordering::Acquire));
+
+            // The current-thread runtime has not polled the detached task yet.
+            let scheduled: Vec<_> = observations.try_iter().collect();
+            let root = scheduled.iter().find(|event| event.name == "statements.text_refresh")
+                .context("background refresh span missing")?;
+            ensure!(root.scope.len() == 1, "refresh must be a root, not a request child");
+            let refresh_id = &root.scope.first().context("refresh scope missing")?.id;
+            ensure!(scheduled.iter().any(|event| event.name == "span.follows_from"
+                && event.scope.last().is_some_and(|span| span.id == *refresh_id)
+                && event.fields.get("follows_from") == Some(&request_id.into_u64().to_string())),
+                "refresh must link to its originating request");
+            ensure!(scheduled.iter().any(|event| event.name == "span.close"
+                && event.scope.last().is_some_and(|span| span.id == request_id)),
+                "detached refresh must not retain the request span");
+
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while collector.text_lookup_in_flight.load(Ordering::Acquire) {
+                    tokio::task::yield_now().await;
+                }
+            }).await?;
+            let completed: Vec<_> = observations.try_iter().collect();
+            for event in [
+                completed.iter().find(|event| event.name == "db.query")
+                    .context("background query span missing")?,
+                completed.iter().find(|event| event.fields.get("message")
+                    .is_some_and(|message| message.contains("query text lookup failed")))
+                    .context("background failure log missing")?,
+            ] {
+                ensure!(event.scope.first().is_some_and(|span| span.id == *refresh_id),
+                    "background event lost refresh context: {event:?}");
+            }
+            Ok(())
+        }))
+    }
 
     #[test]
     fn test_pg_statements_collector_name() {
