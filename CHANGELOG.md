@@ -31,9 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Build docs.rs documentation with all features and use the lockfile for both
   standard local test and Clippy configurations.
 - Refresh compatible dependencies, including Clap 4.6.7 and rustls 0.23.45
-  (RUSTSEC-2026-0285). Retain published OpenTelemetry 0.32 dependencies with
-  `tracing-opentelemetry` 0.33; defer OpenTelemetry 0.33 until a compatible adapter
-  is published. Select the explicit `tls-ring` provider for OTLP TLS.
+  (RUSTSEC-2026-0285). Upgrade the OpenTelemetry stack to 0.33 with
+  `tracing-opentelemetry` 0.34. Select the explicit `tls-ring` provider for
+  OTLP TLS.
 
 [#39]: https://github.com/nbari/pg_exporter/issues/39
 

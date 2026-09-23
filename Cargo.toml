@@ -61,11 +61,9 @@ anyhow = "1.0"
 axum = { version = "0.8.9", features = ["tracing"] }
 chrono = "0.4.45"
 clap = { version = "4.6.7", features = ["env"] }
-# tracing-opentelemetry 0.33 uses OpenTelemetry 0.32; upgrade this stack together
-# once a compatible adapter is published (do not substitute an unreleased Git pin).
-opentelemetry = { version = "0.32.0", optional = true }
-opentelemetry-otlp = { version = "0.32.0", optional = true, default-features = false, features = ["grpc-tonic", "gzip-tonic", "tls-ring", "tls-roots", "trace"] }
-opentelemetry_sdk = { version = "0.32.1", optional = true, features = ["rt-tokio"] }
+opentelemetry = { version = "0.33.0", optional = true }
+opentelemetry-otlp = { version = "0.33.0", optional = true, default-features = false, features = ["grpc-tonic", "gzip-tonic", "tls-ring", "tls-roots", "trace"] }
+opentelemetry_sdk = { version = "0.33.0", optional = true, features = ["rt-tokio"] }
 secrecy = "0.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -74,7 +72,7 @@ tokio = { version = "1.53.1", features = ["full"] }
 tower = "0.5.3"
 tower-http = { version = "0.7.1", features = ["request-id", "set-header", "trace"] }
 tracing = "0.1.44"
-tracing-opentelemetry = { version = "0.33.0", optional = true }
+tracing-opentelemetry = { version = "0.34.0", optional = true }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 ulid = "3.0.0"
 url = "2.5.8"
@@ -84,7 +82,7 @@ futures = "0.3.34"
 tonic = { version = "0.14.6", optional = true, features = ["tls-native-roots"] }
 base64 = { version = "0.23.1", optional = true }
 tracing-futures = "0.2.5"
-opentelemetry-http = { version = "0.32.0", optional = true }
+opentelemetry-http = { version = "0.33.0", optional = true }
 once_cell = "1.21"
 sysinfo = "0.39"
 x509-parser = "0.18"
