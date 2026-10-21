@@ -226,6 +226,26 @@ to verify attribution, concurrent waits, cancellation, and release without timin
 The dashboard fixture also creates a non-default database so permit metrics are tested on a
 clean PostgreSQL instance, not only on a populated developer cluster.
 
+## TLS Connection Teardown Regression
+
+`tests/tls_connection_teardown.rs` runs the actual exporter binary against an isolated
+TLS 1.3 PostgreSQL container with a freshly generated certificate and two populated databases.
+It checks index, table, and sequence metrics, then exercises permission-denied queries.
+Before checking for connection-reset/EOF log noise, it waits for PostgreSQL disconnection
+records and verifies that no secondary-database exporter sessions remain.
+On Unix it then verifies that shared-pool sessions are still live, sends SIGTERM, requires
+a successful process exit, and checks that every pooled TLS session disconnected without
+reset/EOF noise. Forced termination remains the fallback for failed test cleanup only.
+
+```sh
+PG_EXPORTER_REQUIRE_TESTCONTAINERS=1 cargo test --locked --test tls_connection_teardown
+```
+
+Set `DOCKER_HOST` to your Docker/Podman socket if needed. CI requires the runtime and uses
+`PG_EXPORTER_TEST_POSTGRES_TAG` to exercise its PostgreSQL version matrix. No existing
+database or host certificate files are modified. Locally, the test skips only when no
+runtime is available and it has not been explicitly required.
+
 ## Scrape Tracing Regressions
 
 The registry unit test `spawned_scrape_preserves_request_spans_and_events` drives the

@@ -204,8 +204,9 @@ fn connect_timeout_arg() -> Arg {
         .long_help(
             "PostgreSQL connection-establishment timeout, in milliseconds.\n\n\
              This bounds DNS, TCP, TLS, authentication, and shared-pool connection acquisition \
-             before any server-side PostgreSQL timeout can apply. It must be positive and lower \
-             than --scrape.timeout-ms.\n\n\
+             before any server-side PostgreSQL timeout can apply. It also bounds graceful \
+             shutdown of ephemeral per-database connections after queries finish and the shared \
+             pool on process exit. It must be positive and lower than --scrape.timeout-ms.\n\n\
              Examples:\n\
                --scrape.connect-timeout-ms 5000\n\
                --scrape.connect-timeout-ms 10000\n\

@@ -306,6 +306,13 @@ lock-blocked scrape fail fast and release its connection slot. `statement_timeou
 server-side backstop for slow queries after they start running. The whole-scrape timeout
 turns an overlong HTTP scrape into a `504`.
 
+The same connect-timeout value also bounds graceful shutdown of ephemeral per-database
+connections after successful or failed queries. Shutdown remains inside the whole-scrape
+deadline; cancellation still drops connections immediately rather than spawning cleanup tasks.
+After the HTTP server stops on normal process shutdown, the shared pool is also closed with
+this timeout budget before tracing shutdown. If the pool cannot close in time, the exporter
+reports a shutdown error rather than waiting indefinitely.
+
 The exporter allows the DSN/`PGOPTIONS` to override `lock_timeout`, including
 `lock_timeout=0`, matching the usual PostgreSQL operator model. `statement_timeout=0` is
 rejected because it disables the server-side query timeout; use a positive value or omit it
@@ -395,11 +402,12 @@ Each active client-side scrape opens at most:
   connections until the first scrape), and idle connections are dropped after a two-minute
   maximum lifetime.
 * **`--collectors.max-db-concurrency` — `N`, default `2`.** The multi-database collectors
-  (`stat`, `index`) must open one connection *per non-default database* they query, because a
-  PostgreSQL connection is tied to a single database. `N` is a global cap on how many of those
-  run at the same time across all collectors. Each such connection is **ephemeral** — closed
-  as soon as its query finishes. When more databases need scanning than there are free slots,
-  the extra ones wait for a slot instead of opening more connections.
+  (`stat`, `index`, `sequences`) must open one connection *per non-default database* they query,
+  because a PostgreSQL connection is tied to a single database. `N` is a global cap on how many
+  of those run at the same time across all collectors. Each such connection is **ephemeral** —
+  closed gracefully when its query finishes, with its slot held until shutdown completes.
+  When more databases need scanning than there are free slots, the extra ones wait for a slot
+  instead of opening more connections.
 
 Because `N` is a hard cap, that per-scrape peak does **not** grow with the number of databases
 — 100 or 10,000 databases both peak at `3 + N`. This is what keeps the exporter safe on

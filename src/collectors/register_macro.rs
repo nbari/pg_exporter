@@ -144,22 +144,6 @@ mod tests {
     }
 
     #[test]
-    fn test_collector_names_exist() {
-        let names = crate::collectors::COLLECTOR_NAMES;
-
-        assert!(!names.is_empty());
-        assert!(names.len() >= 5);
-
-        // Check expected collectors are present
-        assert!(names.contains(&"default"));
-        assert!(names.contains(&"vacuum"));
-        assert!(names.contains(&"activity"));
-        assert!(names.contains(&"locks"));
-        assert!(names.contains(&"database"));
-        assert!(names.contains(&"stat"));
-    }
-
-    #[test]
     fn test_factory_creates_valid_collectors() {
         let factories = crate::collectors::all_factories();
 

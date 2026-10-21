@@ -1,10 +1,10 @@
 //! Shared utilities for collectors:
 //! - Global, read-only exclusion list of databases (set once at startup).
 //! - Parsed base connect options derived from the DSN to build per-database connections.
-//! - Ephemeral per-database connections (opened per scrape query, closed on drop) so the
-//!   exporter's connection footprint tracks scrape concurrency, not the database count.
+//! - Ephemeral per-database connections (opened per scrape query, closed gracefully afterward)
+//!   so the exporter's connection footprint tracks scrape concurrency, not the database count.
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use once_cell::sync::OnceCell;
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::postgres::{PgConnectOptions, PgConnection};
@@ -664,8 +664,8 @@ pub fn connect_options_for_db(datname: &str) -> Result<PgConnectOptions> {
 /// Open a fresh connection to the specified non-default database.
 ///
 /// Connections are intentionally **not** pooled or cached: the caller runs a single scrape
-/// query and drops the connection, which closes it. Combined with the per-collector
-/// concurrency limit, this bounds the exporter's per-database connection footprint to the
+/// query and passes its result and connection to `finish_db_query` for graceful shutdown.
+/// Combined with the global concurrency limit, this bounds the per-database footprint to the
 /// concurrency limit — regardless of how many databases exist — instead of pinning one
 /// persistent connection per database (which would exhaust `max_connections` on large or
 /// connection-constrained clusters, e.g. AWS RDS). The default database must use the shared
@@ -693,6 +693,43 @@ pub async fn open_db_connection(datname: &str, _permit: &DbQueryPermit) -> Resul
             )
         })??;
     Ok(conn)
+}
+
+/// Close an ephemeral query's connection while its concurrency permit is still held.
+///
+/// Both successful and failed queries send PostgreSQL's Terminate message and shut down TLS.
+/// Shutdown is bounded by the connect timeout and the enclosing scrape deadline. Cancellation
+/// still drops the connection immediately; no cleanup task outlives the scrape.
+///
+/// # Errors
+///
+/// Preserves the query error if both query and shutdown fail; otherwise returns shutdown errors.
+pub(crate) async fn finish_db_query<T>(
+    conn: PgConnection,
+    _permit: &DbQueryPermit,
+    datname: &str,
+    result: Result<T>,
+) -> Result<T> {
+    let close_timeout = get_connect_timeout();
+    let closed = match timeout(close_timeout, conn.close()).await {
+        Ok(result) => result.with_context(|| format!("closing connection to database {datname:?}")),
+        Err(_) => Err(anyhow!(
+            "closing connection to database {datname:?} exceeded timeout of {close_timeout:?}"
+        )),
+    };
+    match result {
+        Ok(value) => {
+            closed?;
+            Ok(value)
+        }
+        Err(query_error) => {
+            if let Err(close_error) = closed {
+                tracing::warn!(database = datname, error = %close_error,
+                    "failed to close database connection after query failure");
+            }
+            Err(query_error)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -846,7 +883,10 @@ mod permit_timing_tests {
         assert_observation(&registry_a, "hold", "index", 1, 1.0)?;
         assert_observation(&registry_b, "hold", "index", 1, 2.0)?;
         a.reset();
-        assert!(registry_a.gather().is_empty());
+        assert_eq!(
+            registry_a.gather(),
+            [] as [prometheus::proto::MetricFamily; 0]
+        );
         assert_observation(&registry_b, "hold", "index", 1, 2.0)
     }
 

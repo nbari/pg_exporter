@@ -1,5 +1,6 @@
 use crate::collectors::util::{
-    acquire_db_query_permit, get_default_database, get_excluded_databases, open_db_connection,
+    acquire_db_query_permit, finish_db_query, get_default_database, get_excluded_databases,
+    open_db_connection,
 };
 use crate::collectors::{Collected, Collector, all_databases_failed, i64_to_f64};
 use anyhow::{Result, anyhow};
@@ -442,11 +443,14 @@ impl Collector for StatUserTablesCollector {
                             return Err(anyhow!("stat_user_tables: missing database query permit"));
                         };
                         match open_db_connection(&datname, permit).await {
-                            Ok(mut conn) => sqlx::query(STAT_USER_TABLES_QUERY)
-                                .fetch_all(&mut conn)
-                                .instrument(query_span)
-                                .await
-                                .map_err(Into::into),
+                            Ok(mut conn) => {
+                                let result = sqlx::query(STAT_USER_TABLES_QUERY)
+                                    .fetch_all(&mut conn)
+                                    .instrument(query_span)
+                                    .await
+                                    .map_err(Into::into);
+                                finish_db_query(conn, permit, &datname, result).await
+                            }
                             Err(e) => Err(e),
                         }
                     };

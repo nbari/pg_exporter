@@ -73,9 +73,14 @@ pub async fn new(
 
     info!("shutting down");
 
+    let close_timeout = get_connect_timeout();
+    let closed = timeout(close_timeout, pool.close())
+        .await
+        .with_context(|| format!("closing PostgreSQL pool exceeded timeout of {close_timeout:?}"));
+
     shutdown_tracer();
 
-    Ok(())
+    closed
 }
 
 fn connect_pool(dsn: &SecretString) -> Result<sqlx::PgPool> {

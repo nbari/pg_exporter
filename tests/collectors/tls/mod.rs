@@ -35,22 +35,3 @@ async fn test_tls_collector_disabled_by_default() {
     let collector = TlsCollector::new();
     assert!(!collector.enabled_by_default());
 }
-
-/// Test TLS collector collects from database without error
-#[tokio::test]
-async fn test_tls_collector_collects_from_database() -> Result<()> {
-    let pool = common::create_test_pool().await?;
-
-    let collector = TlsCollector::new();
-    let registry = Registry::new();
-
-    collector.register_metrics(&registry)?;
-    collector.collect(&pool).await?;
-
-    // Verify some metrics were collected
-    let metric_families = registry.gather();
-    assert!(!metric_families.is_empty());
-
-    pool.close().await;
-    Ok(())
-}

@@ -1,6 +1,7 @@
 use crate::collectors::{Collected, i64_to_f64,
     util::{
-        acquire_db_query_permit, get_default_database, get_excluded_databases, open_db_connection,
+        acquire_db_query_permit, finish_db_query, get_default_database, get_excluded_databases,
+        open_db_connection,
     },
     Collector,
 };
@@ -217,11 +218,12 @@ impl VacuumProgressCollector {
             }
         };
 
-        match sqlx::query_scalar::<_, String>(RESOLVE_RELID_QUERY)
+        let result = sqlx::query_scalar::<_, String>(RESOLVE_RELID_QUERY)
             .bind(relid)
             .fetch_optional(&mut conn)
             .await
-        {
+            .map_err(Into::into);
+        match finish_db_query(conn, &permit, datname, result).await {
             Ok(name) => name,
             Err(e) => {
                 debug!(database = %datname, relid, error = %e, "vacuum_progress: relid name lookup failed");

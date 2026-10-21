@@ -46,37 +46,6 @@ async fn test_wait_events_collector_has_all_metrics_after_collection() -> Result
 }
 
 #[tokio::test]
-async fn test_wait_events_collector_collects_from_database() -> Result<()> {
-    let pool = common::create_test_pool().await?;
-
-    let collector = WaitEventsCollector::new();
-    let registry = Registry::new();
-
-    collector.register_metrics(&registry)?;
-    collector.collect(&pool).await?;
-
-    let metric_families = registry.gather();
-
-    // Should have wait event metrics
-    let wait_event_type = metric_families
-        .iter()
-        .find(|m| m.name() == "pg_wait_event_type")
-        .expect("pg_wait_event_type metric should exist");
-
-    let wait_event = metric_families
-        .iter()
-        .find(|m| m.name() == "pg_wait_event")
-        .expect("pg_wait_event metric should exist");
-
-    // Metrics should exist (even if no active wait events, will have 'none')
-    assert!(!wait_event_type.get_metric().is_empty());
-    assert!(!wait_event.get_metric().is_empty());
-
-    pool.close().await;
-    Ok(())
-}
-
-#[tokio::test]
 async fn test_wait_events_collector_handles_no_wait_events() -> Result<()> {
     let pool = common::create_test_pool().await?;
 

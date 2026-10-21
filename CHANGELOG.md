@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.1] - 2026-10-21
+
+### Fixed
+
+- Gracefully close ephemeral PostgreSQL connections after successful and failed
+  queries in `index`, `stat`, `sequences`, and cross-database vacuum name resolution
+  ([#41]). Send PostgreSQL termination and TLS shutdown instead of dropping completed
+  connections, preventing `Connection reset by peer` log spam on TLS-enabled servers.
+  Keep the database concurrency permit through shutdown, bound shutdown by the
+  connection timeout, and preserve the original query error if cleanup also fails.
+- Close the shared PostgreSQL pool on normal exporter shutdown before flushing tracing,
+  preventing TLS reset logs on clean SIGINT/SIGTERM exits. Pool shutdown uses the existing
+  connection-timeout budget and reports an error if that budget expires.
+- Add a real-exporter TLS regression covering populated default and non-default
+  databases, server-side disconnection logs, permission-denied query cleanup, and
+  clean shared-pool shutdown on SIGTERM (Unix).
+
+### Security
+
+- Refresh dependencies to resolve the security audit failures: rustls 0.23.46,
+  rustls-webpki 0.103.16, and webpki-roots/webpki-root-certs 1.0.10. Update the
+  yanked yoke-derive dependency to 0.8.4 without advisory suppressions.
+
+### Changed
+
+- Refresh compatible dependencies, including Tokio 1.54.0 and the OpenTelemetry
+  0.33.1 patch releases.
+- Remove shallow nonempty-output and constructor-default tests exposed by Rust 1.99
+  Clippy, retaining behavioral coverage and the registry-reset assertion.
+
+[#41]: https://github.com/nbari/pg_exporter/issues/41
+
 ## [0.22.0] - 2026-09-19
 
 ### Fixed

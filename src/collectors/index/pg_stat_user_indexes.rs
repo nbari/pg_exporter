@@ -5,7 +5,8 @@ use super::{
 use crate::collectors::{
     Collected, Collector, all_databases_failed, permit_metrics,
     util::{
-        acquire_db_query_permit, get_default_database, get_excluded_databases, open_db_connection,
+        acquire_db_query_permit, finish_db_query, get_default_database, get_excluded_databases,
+        open_db_connection,
     },
 };
 use anyhow::{Context, Result, anyhow};
@@ -182,9 +183,7 @@ impl PgStatUserIndexesCollector {
             let permit = acquire_db_query_permit().await?;
             let mut conn = open_db_connection(datname, &permit).await?;
             let result = Self::query_database(&mut conn).await;
-            drop(conn);
-            drop(permit);
-            result
+            finish_db_query(conn, &permit, datname, result).await
         }
     }
 }

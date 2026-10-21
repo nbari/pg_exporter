@@ -181,13 +181,17 @@ connection-constrained clusters (e.g. AWS RDS), that fan-out follows a strict mo
   the default database and all **cluster-wide** views (`pg_stat_activity`, `pg_locks`,
   `pg_stat_replication`, `pg_stat_database`, `pg_stat_progress_*`). Those never need fan-out.
 - **Ephemeral per-database connections** (`util::open_db_connection`): opened per scrape query
-  and **closed on drop** — never cached. Combined with the `--collectors.max-db-concurrency`
-  semaphore (default 2), the peak per-database connection count is bounded by *concurrency*,
-  not by the *number of databases* (so 100 or 10,000 databases both peak at ~concurrency).
+  and **closed gracefully through `util::finish_db_query`** — never cached. Pass the query
+  result to that helper on both success and failure, while holding the database permit.
+  It bounds shutdown by the connect timeout and preserves the original query error if
+  shutdown also fails. The `--collectors.max-db-concurrency` semaphore (default 2) bounds
+  the peak per-database connection count by *concurrency*, not the *number of databases*.
 
 **Do not reintroduce a per-database pool cache.** Caching pins ~one persistent connection per
 database and can exhaust `max_connections`. This invariant is locked by
-`tests/collectors/connection.rs` (fresh backend PID per call + closed on drop); keep it green.
+`tests/collectors/connection.rs` (fresh backends and fallback closure on drop) and
+`tests/tls_connection_teardown.rs` (graceful TLS shutdown after successful and failed queries).
+Scrape cancellation still drops connections immediately; do not detach cleanup tasks.
 
 The `index` collector discovers databases once and collects its ten metric families with
 one combined query per database. On healthy scrapes it opens one ephemeral connection per

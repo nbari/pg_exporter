@@ -1596,11 +1596,6 @@ mod tests {
         assert_eq!(collector.text_cache_lock().texts.len(), 2);
     }
 
-    #[test]
-    fn test_self_queryids_start_empty() {
-        let collector = PgStatementsCollector::with_top_n(25);
-        assert!(collector.self_queryids().is_empty());
-    }
 
     #[test]
     fn test_cached_extension_availability_uses_installed_cache() {

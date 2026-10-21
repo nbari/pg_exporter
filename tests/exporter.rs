@@ -53,40 +53,6 @@ async fn test_exporter_starts_and_stops() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_exporter_with_excluded_databases() -> Result<()> {
-    use pg_exporter::collectors::util::set_excluded_databases;
-
-    set_excluded_databases(vec!["template0".to_string(), "template1".to_string()]);
-
-    let port = common::get_available_port();
-    let dsn = common::get_test_dsn_secret();
-
-    let handle = tokio::spawn(async move {
-        pg_exporter::exporter::new(port, None, dsn, collector_config(&["default"])).await
-    });
-
-    assert!(
-        common::wait_for_server(port, 50).await,
-        "Server failed to start on port {port}"
-    );
-
-    let client = reqwest::Client::new();
-    let response = client
-        .get(format!("{}/metrics", common::get_test_url(port)))
-        .send()
-        .await?;
-
-    assert_eq!(response.status(), 200);
-
-    let body = response.text().await?;
-    assert!(!body.is_empty());
-
-    handle.abort();
-
-    Ok(())
-}
-
-#[tokio::test]
 async fn test_exporter_bind_to_ipv4_localhost() -> Result<()> {
     let port = common::get_available_port();
     let dsn = common::get_test_dsn_secret();

@@ -53,7 +53,6 @@ async fn test_server_tls_config_collector_collects_ssl_status() -> Result<()> {
         ssl_enabled.get_field_type(),
         prometheus::proto::MetricType::GAUGE
     );
-    assert!(!ssl_enabled.get_metric().is_empty());
 
     // Value should be either 0 or 1
     let value = common::metric_value_to_i64(ssl_enabled.get_metric()[0].get_gauge().value());

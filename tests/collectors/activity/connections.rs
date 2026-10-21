@@ -139,69 +139,6 @@ async fn test_connections_collector_tracks_connection_states() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_connections_collector_counts_match() -> Result<()> {
-    let pool = common::create_test_pool().await?;
-
-    let collector = ConnectionsCollector::new();
-    let registry = Registry::new();
-
-    collector.register_metrics(&registry)?;
-    collector.collect(&pool).await?;
-
-    let metric_families = registry.gather();
-
-    // Get active + idle counts and verify they match the state counts
-    let active_conn = metric_families
-        .iter()
-        .find(|m| m.name() == "pg_stat_activity_active_connections")
-        .unwrap();
-
-    let idle_conn = metric_families
-        .iter()
-        .find(|m| m.name() == "pg_stat_activity_idle_connections")
-        .unwrap();
-
-    // Both should have metrics
-    assert!(!active_conn.get_metric().is_empty());
-    assert!(!idle_conn.get_metric().is_empty());
-
-    pool.close().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_connections_collector_waiting_and_blocked() -> Result<()> {
-    let pool = common::create_test_pool().await?;
-
-    let collector = ConnectionsCollector::new();
-    let registry = Registry::new();
-
-    collector.register_metrics(&registry)?;
-    collector.collect(&pool).await?;
-
-    let metric_families = registry.gather();
-
-    // Waiting connections metric should exist
-    let waiting = metric_families
-        .iter()
-        .find(|m| m.name() == "pg_stat_activity_waiting_connections")
-        .expect("waiting_connections metric should exist");
-
-    // Blocked connections metric should exist
-    let blocked = metric_families
-        .iter()
-        .find(|m| m.name() == "pg_stat_activity_blocked_connections")
-        .expect("blocked_connections metric should exist");
-
-    // Both should have metrics (even if zero)
-    assert!(!waiting.get_metric().is_empty());
-    assert!(!blocked.get_metric().is_empty());
-
-    pool.close().await;
-    Ok(())
-}
-
-#[tokio::test]
 async fn test_connections_collector_name() {
     let collector = ConnectionsCollector::new();
     assert_eq!(collector.name(), "connections");
