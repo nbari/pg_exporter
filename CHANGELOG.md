@@ -131,6 +131,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tens of gigabytes that never shrank; the series is now streamed from the `SELECT`
   list and bounded by `statement_timeout`. The database catalog test rejected
   `datconnlimit = -2`, which PostgreSQL sets while a database is being dropped.
+- Fix a third race, in the vacuum-progress test that follows a `VACUUM` in another
+  database. It set its cost throttle through the pool and ran the `VACUUM` through the
+  pool too, so the two could land on different connections: the `VACUUM` then ran
+  unthrottled and the test passed only when it caught a short vacuum in flight. Both
+  now share one connection, and the throttled `VACUUM` is cancelled once it was seen.
 - Cover the `short_version` fix (#42) on both sides: the collector tests compare the
   label with `server_version_num` and `server_version` of the live server, and a
   dashboard test applies the Version panel's own `label_replace` pattern to old

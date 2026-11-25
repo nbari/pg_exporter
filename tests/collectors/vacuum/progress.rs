@@ -2,7 +2,9 @@ use super::super::common;
 use anyhow::{Result, anyhow};
 use pg_exporter::collectors::{Collector, vacuum::progress::VacuumProgressCollector};
 use prometheus::Registry;
+use sqlx::{PgPool, postgres::PgQueryResult};
 use std::time::{Duration, Instant};
+use tokio::task::JoinHandle;
 
 #[tokio::test]
 async fn test_vacuum_progress_collector_registers_without_error() -> Result<()> {
@@ -309,6 +311,30 @@ async fn test_vacuum_progress_collector_captures_actual_vacuum() -> Result<()> {
     Ok(())
 }
 
+/// Runs the `VACUUM` statement `vacuum_sql` slowed down enough to be observed, and
+/// returns its backend PID so the caller can cancel it.
+///
+/// The throttle is a session setting, so it and the `VACUUM` must share one connection.
+/// Run through the pool, each statement may land on a different backend: the `VACUUM`
+/// is then unthrottled, and a test only passes when it catches a short vacuum in flight.
+async fn start_throttled_vacuum(
+    pool: &PgPool,
+    vacuum_sql: &'static str,
+) -> Result<(i32, JoinHandle<Result<PgQueryResult, sqlx::Error>>)> {
+    let mut conn = pool.acquire().await?;
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *conn)
+        .await?;
+    sqlx::query("SET vacuum_cost_delay = '20ms'")
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("SET vacuum_cost_limit = 1")
+        .execute(&mut *conn)
+        .await?;
+    let task = tokio::spawn(async move { sqlx::query(vacuum_sql).execute(&mut *conn).await });
+    Ok((pid, task))
+}
+
 #[tokio::test]
 async fn test_vacuum_progress_resolves_table_name_in_other_database() -> Result<()> {
     let test_db = common::IsolatedTestDatabase::new("vacuum_progress").await?;
@@ -335,19 +361,13 @@ async fn test_vacuum_progress_resolves_table_name_in_other_database() -> Result<
         .execute(test_db.pool())
         .await?;
 
-    let vacuum_pool = test_db.pool().clone();
-    let vacuum_task = tokio::spawn(async move {
-        sqlx::query("SET vacuum_cost_delay = '20ms'")
-            .execute(&vacuum_pool)
-            .await?;
-        sqlx::query("SET vacuum_cost_limit = 1")
-            .execute(&vacuum_pool)
-            .await?;
-        sqlx::query("VACUUM (VERBOSE) public.test_vacuum_progress_cross_db")
-            .execute(&vacuum_pool)
-            .await?;
-        Result::<()>::Ok(())
-    });
+    // Throttled, this VACUUM would run for minutes, so it is cancelled below once the
+    // collector has seen it.
+    let (vacuum_pid, vacuum_task) = start_throttled_vacuum(
+        test_db.pool(),
+        "VACUUM (VERBOSE) public.test_vacuum_progress_cross_db",
+    )
+    .await?;
 
     let pool = common::create_test_pool().await?;
     let collector = VacuumProgressCollector::new();
@@ -405,9 +425,19 @@ async fn test_vacuum_progress_resolves_table_name_in_other_database() -> Result<
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    vacuum_task
+    // Stop the throttled VACUUM. A cancelled statement (57014) is the expected outcome;
+    // any other failure, or a VACUUM that ended on its own before it was seen, is not.
+    sqlx::query("SELECT pg_cancel_backend($1)")
+        .bind(vacuum_pid)
+        .execute(&pool)
+        .await?;
+    let vacuum_outcome = vacuum_task
         .await
-        .map_err(|error| anyhow!("vacuum task failed to join: {error}"))??;
+        .map_err(|error| anyhow!("vacuum task failed to join: {error}"))?;
+    let vacuum_was_cancelled = matches!(
+        &vacuum_outcome,
+        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("57014")
+    );
 
     pool.close().await;
     test_db.cleanup().await?;
@@ -415,6 +445,10 @@ async fn test_vacuum_progress_resolves_table_name_in_other_database() -> Result<
     assert!(
         resolved,
         "expected active vacuum metric for {dbname}:{table_label}; observed labels: {observed_labels:?}"
+    );
+    assert!(
+        vacuum_was_cancelled,
+        "the throttled VACUUM should still have been running when it was cancelled, got: {vacuum_outcome:?}"
     );
 
     Ok(())
