@@ -106,7 +106,7 @@ depends = ""
 maintainer-scripts = "contrib/debian"
 
 [build-dependencies]
-built = { version = "0.8.1", features = ["git2"] }
+built = { version = "0.9.0", features = ["git2"] }
 
 [profile.release]
 lto = "fat"
