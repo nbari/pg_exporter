@@ -111,9 +111,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (the new `prebuilt` stage of the `Containerfile`) instead of being compiled a
     second time under emulation. Building the `Containerfile` yourself is unchanged.
   - The crate is published with crates.io Trusted Publishing instead of a stored token.
-- CI now also builds the `.deb` and `.rpm`, builds and runs the container image, and
-  runs `cargo package` and a publish dry run on every push, and reports one aggregate
-  `CI OK` check.
+- CI now also builds the aarch64 binary, the `.deb` and `.rpm` and the two-platform
+  container image (which it runs), and runs `cargo package` and a publish dry run on
+  every push. It reports one aggregate `CI OK` check.
+- Every GitHub Action is pinned to a commit and the Rust toolchain is installed with
+  rustup directly instead of a third-party action. Dependabot proposes action, crate
+  and Dev Container updates as pull requests into `sandbox`.
 
 ### Tests
 

@@ -22,9 +22,10 @@ the whole release is one workflow, [`release.yml`](.github/workflows/release.yml
 ## Release contract
 
 1. **Exact commit.** The release builds the commit `develop` points at, and the guard
-   refuses it unless the latest completed `CI OK` check on that exact SHA succeeded. `CI OK` covers
-   formatting, Clippy, the test suite on every supported PostgreSQL major, both feature
-   builds, the Linux packages, the container image and the crate.
+   refuses it unless the latest completed `CI OK` check on that exact SHA succeeded.
+   `CI OK` covers formatting, Clippy, the test suite on every supported PostgreSQL major,
+   both feature builds, both architectures, the Linux packages, the container image and
+   the crate.
 2. **Tag last.** The `X.Y.Z` tag is created by publishing the GitHub release, after every
    build succeeded. There is never a tag to delete or move.
 3. **Versions only go up.** The version must be untagged and above the latest release.
@@ -141,10 +142,15 @@ Release workflow (workflow_dispatch on develop)
                 only when this is the highest release of that line
 ```
 
-Test & Build runs the same local actions on every push: the packages are built, the
-`prebuilt` image is built and run, and the crate goes through `cargo package` and a
-publish dry run. A break in any of them fails `CI OK` on the commit, before a release can
-start.
+Test & Build runs the same local actions on every push, on the same two runners: both
+binaries are built and run, the packages and archives are made, the two-platform
+`prebuilt` image is built (not pushed) and run, and the crate goes through `cargo package`
+and a publish dry run. A break in any of them fails `CI OK` on the commit, before a
+release can start. What only a release does is publish: push the image, attest, create
+the GitHub release, upload to crates.io and move the image tags.
+
+Every action in the workflows is pinned to a commit. [Dependabot](.github/dependabot.yml)
+proposes the updates as pull requests into `sandbox`.
 
 ## Settings
 

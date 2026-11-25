@@ -120,8 +120,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     needs: guard
-    env:
-      VERSION: ${{ needs.guard.outputs.version }}
     strategy:
       matrix:
         include:
@@ -151,17 +149,11 @@ jobs:
           package: ${{ steps.build.outputs.name }}
 
       - name: Package the archive
-        shell: bash
-        env:
-          PACKAGE: ${{ steps.build.outputs.name }}
-          TARGET: ${{ matrix.target }}
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          dirname="${PACKAGE}-${VERSION}-${TARGET}"
-          mkdir "${dirname}"
-          cp "target/${TARGET}/release/${PACKAGE}" "${dirname}/"
-          tar -czf "dist/${dirname}.tar.gz" "${dirname}"
+        uses: ./.github/actions/archive
+        with:
+          target: ${{ matrix.target }}
+          package: ${{ steps.build.outputs.name }}
+          version: ${{ needs.guard.outputs.version }}
 
       - name: Upload the release files
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -236,17 +228,10 @@ jobs:
 
       # Stage <platform>/<binary>, the layout the `prebuilt` stage copies from.
       - name: Stage the image build context
-        shell: bash
-        run: |
-          set -euo pipefail
-          for pair in amd64:x86_64 arm64:aarch64; do
-            platform="linux/${pair%%:*}"
-            target="${pair#*:}-unknown-linux-musl"
-            mkdir -p "image-context/${platform}"
-            tar -xzf "artifacts/${PACKAGE}-${VERSION}-${target}.tar.gz" \
-              --strip-components=1 -C "image-context/${platform}"
-            test -x "image-context/${platform}/${PACKAGE}"
-          done
+        uses: ./.github/actions/image-context
+        with:
+          package: ${{ needs.guard.outputs.package }}
+          version: ${{ needs.guard.outputs.version }}
 
       # BuildKit takes SOURCE_DATE_EPOCH as the image creation time, so rebuilding the
       # commit yields the same image timestamps.

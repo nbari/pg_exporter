@@ -1,0 +1,43 @@
+name: Image build context
+description: >-
+  Unpack the x86_64 and aarch64 release archives into <platform>/<binary>, the layout the
+  `prebuilt` stage of the Containerfile copies from. CI and the release both call it, so
+  the image a release pushes is staged exactly as the one CI built.
+inputs:
+  package:
+    description: Package (binary) name.
+    required: true
+  version:
+    description: Package version.
+    required: true
+  archives:
+    description: Directory holding the two .tar.gz archives.
+    required: false
+    default: artifacts
+  out:
+    description: Directory that becomes the build context.
+    required: false
+    default: image-context
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        PACKAGE: ${{ inputs.package }}
+        VERSION: ${{ inputs.version }}
+        ARCHIVES: ${{ inputs.archives }}
+        OUT: ${{ inputs.out }}
+      run: |
+        set -euo pipefail
+        for pair in amd64:x86_64 arm64:aarch64; do
+          platform="linux/${pair%%:*}"
+          target="${pair#*:}-unknown-linux-musl"
+          mkdir -p "${OUT}/${platform}"
+          tar -xzf "${ARCHIVES}/${PACKAGE}-${VERSION}-${target}.tar.gz" \
+            --strip-components=1 -C "${OUT}/${platform}"
+          if [[ ! -x "${OUT}/${platform}/${PACKAGE}" ]]; then
+            echo "::error::${OUT}/${platform}/${PACKAGE} is missing or not executable."
+            exit 1
+          fi
+        done
+        find "${OUT}" -type f -exec ls -al {} +

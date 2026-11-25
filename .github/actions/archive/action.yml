@@ -1,0 +1,38 @@
+name: Release archive
+description: >-
+  Pack an already built release binary as <package>-<version>-<target>.tar.gz, the
+  archive a release publishes and the container image is made from. CI and the release
+  both call it, so the layout the image step unpacks is tested on every push.
+inputs:
+  target:
+    description: Rust target the binary was built for.
+    required: true
+  package:
+    description: Package (binary) name.
+    required: true
+  version:
+    description: Package version.
+    required: true
+  out:
+    description: Directory that receives the archive.
+    required: false
+    default: dist
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+        PACKAGE: ${{ inputs.package }}
+        VERSION: ${{ inputs.version }}
+        OUT: ${{ inputs.out }}
+      run: |
+        set -euo pipefail
+        mkdir -p "${OUT}"
+        dirname="${PACKAGE}-${VERSION}-${TARGET}"
+        rm -rf "${dirname}"
+        mkdir "${dirname}"
+        cp "target/${TARGET}/release/${PACKAGE}" "${dirname}/"
+        tar -czf "${OUT}/${dirname}.tar.gz" "${dirname}"
+        rm -rf "${dirname}"
+        ls -al "${OUT}/${dirname}.tar.gz"
