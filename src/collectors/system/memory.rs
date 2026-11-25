@@ -18,13 +18,13 @@
 //! reclaimable memory; there, prefer `used`/`free` and treat the `available`
 //! series as a conservative floor.
 
-use crate::collectors::{Collected, Collector, blocking};
+use crate::collectors::{Collected, Collector, blocking, host_system::LazySystem};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{IntGauge, Opts, Registry};
 use sqlx::PgPool;
 use std::sync::{Arc, Mutex};
-use sysinfo::{MemoryRefreshKind, System};
+use sysinfo::MemoryRefreshKind;
 use tracing::{debug, instrument, warn};
 
 /// Converts a `u64` byte count into the `i64` a Prometheus `IntGauge` stores,
@@ -53,7 +53,7 @@ pub struct MemoryCollector {
     swap_total: IntGauge,
     swap_used: IntGauge,
     swap_free: IntGauge,
-    system: Arc<Mutex<System>>,
+    system: Arc<Mutex<LazySystem>>,
     /// Caps blocking OS sampling at one submitted task across overlapping scrapes.
     sample_slot: Arc<tokio::sync::Mutex<()>>,
 }
@@ -117,10 +117,10 @@ impl MemoryCollector {
         ))
         .expect("pg_system_swap_free_bytes");
 
-        // System::new() starts empty; only memory is ever refreshed, so no
-        // process/CPU state is cached (avoiding the /proc FD growth that full
-        // process scans can cause on Linux).
-        let system = Arc::new(Mutex::new(System::new()));
+        // The handle is created on first use and starts empty; only memory is ever
+        // refreshed, so no process/CPU state is cached (avoiding the /proc FD growth
+        // that full process scans can cause on Linux).
+        let system = Arc::new(Mutex::new(LazySystem::new()));
 
         Self {
             total,
@@ -136,12 +136,16 @@ impl MemoryCollector {
     }
 
     fn collect_stats(&self) {
-        let mut system = match self.system.lock() {
+        let mut guard = match self.system.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
                 warn!("system memory mutex was poisoned, recovering");
                 poisoned.into_inner()
             }
+        };
+        // Without a handle there is nothing to read; the gauges keep their last values.
+        let Some(system) = guard.get("system.memory") else {
+            return;
         };
 
         system.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram().with_swap());

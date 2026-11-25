@@ -370,11 +370,19 @@ impl CpuCollector {
             .set(i64::try_from(physical).unwrap_or(i64::MAX));
     }
 
+    /// Publishes the load averages. When they cannot be read the gauges keep their last
+    /// values; a platform without load averages says so and is not worth a warning per
+    /// scrape.
     fn update_load(&self) {
-        let load = System::load_average();
-        self.load1.set(load.one);
-        self.load5.set(load.five);
-        self.load15.set(load.fifteen);
+        match System::load_average() {
+            Ok(load) => {
+                self.load1.set(load.one);
+                self.load5.set(load.five);
+                self.load15.set(load.fifteen);
+            }
+            Err(sysinfo::Error::Unsupported) => {}
+            Err(error) => warn!(error = %error, "failed to read host load average"),
+        }
     }
 
     /// Applies a fresh per-core sample against the previous raw values.

@@ -50,7 +50,7 @@ use std::sync::{
 use tracing::{debug, instrument, warn};
 
 #[cfg(target_os = "freebsd")]
-use sysinfo::System;
+use crate::collectors::host_system::LazySystem;
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use super::cpu::ticks_to_seconds;
@@ -302,15 +302,19 @@ fn sample_processes(prefix: &str, source: ProcessMemorySource) -> Vec<ProcSample
 /// Samples every `postgres*` process on FreeBSD via `sysinfo`. There is no cheap
 /// PSS, so memory is RSS (`Process::memory`), which over-counts shared memory.
 #[cfg(target_os = "freebsd")]
-fn sample_processes(system: &Mutex<System>, prefix: &str) -> Vec<ProcSample> {
+fn sample_processes(system: &Mutex<LazySystem>, prefix: &str) -> Vec<ProcSample> {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
 
-    let mut system = match system.lock() {
+    let mut guard = match system.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
             warn!("system process mutex was poisoned, recovering");
             poisoned.into_inner()
         }
+    };
+    // Without a handle no process can be sampled; the group is reported as empty.
+    let Some(system) = guard.get("system.process") else {
+        return Vec::new();
     };
 
     system.refresh_processes_specifics(
@@ -369,7 +373,7 @@ pub struct ProcessGroupCollector {
     /// Persistent `sysinfo` state for FreeBSD sampling (unused on Linux, which
     /// reads `/proc` directly).
     #[cfg(target_os = "freebsd")]
-    system: Arc<Mutex<System>>,
+    system: Arc<Mutex<LazySystem>>,
     /// Ensures the "unsupported platform" warning is logged at most once.
     unsupported_warned: Arc<AtomicBool>,
 }
@@ -441,7 +445,7 @@ impl ProcessGroupCollector {
             prev_cpu: Arc::new(Mutex::new(HashMap::new())),
             sample_slot: Arc::new(tokio::sync::Mutex::new(())),
             #[cfg(target_os = "freebsd")]
-            system: Arc::new(Mutex::new(System::new())),
+            system: Arc::new(Mutex::new(LazySystem::new())),
             unsupported_warned: Arc::new(AtomicBool::new(false)),
         }
     }

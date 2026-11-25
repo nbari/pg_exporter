@@ -1,11 +1,11 @@
-use crate::collectors::{Collected, Collector, blocking};
+use crate::collectors::{Collected, Collector, blocking, host_system::LazySystem};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{Gauge, IntGauge, Opts, Registry};
 use sqlx::PgPool;
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate};
 use tracing::{debug, instrument, warn};
 
 /// Monitors the `pg_exporter` process itself
@@ -52,7 +52,7 @@ pub struct ProcessCollector {
 
 /// Internal `state` for CPU tracking
 struct SystemState {
-    system: System,
+    system: LazySystem,
     last_refresh: Option<Instant>,
 }
 
@@ -107,10 +107,10 @@ impl ProcessCollector {
         ))
         .expect("pg_exporter_process_start_time_seconds");
 
-        // Do not pre-load all processes. On Linux, sysinfo keeps /proc/*/stat
-        // file descriptors open for indexed processes, so using `new_all` here
-        // can permanently inflate exporter FD usage.
-        let system = System::new();
+        // The handle starts empty and is created on first use. Do not pre-load all
+        // processes: on Linux, sysinfo keeps /proc/*/stat file descriptors open for
+        // indexed processes, so `new_all` would permanently inflate exporter FD usage.
+        let system = LazySystem::new();
         let num_cpus = std::thread::available_parallelism()
             .map_or(1, std::num::NonZeroUsize::get);
 
@@ -145,12 +145,17 @@ impl ProcessCollector {
     fn collect_stats(&self) {
         let now = Instant::now();
 
-        let mut state = match self.system.lock() {
+        let mut guard = match self.system.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
                 warn!("System mutex was poisoned, recovering");
                 poisoned.into_inner()
             }
+        };
+        let state = &mut *guard;
+        // Without a handle nothing can be sampled; every gauge keeps its last value.
+        let Some(system) = state.system.get("metrics.process") else {
+            return;
         };
 
         // Check if enough time has passed since last refresh
@@ -161,7 +166,7 @@ impl ProcessCollector {
 
         // Audit note, applying to every gauge set in this function: when a lookup fails, the
         // corresponding gauge keeps its previous value rather than being cleared. That happens
-        // if `state.system.process(self.pid)` returns None in either branch below, and if the
+        // if `system.process(self.pid)` returns None in either branch below, and if the
         // `/proc/<pid>/fd` read in the refresh path below fails. Unlike an ordinary NULL from
         // PostgreSQL, failing to read our *own* process is a resilience question rather than
         // data absence, and keeping the last known RSS / fd count is arguably better than
@@ -169,7 +174,7 @@ impl ProcessCollector {
         // alerting where a stale value would mislead.
         if should_wait {
             // Not enough time passed, skip CPU update but collect memory.
-            if let Some(process) = state.system.process(self.pid) {
+            if let Some(process) = system.process(self.pid) {
                 let rss = process.memory();
                 let vsz = process.virtual_memory();
 
@@ -183,7 +188,7 @@ impl ProcessCollector {
 
         // Refresh only the exporter process. This avoids caching many `/proc/*/stat`
         // file descriptors for unrelated PIDs on Linux.
-        state.system.refresh_processes_specifics(
+        system.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[self.pid]),
             true,
             ProcessRefreshKind::nothing()
@@ -193,7 +198,7 @@ impl ProcessCollector {
         );
         state.last_refresh = Some(now);
 
-        if let Some(process) = state.system.process(self.pid) {
+        if let Some(process) = system.process(self.pid) {
             // CPU usage - matches ps %cpu
             // Note: sysinfo's cpu_usage() already returns percentage like ps
             // (can exceed 100% on multi-core if using multiple cores)
@@ -368,13 +373,18 @@ mod tests {
         let collector = ProcessCollector::new();
         collector.collect_stats();
 
-        let state = match collector.system.lock() {
+        let mut state = match collector.system.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
+        let system = state.system.get("test");
+        assert!(system.is_some(), "collect_stats created the handle");
+        let Some(system) = system else {
+            return;
+        };
 
-        let process_count = state.system.processes().len();
-        assert!(state.system.process(collector.pid).is_some());
+        let process_count = system.processes().len();
+        assert!(system.process(collector.pid).is_some());
         assert!(
             process_count <= 8,
             "expected a small process cache, got {process_count}"

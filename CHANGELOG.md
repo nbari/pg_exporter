@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Update `sysinfo` to 0.40.4, which the `system` collector and the exporter's own
+  process metrics are built on. That release fixes cgroup memory retrieval on Linux and
+  free and available memory on FreeBSD. It also makes creating its system handle and
+  reading the load average fallible, so the collectors now create the handle on first
+  use and handle both failures instead of assuming success:
+  - When the load average cannot be read, `pg_system_load1`, `pg_system_load5` and
+    `pg_system_load15` keep their last values and a warning is logged, instead of
+    reporting 0.
+  - On a platform `sysinfo` does not support, the affected metrics are not updated and
+    one warning says so.
+
+  Metric names, labels and values on Linux are unchanged.
 - Update `built` to 0.9.0. It only runs at build time and still records the commit
   hash that `--version` and `/health` report.
 - Remove the `nix` development dependency; nothing used it.

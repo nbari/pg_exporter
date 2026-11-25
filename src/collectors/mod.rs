@@ -119,6 +119,7 @@ pub(crate) const NO_LABELS: [&str; 0] = [];
 
 /// Runs collectors' blocking OS reads on Tokio's blocking pool (issue #35).
 pub(crate) mod blocking;
+pub(crate) mod host_system;
 
 pub(crate) mod permit_metrics;
 
