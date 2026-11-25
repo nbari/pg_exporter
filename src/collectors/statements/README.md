@@ -160,8 +160,8 @@ A statement whose text has not been resolved yet is labelled `<unknown>`; a scra
 after the background task finishes normally fills it in. A statement first seen
 just after a lookup may remain unresolved until the next 900-second window. Numeric
 statement metrics still refresh on every scrape. PostgreSQL sometimes has no text
-at all for an entry — utility statements, or texts dropped by `pg_stat_statements`
-garbage collection. Those results are never cached, so the label stays `<unknown>`
+at all for an entry, for example after `pg_stat_statements` garbage collection dropped
+it. Those results are never cached, so the label stays `<unknown>`
 and the lookup is retried later instead of pinning an empty label forever. Setting
 the flag to `0` disables text lookups entirely — `query_short` then stays `<unknown>`
 and SQL must be looked up by `queryid` directly in `pg_stat_statements`.
@@ -232,8 +232,43 @@ SELECT * FROM users WHERE id = $1;
 ### Utility Statements
 
 Utility statements (VACUUM, ANALYZE, CREATE INDEX, etc.) are tracked like any other
-statement, but PostgreSQL does not always keep their text. When it does not, the
-`query_short` label stays `<unknown>`.
+statement when `pg_stat_statements.track_utility` is on (the default), and their text is
+exported in `query_short` like any other.
+
+### Secrets in `query_short`
+
+PostgreSQL replaces constants with `$1`, `$2`, ... in ordinary queries, but not in every
+utility statement. A statement such as
+
+```sql
+CREATE ROLE app LOGIN PASSWORD 'correct horse battery staple';
+```
+
+is stored verbatim, and if it ranks in the exported top-N its first 80 characters become
+the `query_short` label:
+
+```text
+postgres_pg_stat_statements_calls_total{...,query_short="CREATE ROLE app LOGIN PASSWORD 'correct horse battery staple'",...} 1
+```
+
+PostgreSQL shows that text only to superusers and members of `pg_read_all_stats`. The
+exporter republishes it to everyone who can reach `/metrics`, and Prometheus keeps it for
+its retention period, past a `pg_stat_statements_reset()` and past the password's own
+lifetime. Other statements that carry credentials, such as `ALTER ROLE ... PASSWORD`,
+`CREATE SUBSCRIPTION ... CONNECTION`, or `CREATE USER MAPPING ... OPTIONS (password ...)`,
+can be exposed the same way when the secret falls within the first 80 characters.
+
+This needs a secret-bearing statement to rank in the top-N by total execution time, which
+is unlikely on a busy server and realistic on a quiet one or shortly after a statistics
+reset. To rule it out, use any of:
+
+- `--statements.query-text-refresh=0`: the exporter never reads query texts;
+  `query_short` stays `<unknown>` and statements are identified by `queryid`.
+- `pg_stat_statements.track_utility = off` on the server: utility statements are not
+  recorded at all, so their statistics are lost too.
+- Set passwords with psql's `\password`, which sends an already hashed verifier.
+
+In all cases restrict who can reach `/metrics` and the Prometheus server.
 
 ### Statement Selection and Cardinality
 
@@ -351,8 +386,8 @@ yum install postgresql-contrib
 - On the scrape where a statement first enters the top-N. The first lookup starts
   immediately in the background; later attempts are limited by
   `--statements.query-text-refresh` (see [How `query_short` is resolved](#how-query_short-is-resolved)).
-- Permanently, when PostgreSQL has no text for the entry — utility statements, or
-  entries whose text was dropped by `pg_stat_statements` garbage collection.
+- Permanently, when PostgreSQL has no text for the entry, for example because it was
+  dropped by `pg_stat_statements` garbage collection.
 
 Missing texts are never cached, so a statement that gains a text later is picked up on
 a subsequent lookup. Setting `--statements.query-text-refresh=0` disables the lookup

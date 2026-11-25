@@ -114,7 +114,11 @@ The exporter does not need `SUPERUSER`, `REPLICATION`, `BYPASSRLS`, `pg_read_all
 `pg_signal_backend`, server-file roles, or `SELECT` on application tables. `pg_monitor`
 includes `pg_read_all_settings`, `pg_read_all_stats`, and `pg_stat_scan_tables`; it can expose
 sensitive operational information such as other users' query text, so reserve the login for
-the exporter.
+the exporter. With `--collector.statements` that text is also exported as a metric label,
+which can republish a password from a statement such as `CREATE ROLE ... PASSWORD '...'`;
+see [Secrets in `query_short`](src/collectors/statements/README.md#secrets-in-query_short).
+`--collector.sequences` is the one collector that needs an extra grant; see its
+[required privileges](src/collectors/sequences/README.md#required-privileges).
 
 Verify the effective role configuration:
 

@@ -76,6 +76,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and hyper 1.13.0.
 - Use `Option::map_or_default` where Rust 1.100 Clippy now requires it.
 
+### Documentation
+
+- Statements: document that `query_short` can republish a secret from a utility
+  statement such as `CREATE ROLE ... PASSWORD '...'`, and how to rule it out. Correct
+  the claim that utility statements have no query text.
+- Sequences: document that the collector needs `SELECT` on the sequences it watches
+  (`pg_monitor` alone exports nothing), and that it holds one lock per sequence, which
+  can exhaust the lock table in databases with many thousands of sequences.
+- Database: document that `--exclude-databases` also narrows the cluster-wide connection
+  totals of the `activity` collector and drops the shared-objects row of
+  `pg_stat_database_*`.
+
 ## [0.22.1] - 2026-10-21
 
 ### Fixed

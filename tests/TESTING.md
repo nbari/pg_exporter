@@ -205,6 +205,14 @@ PG_EXPORTER_DSN=postgresql://postgres:postgres@localhost:55416/postgres cargo te
 check. It also verifies JSON validity, the `job`/`instance`/`database` template
 variables, and job-filter coverage, which the Rust tests do not.
 
+## Server Version Refresh Regression
+
+`tests/server_version_refresh.rs` also runs in its own process. It seeds the process-wide
+server-version cache with another major release's version, as an exporter holds after the
+server behind it was upgraded, and requires a scrape with `stat_io` enabled to succeed and
+to replace the cached value. Seeding a wrong version would race the version-gated
+collectors of any test sharing the process.
+
 ## Index and Permit Timing Regressions
 
 `tests/index_scrape.rs` runs in its own process so configuration in process-wide cells does

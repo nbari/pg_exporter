@@ -25,6 +25,15 @@ References:
 Notes:
 - Exclusions are applied server-side in a single query (efficient).
 - The variable is read at startup; restart the exporter to apply changes.
+- The list is global: the `activity` collector applies it as well, including to the
+  cluster-wide connection totals. `pg_stat_activity_used_connections`,
+  `pg_stat_activity_utilization_ratio`, and `pg_stat_activity_available_connections`
+  count only sessions in non-excluded databases but compare them with the server-wide
+  `max_connections`. Excluding a database that holds many connections makes the server
+  look emptier than it is; with 100 `max_connections`, 75 sessions in an excluded
+  database and 20 elsewhere, utilization reads 0.20.
+- With any exclusion set, `pg_stat_database_*` also omits the shared-objects row
+  (`datid="0"`, `datname="[unknown]"`).
 
 ## Version-gated `pg_stat_database` metrics
 
