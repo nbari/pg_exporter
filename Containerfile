@@ -1,3 +1,42 @@
+# Two ways to build the same image:
+#
+# - `runtime` (the default): compiles the exporter from the sources in the build
+#   context. This is what `podman build -f Containerfile .` gives a developer.
+# - `prebuilt`: copies a binary that was already built, staged in the build context
+#   as `<platform>/pg_exporter` (for example `linux/amd64/pg_exporter`). CI and the
+#   release use it, so the published image holds exactly the binary that is in the
+#   release archives, and no compiler runs under emulation.
+#
+#   podman build -f Containerfile --target prebuilt --platform linux/amd64 <context>
+
+# Runtime base - using distroless for minimal attack surface
+# Distroless images contain only your application and runtime dependencies
+# No shell, package manager, or other unnecessary tools
+FROM gcr.io/distroless/static-debian12:nonroot AS base
+
+# Default environment variables
+# Note: Override PG_EXPORTER_DSN to point to your actual PostgreSQL instance
+ENV PG_EXPORTER_PORT="9432"
+
+# Optional TLS/SSL configuration (uncomment and set as needed):
+# ENV PG_EXPORTER_TLS_CERT="/app/certs/cert.pem"
+# ENV PG_EXPORTER_TLS_KEY="/app/certs/key.pem"
+# ENV PG_EXPORTER_LISTEN="0.0.0.0"
+
+# Optional: Exclude specific databases from monitoring
+# ENV PG_EXPORTER_EXCLUDE_DATABASES="template0,template1"
+
+# Default port (can be overridden with PG_EXPORTER_PORT)
+EXPOSE 9432
+
+# Note: No built-in HEALTHCHECK in distroless images (no shell/wget/curl)
+# Use external health checks instead:
+# - Kubernetes: livenessProbe/readinessProbe with httpGet on /health
+# - Docker Compose: healthcheck with wget/curl from host
+# - Prometheus: Scraping /metrics already monitors availability
+
+ENTRYPOINT ["/usr/local/bin/pg_exporter"]
+
 # Build stage
 FROM rust:1-alpine AS builder
 
@@ -42,33 +81,11 @@ RUN . /tmp/rust_target.env && \
     mkdir -p /build/output && \
     cp "/build/target/$RUST_TARGET/release/pg_exporter" /build/output/
 
-# Runtime stage - using distroless for minimal attack surface
-# Distroless images contain only your application and runtime dependencies
-# No shell, package manager, or other unnecessary tools
-FROM gcr.io/distroless/static-debian12:nonroot
+# Image from an already built binary (CI and releases)
+FROM base AS prebuilt
+ARG TARGETPLATFORM
+COPY --chmod=755 ${TARGETPLATFORM}/pg_exporter /usr/local/bin/pg_exporter
 
-# Copy binary from builder
+# Image compiled from the sources in the context (the default)
+FROM base AS runtime
 COPY --from=builder --chmod=755 /build/output/pg_exporter /usr/local/bin/pg_exporter
-
-# Default environment variables
-# Note: Override PG_EXPORTER_DSN to point to your actual PostgreSQL instance
-ENV PG_EXPORTER_PORT="9432"
-
-# Optional TLS/SSL configuration (uncomment and set as needed):
-# ENV PG_EXPORTER_TLS_CERT="/app/certs/cert.pem"
-# ENV PG_EXPORTER_TLS_KEY="/app/certs/key.pem"
-# ENV PG_EXPORTER_LISTEN="0.0.0.0"
-
-# Optional: Exclude specific databases from monitoring
-# ENV PG_EXPORTER_EXCLUDE_DATABASES="template0,template1"
-
-# Default port (can be overridden with PG_EXPORTER_PORT)
-EXPOSE 9432
-
-# Note: No built-in HEALTHCHECK in distroless images (no shell/wget/curl)
-# Use external health checks instead:
-# - Kubernetes: livenessProbe/readinessProbe with httpGet on /health
-# - Docker Compose: healthcheck with wget/curl from host
-# - Prometheus: Scraping /metrics already monitors availability
-
-ENTRYPOINT ["/usr/local/bin/pg_exporter"]

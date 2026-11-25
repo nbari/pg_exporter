@@ -1,0 +1,59 @@
+name: Release is latest
+description: >-
+  Whether a tag is the highest X.Y.Z release tag right now: overall, within the tag's X.Y
+  line and within its X line. The steps that move a floating image tag (`latest`, `X.Y`,
+  `X`) call it immediately before they act, so a re-run job of an older release never
+  rolls a tag back. It fails when GitHub cannot be asked, instead of treating that as
+  "no releases".
+inputs:
+  tag:
+    description: The X.Y.Z tag being published.
+    required: true
+  token:
+    description: A token that can read the repository.
+    required: true
+outputs:
+  latest:
+    description: "'true' when the tag is the highest release, otherwise 'false'."
+    value: ${{ steps.check.outputs.latest }}
+  latest_minor:
+    description: "'true' when the tag is the highest release of its X.Y line."
+    value: ${{ steps.check.outputs.latest_minor }}
+  latest_major:
+    description: "'true' when the tag is the highest release of its X line."
+    value: ${{ steps.check.outputs.latest_major }}
+  highest:
+    description: The highest release (empty when there is none).
+    value: ${{ steps.check.outputs.highest }}
+runs:
+  using: composite
+  steps:
+    - id: check
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        TAG: ${{ inputs.tag }}
+      run: |
+        set -euo pipefail
+        if [[ ! "${TAG}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "::error::'${TAG}' is not an X.Y.Z release tag."
+          exit 1
+        fi
+        # A plain assignment, so a failing listing fails the step instead of looking
+        # like "no releases".
+        tags="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/tags" --jq '.[].name')"
+        sorted="$(grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' <<<"${tags}" | sort -rV || true)"
+        highest="$(head -n 1 <<<"${sorted}")"
+        # Anchored prefixes: "1." must not match "11.0.0", nor "1.2." match "1.20.0".
+        major="${TAG%%.*}"
+        minor="${TAG%.*}"
+        highest_minor="$(grep -E "^${minor//./\\.}\\." <<<"${sorted}" | head -n 1 || true)"
+        highest_major="$(grep -E "^${major}\\." <<<"${sorted}" | head -n 1 || true)"
+        is() { [[ "$1" == "${TAG}" ]] && echo true || echo false; }
+        {
+          echo "latest=$(is "${highest}")"
+          echo "latest_minor=$(is "${highest_minor}")"
+          echo "latest_major=$(is "${highest_major}")"
+          echo "highest=${highest}"
+        } >> "$GITHUB_OUTPUT"
+        echo "Highest release: ${highest:-none}; of ${minor}.x: ${highest_minor:-none}; of ${major}.x: ${highest_major:-none}."

@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 # Harden against spurious crates.io/curl network failures on hosted runners.
 env:
@@ -25,58 +25,106 @@ jobs:
     uses: ./.github/workflows/coverage.yml
     secrets: inherit
 
+  # The release builds, packages and containerizes the default binary the same way
+  # (the same local actions and the same Containerfile stage), so a broken package
+  # definition or image fails here, on the commit, instead of during a release.
   build:
-    name: Build
-    runs-on: ${{ matrix.os }}
+    name: Build (${{ matrix.feature-set }})
+    runs-on: ubuntu-latest
     needs: test
+    timeout-minutes: 60
 
     strategy:
       matrix:
         feature-set: [default, telemetry]
-        include:
-          - build: linux
-            os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
+
+    env:
+      TARGET: x86_64-unknown-linux-musl
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
-      - name: Branch name
-        run: echo "${GITHUB_REF##*/}"
+      - name: Build
+        id: build
+        uses: ./.github/actions/build-binary
+        with:
+          target: ${{ env.TARGET }}
+          features: ${{ matrix.feature-set == 'telemetry' && 'telemetry' || '' }}
 
-      - name: Get the release version from the tag
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+      - name: Package RPM and DEB
+        if: matrix.feature-set == 'default'
+        uses: ./.github/actions/linux-packages
+        with:
+          target: ${{ env.TARGET }}
+          package: ${{ steps.build.outputs.name }}
+
+      - name: Build the container image from the binary
+        if: matrix.feature-set == 'default'
+        shell: bash
+        env:
+          PACKAGE: ${{ steps.build.outputs.name }}
+          VERSION: ${{ steps.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p image-context/linux/amd64
+          cp "target/${TARGET}/release/${PACKAGE}" image-context/linux/amd64/
+          docker buildx build --file Containerfile --target prebuilt \
+            --platform linux/amd64 --load --tag "${PACKAGE}:ci" image-context
+          out="$(docker run --rm "${PACKAGE}:ci" --version)"
+          echo "${out}"
+          if [[ "${out}" != *"${VERSION}"* ]]; then
+            echo "::error::The image does not report version ${VERSION}."
+            exit 1
+          fi
+
+  # The same crate checks the release runs, so a package crates.io would refuse (missing
+  # metadata, unpublishable files) fails here, not after the release tag exists.
+  crate:
+    name: Crate
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+        uses: ./.github/actions/rust-toolchain
 
-      - name: Cache Rust dependencies
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-build-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock')
-            }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-build-${{ matrix.target }}-
-            ${{ runner.os }}-cargo-build-
-            ${{ runner.os }}-cargo-
+      - name: Package and verify the crate
+        run: cargo package --locked
 
-      - run: sudo apt -y install musl-dev musl-tools
-        if: matrix.build == 'linux'
+      - name: Check crates.io would accept it
+        run: cargo publish --dry-run --locked
 
-      - name: Build Linux
+  # One aggregate check for branch protection and the release flow: it passes only
+  # when every gating job succeeded, so the required check never depends on job or
+  # matrix names. Coverage is reported, not a gate: an upload to a coverage service
+  # failing must not block a release.
+  ci-ok:
+    name: CI OK
+    if: always()
+    needs:
+      - test
+      - build
+      - crate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every job to have succeeded
+        shell: bash
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
-          cargo build --release --locked --no-default-features --target ${{ matrix.target }}
-        if: matrix.build == 'linux' && matrix.feature-set == 'default'
-
-      - name: Build Linux with telemetry
-        run: cargo build --release --locked --features telemetry --target ${{ matrix.target }}
-        if: matrix.build == 'linux' && matrix.feature-set == 'telemetry'
+          echo "Job results: ${RESULTS}"
+          for result in ${RESULTS}; do
+            if [[ "${result}" != "success" ]]; then
+              echo "::error::A required job finished with '${result}'."
+              exit 1
+            fi
+          done

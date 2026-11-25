@@ -1,0 +1,27 @@
+name: Crate info
+description: Read the package name and version from Cargo.toml.
+outputs:
+  name:
+    description: Package name.
+    value: ${{ steps.read.outputs.name }}
+  version:
+    description: Package version.
+    value: ${{ steps.read.outputs.version }}
+runs:
+  using: composite
+  steps:
+    - id: read
+      shell: bash
+      run: |
+        set -euo pipefail
+        name="$(awk -F'"' '/^name = /{print $2; exit}' Cargo.toml)"
+        version="$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)"
+        if [[ -z "${name}" || -z "${version}" ]]; then
+          echo "::error::Cargo.toml has no package name or version."
+          exit 1
+        fi
+        {
+          echo "name=${name}"
+          echo "version=${version}"
+        } >> "$GITHUB_OUTPUT"
+        echo "Package ${name} ${version}"
