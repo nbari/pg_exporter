@@ -117,8 +117,7 @@ where
             fields: fields.0,
             scope: ctx
                 .event_scope(event)
-                .map(|scope| scope.from_root().map(|span| snapshot(&span)).collect())
-                .unwrap_or_default(),
+                .map_or_default(|scope| scope.from_root().map(|span| snapshot(&span)).collect()),
         });
     }
 }

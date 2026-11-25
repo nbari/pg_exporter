@@ -91,8 +91,7 @@ pub(super) fn init_tracer() -> Result<Tracer> {
 
     let headers = var("OTEL_EXPORTER_OTLP_HEADERS")
         .ok()
-        .map(|s| parse_headers_env(&s))
-        .unwrap_or_default();
+        .map_or_default(|s| parse_headers_env(&s));
 
     // Build gRPC exporter
     let mut builder = opentelemetry_otlp::SpanExporter::builder()

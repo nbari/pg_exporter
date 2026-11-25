@@ -60,14 +60,14 @@ large_stack_arrays = "deny"
 anyhow = "1.0"
 axum = { version = "0.8.9", features = ["tracing"] }
 chrono = "0.4.45"
-clap = { version = "4.6.7", features = ["env"] }
+clap = { version = "4.6.10", features = ["env"] }
 opentelemetry = { version = "0.33.1", optional = true }
 opentelemetry-otlp = { version = "0.33.1", optional = true, default-features = false, features = ["grpc-tonic", "gzip-tonic", "tls-ring", "tls-roots", "trace"] }
 opentelemetry_sdk = { version = "0.33.1", optional = true, features = ["rt-tokio"] }
 secrecy = "0.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sqlx = { version = "0.9.0", default-features = false, features = ["ipnetwork", "postgres", "runtime-tokio", "tls-rustls", "uuid"] }
+sqlx = { version = "0.9.1", default-features = false, features = ["ipnetwork", "postgres", "runtime-tokio", "tls-rustls", "uuid"] }
 tokio = { version = "1.54.1", features = ["full"] }
 tower = "0.5.3"
 tower-http = { version = "0.7.1", features = ["request-id", "set-header", "trace"] }
@@ -75,11 +75,11 @@ tracing = "0.1.44"
 tracing-opentelemetry = { version = "0.34.0", optional = true }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 ulid = "3.0.0"
-url = "2.5.8"
+url = "2.5.9"
 prometheus = "0.14.0"
-regex = "1.13.1"
+regex = "1.13.2"
 futures = "0.3.34"
-tonic = { version = "0.14.6", optional = true, features = ["tls-native-roots"] }
+tonic = { version = "0.14.9", optional = true, features = ["tls-native-roots"] }
 base64 = { version = "0.23.1", optional = true }
 tracing-futures = "0.2.5"
 opentelemetry-http = { version = "0.33.1", optional = true }

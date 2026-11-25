@@ -530,7 +530,7 @@ fn exported_queryids(registry: &Registry) -> Vec<String> {
         .gather()
         .iter()
         .find(|family| family.name() == "postgres_pg_stat_statements_calls_total")
-        .map(|family| {
+        .map_or_default(|family| {
             family
                 .get_metric()
                 .iter()
@@ -543,7 +543,6 @@ fn exported_queryids(registry: &Registry) -> Vec<String> {
                 })
                 .collect()
         })
-        .unwrap_or_default()
 }
 
 /// `pg_stat_statements` is keyed by `(userid, dbid, queryid, toplevel)`, so with

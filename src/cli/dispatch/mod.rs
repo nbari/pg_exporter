@@ -79,12 +79,11 @@ fn init_excluded_databases(matches: &ArgMatches) {
     // Collect values from Clap (supports --exclude-databases a,b and env)
     let excludes: Vec<String> = matches
         .get_many::<String>("exclude-databases")
-        .map(|vals| {
+        .map_or_default(|vals| {
             vals.map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect()
-        })
-        .unwrap_or_default();
+        });
 
     // Set once globally for all collectors
     set_excluded_databases(excludes);

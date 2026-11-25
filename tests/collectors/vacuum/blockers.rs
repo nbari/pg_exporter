@@ -88,8 +88,7 @@ async fn test_vacuum_blockers_idle_holders_are_zero_when_absent() -> Result<()> 
             .get_label()
             .iter()
             .find(|label| label.name() == "holder")
-            .map(prometheus::proto::LabelPair::value)
-            .unwrap_or_default();
+            .map_or_default(prometheus::proto::LabelPair::value);
         let value = common::metric_value_to_i64(metric.get_gauge().value());
         assert!(value >= 0, "holder {holder} age should be non-negative");
 

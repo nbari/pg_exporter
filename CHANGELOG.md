@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.3] - 2026-11-25
+
+### Security
+
+- Refresh dependencies to clear the security audit: libz-sys 1.1.33
+  (RUSTSEC-2026-0418, RUSTSEC-2026-0544), url 2.5.9 (RUSTSEC-2026-0592), and
+  libsqlite3-sys 0.40.0 (RUSTSEC-2026-0459). None was reachable from the shipped
+  binary: libz-sys is a build-time dependency, libsqlite3-sys is only named in the
+  lockfile, and the affected `Url::origin()` is never called.
+
+### Changed
+
+- Update SQLx to 0.9.1, which sets `TCP_NODELAY` on PostgreSQL sockets again. SQLx
+  0.9.0 dropped it, adding a ~40 ms stall to every new TLS connection; the
+  multi-database collectors (`stat`, `index`, `sequences`) open one connection per
+  database, so the cost grew with the database count. A TLS scrape of 50 databases
+  went from about 4.0 s to 0.7 s; plaintext connections were not affected. The same
+  release fixes a TLS close that could wait on the server indefinitely and a pool
+  idle-counter underflow.
+- SQLx 0.9.1 changes three connection behaviours:
+  - The TLS configuration is built once per process instead of once per connection.
+    Rotated `sslrootcert`, `sslcert`, or `sslkey` files are picked up after an
+    exporter restart, no longer on the next connection.
+  - `hostaddr` no longer replaces `host`. With both set, `host` is used for TLS
+    server-name verification and `.pgpass` lookup, and `hostaddr` only for the TCP
+    connection.
+  - `PGHOSTADDR` is applied even when the DSN names a host.
+- Refresh the remaining compatible dependencies, including clap 4.6.10, tonic 0.14.9,
+  and hyper 1.13.0.
+- Use `Option::map_or_default` where Rust 1.100 Clippy now requires it.
+
 ## [0.22.1] - 2026-10-21
 
 ### Fixed
