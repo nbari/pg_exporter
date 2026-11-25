@@ -36,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validation had been disabled together with a recovery pool that was later removed.
   Idle connections are now checked on checkout and replaced within the same acquire,
   at the cost of one extra round trip per checkout.
+- `--collector.statements` no longer fails every scrape when `pg_stat_statements`
+  disappears under a running exporter (`DROP EXTENSION`, or a cut-over to a server
+  where it was never created). The collector cached "installed" without rechecking,
+  so its query failed with `function pg_stat_statements(boolean) does not exist` and
+  the whole scrape returned 503 until restart. It now skips, clears its series, and
+  probes for the extension again after a minute.
 - A table whose reloptions set both `autovacuum_vacuum_threshold` and
   `autovacuum_vacuum_scale_factor` (or the analyze pair) to 0 made the `stat` collector
   query fail with `division by zero`. Every `pg_stat_user_tables_*` series of that

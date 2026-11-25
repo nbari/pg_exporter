@@ -196,6 +196,45 @@ async fn test_pg_statements_collector_with_top_n_configuration() -> Result<()> {
     Ok(())
 }
 
+/// The extension can disappear under a running exporter: `DROP EXTENSION`, or a cut-over
+/// to a server where it was never created. The collector remembers "installed" without
+/// rechecking, so its query then failed with `undefined_function` on every scrape, and a
+/// collector error fails the whole scrape. It must skip and clear its series instead.
+#[tokio::test]
+async fn test_pg_statements_collector_skips_after_the_extension_is_dropped() -> Result<()> {
+    let Some(test_db) = setup_pg_statements_test_db().await? else {
+        println!("pg_stat_statements extension not installed, skipping test");
+        return Ok(());
+    };
+    let pool = test_db.pool();
+
+    // No query-text lookups, so no detached task outlives the test.
+    let collector = PgStatementsCollector::with_config(25, None);
+    let registry = Registry::new();
+    collector.register_metrics(&registry)?;
+
+    sqlx::query("SELECT 1").execute(pool).await?;
+    collector
+        .collect(pool)
+        .await
+        .context("collection with the extension installed failed")?;
+
+    sqlx::query("DROP EXTENSION pg_stat_statements")
+        .execute(pool)
+        .await?;
+
+    let after_drop = collector.collect(pool).await;
+    let exported = exported_queryids(&registry);
+    test_db.cleanup().await?;
+
+    after_drop.context("a dropped extension must be a skip, not a failed scrape")?;
+    assert!(
+        exported.is_empty(),
+        "statement series must not outlive the extension, still exported: {exported:?}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_pg_statements_collector_excludes_own_query() -> Result<()> {
     let Some(test_db) = setup_pg_statements_test_db().await? else {

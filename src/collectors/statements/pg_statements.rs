@@ -1,6 +1,6 @@
 use crate::collectors::{Collected, Collector, i64_to_f64,
     config::DEFAULT_STATEMENTS_QUERY_TEXT_REFRESH,
-    util::{MS_TO_SEC, TEMPLATE0, TEMPLATE1},
+    util::{MS_TO_SEC, QueryFailure, TEMPLATE0, TEMPLATE1, classify_query_error},
 };
 use anyhow::Result;
 use futures::future::BoxFuture;
@@ -1077,11 +1077,30 @@ impl Collector for PgStatementsCollector {
                     self.supports_toplevel(pool).await,
                 );
                 let top_n = i64::try_from(self.top_n).unwrap_or(i64::MAX);
-                let rows: Vec<PgRow> = sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
+                let rows: Vec<PgRow> = match sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
                     .bind(self.self_queryids())
                     .bind(top_n)
                     .fetch_all(pool)
-                    .await?;
+                    .await
+                {
+                    Ok(rows) => rows,
+                    // The extension was installed when last checked and is gone now: it
+                    // was dropped, or the exporter now reaches a server that never had
+                    // it. `Installed` is cached without a recheck, so without this the
+                    // query would fail, and take the whole scrape with it, until the
+                    // exporter restarts. Forget the cached state and skip instead; the
+                    // extension is probed again after `MISSING_EXTENSION_RECHECK_AFTER`.
+                    Err(error) if classify_query_error(&error) == QueryFailure::Absent => {
+                        self.update_extension_state(false);
+                        warn!(
+                            collector = "pg_statements",
+                            error = %error,
+                            "pg_stat_statements is no longer available - skipping collection"
+                        );
+                        return Ok(Collected::Skipped);
+                    }
+                    Err(error) => return Err(error.into()),
+                };
 
                 // A row without a readable queryid cannot be labelled or cached, so it is
                 // dropped rather than collapsed onto a shared placeholder series.
