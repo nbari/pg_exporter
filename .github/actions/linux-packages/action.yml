@@ -71,7 +71,7 @@ runs:
         rpms=("${OUT}"/*.rpm)
         [[ ${#debs[@]} -eq 1 && ${#rpms[@]} -eq 1 ]] || { echo "::error::Expected exactly one .deb and one .rpm in ${OUT}."; exit 1; }
         deb_version="$(dpkg-deb --field "${debs[0]}" Version)"
-        if [[ "${deb_version}" != "${VERSION}"* ]]; then
+        if [[ "${deb_version}" != "${VERSION}" && "${deb_version}" != "${VERSION}-"* ]]; then
           echo "::error::The .deb has version ${deb_version}, expected ${VERSION}."
           exit 1
         fi

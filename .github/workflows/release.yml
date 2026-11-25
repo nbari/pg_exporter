@@ -32,7 +32,6 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      actions: read
       checks: read
     outputs:
       version: ${{ steps.check.outputs.version }}
@@ -89,7 +88,7 @@ jobs:
             echo "::error::${version} is already tagged; bump the version on develop first."
             exit 1
           fi
-          latest="$(git tag --list '[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -n 1)"
+          latest="$(git tag --list '[0-9]*.[0-9]*.[0-9]*' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)"
           if [[ -n "${latest}" && "$(printf '%s\n%s\n' "${latest}" "${version}" | sort -V | tail -n 1)" != "${version}" ]]; then
             echo "::error::${version} is below the latest release ${latest}; bump to a higher version."
             exit 1
@@ -100,11 +99,14 @@ jobs:
           fi
           # `CI OK` is Test & Build's aggregate of every gating job; it must have
           # succeeded on exactly this commit (a non-gating job, such as coverage, failing
-          # does not block the release).
-          passed="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs?check_name=CI%20OK&status=completed" \
-            --jq '[.check_runs[] | select(.conclusion == "success")] | length')"
-          if [[ "${passed}" -lt 1 ]]; then
-            echo "::error::${GITHUB_SHA} has no successful CI OK check; wait for Test & Build to pass on develop."
+          # does not block the release). The commit is tested on the work branch and again
+          # on develop, so there can be several: the most recently completed one decides,
+          # as it does for the protected `main`, and an earlier success never outvotes a
+          # later failure. A run still in progress is not waited for.
+          ci_ok="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs?check_name=CI%20OK&status=completed&per_page=100" \
+            --jq '[.check_runs[]] | sort_by(.completed_at) | last | .conclusion // "missing"')"
+          if [[ "${ci_ok}" != success ]]; then
+            echo "::error::The latest completed CI OK check on ${GITHUB_SHA} is '${ci_ok}'; wait for Test & Build to pass, or re-run its failed jobs."
             exit 1
           fi
           {
@@ -450,11 +452,23 @@ jobs:
           } > "${RUNNER_TEMP}/notes.md"
           cat "${RUNNER_TEMP}/notes.md"
 
+      # GitHub's Latest flag follows the highest version. It is decided here, right before
+      # it is set, because "Re-run failed jobs" keeps the guard's earlier answer: an older
+      # release finished late must not take the flag back from a newer one.
+      - name: Is this the latest release
+        id: latest
+        uses: ./.github/actions/release-is-latest
+        with:
+          tag: ${{ needs.guard.outputs.version }}
+          token: ${{ github.token }}
+
       # Assets go on a draft first: publishing creates the tag at the tested commit, and
       # an immutable release accepts no uploads afterwards. A draft left by a failed run
       # is replaced; a published release is left alone.
       - name: Create the release
         shell: bash
+        env:
+          LATEST: ${{ steps.latest.outputs.latest }}
         run: |
           set -euo pipefail
           if state="$(gh release view "${VERSION}" --json isDraft --jq .isDraft 2>/dev/null)"; then
@@ -469,7 +483,11 @@ jobs:
             --target "${GITHUB_SHA}" \
             --title "${VERSION}" \
             --notes-file "${RUNNER_TEMP}/notes.md"
-          gh release edit "${VERSION}" --draft=false --latest
+          if [[ "${LATEST}" != true && "${LATEST}" != false ]]; then
+            echo "::error::Could not tell whether ${VERSION} is the latest release (got '${LATEST}')."
+            exit 1
+          fi
+          gh release edit "${VERSION}" --draft=false --latest="${LATEST}"
 
       # What a user can download must be exactly what was built, and the tag must sit on the
       # tested commit. This also runs when a re-run finds the release already published.

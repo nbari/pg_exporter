@@ -22,7 +22,7 @@ the whole release is one workflow, [`release.yml`](.github/workflows/release.yml
 ## Release contract
 
 1. **Exact commit.** The release builds the commit `develop` points at, and the guard
-   refuses it unless the `CI OK` check succeeded on that exact SHA. `CI OK` covers
+   refuses it unless the latest completed `CI OK` check on that exact SHA succeeded. `CI OK` covers
    formatting, Clippy, the test suite on every supported PostgreSQL major, both feature
    builds, the Linux packages, the container image and the crate.
 2. **Tag last.** The `X.Y.Z` tag is created by publishing the GitHub release, after every
@@ -67,7 +67,8 @@ the commit changes and CI has to run again.
 The workflow never pushes `main` itself: a protected `main` refuses every update while a
 `CI OK` check of the commit is pending or failing, which is exactly the state of
 `develop`'s own run right after the push. The recipe waits for it and then pushes from the
-operator's machine.
+operator's machine. It asks for `CI OK` itself, not for the whole run: coverage is
+reported, not a gate, so a failed coverage job does not keep `main` back.
 
 ## What a release publishes
 
@@ -108,9 +109,11 @@ resolves Rust again and fails on a version that is already tagged.)
   Test & Build is done: `git push origin <released-sha>:refs/heads/main`.
 - **The guard refuses** when the version is already tagged (you forgot to bump) or below
   the latest release, when `develop` does not contain `main`, when the run is not on
-  `develop`, or when `CI OK` has not succeeded on the commit. The message says which.
+  `develop`, or when the latest completed `CI OK` on the commit did not succeed. The
+  message says which.
 - **CI is flaky.** Re-run the failed jobs in Test & Build until `CI OK` is green on the
-  commit; the guard accepts a successful `CI OK` on it.
+  commit. The commit is tested on `sandbox` and again on `develop`; the most recently
+  completed `CI OK` decides, for the guard and for the protected `main` alike.
 - **crates.io refuses the upload.** Trusted Publishing is probably not configured for
   `release.yml` (see [Settings](#settings)); fix it and re-run the failed job.
 
@@ -122,15 +125,17 @@ Release workflow (workflow_dispatch on develop)
                 main is an ancestor; the `CI OK` check succeeded on this exact commit;
                 Rust `stable` is resolved to an exact version, used by every Rust job
  build          x86_64 and aarch64, each on a native runner: the binary (run once,
-                --version must report the crate's version), the .deb and .rpm (checked
-                for version, binary and architecture) and the archive
+                --version must report the crate's version), the .deb (checked for its
+                version, binary and architecture), the .rpm (checked by its file name)
+                and the archive
  crate          cargo package and a publish dry run; the .crate is a release file
  image          a multi-platform image made from the two binaries (the `prebuilt` stage of
                 the Containerfile), pushed as sha-<commit>, run once, attested
  release        the exact file set is checked, SHA256SUMS, a build-provenance attestation,
                 a draft GitHub release, then publish (this creates the tag at the tested
-                commit), then a check that the tag is right and the published files,
-                downloaded again, equal the built ones
+                commit; it is marked Latest only when it is the highest version), then a
+                check that the tag is right and the published files, downloaded again,
+                equal the built ones
  publish        crates.io (Trusted Publishing, no stored token)
  image-publish  the version tags are added to the image's digest; `X.Y`, `X` and `latest`
                 only when this is the highest release of that line
@@ -158,7 +163,11 @@ One-time repository settings the flow relies on.
   `release.yml`, set on the crate's settings page. Keep that file name stable; it is part
   of the identity that signatures and attestations carry.
 - **`release.yml` on `main`.** GitHub only dispatches a workflow whose file exists on the
-  default branch. `just release` keeps `main` current after every release.
+  default branch (`gh workflow run` otherwise answers `HTTP 404: workflow release.yml not
+  found on the default branch`). `just release` keeps `main` current after every release.
+  A repository that has never released this way must put the workflow there once, before
+  its first `just release`, by fast-forwarding `main` to a commit whose `CI OK` passed:
+  `git push origin <sha>:refs/heads/main`.
 - **Commit signing**: commits on `sandbox` and `develop` must be signed with a key GitHub
   knows as a signing key, because `main` requires verified signatures.
 

@@ -131,8 +131,18 @@ check-branch:
     fi
     echo "✅ Branch '$current_branch' is a working branch"
 
+# Guard: refuse while cargo watch runs (a watcher races builds during the bump)
+check-no-watch:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if pgrep -f '[c]argo watch|[c]argo-watch' >/dev/null; then
+        echo "❌ cargo watch is running. Stop 'just watch' before bumping."
+        exit 1
+    fi
+    echo "✅ No cargo watcher is running"
+
 # Private: bump the version, refresh dependencies, run tests, and commit (no push)
-_bump bump_kind: check-clean check-branch
+_bump bump_kind: check-clean check-no-watch check-branch
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -143,6 +153,7 @@ _bump bump_kind: check-clean check-branch
         status=$?
         if [ $status -ne 0 ]; then
             echo "↩️  Restoring version files after failure..."
+            rm -f grafana/dashboard.json.tmp
             if ! git restore --staged --worktree --source=HEAD -- "${version_files[@]}"; then
                 echo "⚠️ Failed to restore ${version_files[*]} from HEAD; fix them manually."
             fi
@@ -150,6 +161,9 @@ _bump bump_kind: check-clean check-branch
         exit $status
     }
     trap cleanup EXIT
+    # An interrupt must reach the cleanup with a failing status, whatever was running.
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
 
     previous_version=$(just version)
     echo "ℹ️  Current version: ${previous_version}"
@@ -249,7 +263,12 @@ release:
     done
     [[ -n "${ci}" ]] || { echo "No Test & Build run of develop for ${sha}; push it to main yourself when CI OK passed." >&2; exit 1; }
     echo "Waiting for develop's Test & Build (run ${ci}) before moving main..."
-    gh run watch "${ci}" --exit-status > /dev/null || { echo "Test & Build failed on ${sha}; re-run its failed jobs, then: git push origin ${sha}:refs/heads/main" >&2; exit 1; }
+    # The run as a whole can fail while `CI OK` passed (coverage is reported, not a gate),
+    # so wait for it to finish and then ask for the check itself, the one `main` requires.
+    gh run watch "${ci}" > /dev/null || true
+    [[ "$(gh run view "${ci}" --json status --jq .status)" == completed ]] || { echo "Test & Build (run ${ci}) has not finished; when CI OK passed: git push origin ${sha}:refs/heads/main" >&2; exit 1; }
+    ci_ok="$(gh api "repos/{owner}/{repo}/commits/${sha}/check-runs?check_name=CI%20OK&status=completed&per_page=100" --jq '[.check_runs[]] | sort_by(.completed_at) | last | .conclusion // "missing"')"
+    [[ "${ci_ok}" == success ]] || { echo "CI OK is '${ci_ok}' on ${sha}; re-run the failed jobs of Test & Build, then: git push origin ${sha}:refs/heads/main" >&2; exit 1; }
     git push origin "${sha}:refs/heads/main"
 
 # List every registered collector as a --collector.<name> flag

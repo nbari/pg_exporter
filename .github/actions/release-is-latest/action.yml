@@ -1,10 +1,10 @@
 name: Release is latest
 description: >-
   Whether a tag is the highest X.Y.Z release tag right now: overall, within the tag's X.Y
-  line and within its X line. The steps that move a floating image tag (`latest`, `X.Y`,
-  `X`) call it immediately before they act, so a re-run job of an older release never
-  rolls a tag back. It fails when GitHub cannot be asked, instead of treating that as
-  "no releases".
+  line and within its X line. The steps that set GitHub's Latest release or move a
+  floating image tag (`latest`, `X.Y`, `X`) call it immediately before they act, so a
+  re-run job of an older release never rolls one back. The tag itself need not exist
+  yet. It fails when GitHub cannot be asked, instead of treating that as "no releases".
 inputs:
   tag:
     description: The X.Y.Z tag being published.
@@ -42,7 +42,9 @@ runs:
         # A plain assignment, so a failing listing fails the step instead of looking
         # like "no releases".
         tags="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/tags" --jq '.[].name')"
-        sorted="$(grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' <<<"${tags}" | sort -rV || true)"
+        # The tag being published counts too: the release job asks before the tag exists,
+        # and a listing can lag right after it was created.
+        sorted="$(printf '%s\n%s\n' "${tags}" "${TAG}" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -ruV)"
         highest="$(head -n 1 <<<"${sorted}")"
         # Anchored prefixes: "1." must not match "11.0.0", nor "1.2." match "1.20.0".
         major="${TAG%%.*}"
