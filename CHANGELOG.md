@@ -29,6 +29,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (503), and after a 16 to 17 upgrade `pg_stat_checkpointer_*` stayed absent. The
   version is now read on every scrape, in the same round trip as the connectivity
   check (`SHOW server_version_num` replaces `SELECT 1`), and a change is logged.
+- After a PostgreSQL restart or failover, scrapes no longer report `pg_up 0` while the
+  server is already accepting connections. Pooled connections were handed out without
+  validation, so each scrape drew one dead connection, failed its connectivity check,
+  and discarded it: up to one false outage per pooled connection (three). The
+  validation had been disabled together with a recovery pool that was later removed.
+  Idle connections are now checked on checkout and replaced within the same acquire,
+  at the cost of one extra round trip per checkout.
 - A table whose reloptions set both `autovacuum_vacuum_threshold` and
   `autovacuum_vacuum_scale_factor` (or the analyze pair) to 0 made the `stat` collector
   query fail with `division by zero`. Every `pg_stat_user_tables_*` series of that

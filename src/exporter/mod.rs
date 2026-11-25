@@ -91,12 +91,17 @@ fn connect_pool(dsn: &SecretString) -> Result<sqlx::PgPool> {
             .context("Failed to parse base DSN options")?,
     )?;
 
+    // Idle connections are validated on checkout (the sqlx default). After a restart or
+    // failover every pooled connection is dead; without the check each scrape drew one,
+    // failed its connectivity query and reported `pg_up 0`, once per pooled connection,
+    // while the server was already accepting connections again. With it, a dead
+    // connection is replaced inside the same acquire, at the cost of one Sync round trip
+    // per checkout.
     let pool = PgPoolOptions::new()
         .min_connections(0)
         .max_connections(SHARED_POOL_MAX_CONNECTIONS)
         .acquire_timeout(get_connect_timeout())
         .max_lifetime(Duration::from_mins(2))
-        .test_before_acquire(false)
         .connect_lazy_with(opts);
 
     info!("Database connection pool initialized (lazy)");
@@ -338,6 +343,85 @@ mod tests {
             }
             Ok(())
         })
+    }
+
+    /// A connection the server closed while it sat idle in the pool must be replaced
+    /// on checkout, not handed to the next query. A restart or failover closes all of
+    /// them at once, and each one that reached a scrape's connectivity check turned
+    /// into a false `pg_up 0` after the server was back.
+    #[tokio::test]
+    async fn pool_replaces_idle_connections_the_server_closed() -> Result<()> {
+        use anyhow::Context as _;
+        use sqlx::Connection as _;
+
+        let dsn = std::env::var("PG_EXPORTER_DSN").unwrap_or_else(|_| {
+            "postgresql://postgres:postgres@localhost:5432/postgres".to_owned()
+        });
+        let pool = connect_pool(&SecretString::from(dsn.clone()))?;
+        if sqlx::query("SELECT 1").fetch_one(&pool).await.is_err() {
+            eprintln!("skipping: PostgreSQL is not reachable");
+            return Ok(());
+        }
+
+        // Check out every pooled connection at once so all of them exist, then let
+        // them go idle.
+        let mut held = Vec::new();
+        let mut pids: Vec<i32> = Vec::new();
+        for _ in 0..SHARED_POOL_MAX_CONNECTIONS {
+            let mut conn = pool.acquire().await?;
+            pids.push(
+                sqlx::query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(&mut *conn)
+                    .await?,
+            );
+            held.push(conn);
+        }
+        drop(held);
+        for _ in 0..200 {
+            if pool.num_idle() == pids.len() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        anyhow::ensure!(
+            pool.num_idle() == pids.len(),
+            "pooled connections did not return to idle"
+        );
+
+        // What a restart or failover does to them: the server ends the backends.
+        let mut admin = sqlx::PgConnection::connect(&dsn).await?;
+        sqlx::query("SELECT pg_terminate_backend(pid) FROM unnest($1::int[]) AS pid")
+            .bind(&pids)
+            .execute(&mut admin)
+            .await?;
+        let mut alive = pids.len();
+        for _ in 0..200 {
+            let remaining: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE pid = ANY($1)")
+                    .bind(&pids)
+                    .fetch_one(&mut admin)
+                    .await?;
+            alive = usize::try_from(remaining)?;
+            if alive == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        admin.close().await?;
+        anyhow::ensure!(alive == 0, "{alive} terminated backends are still running");
+
+        // One query per connection that died: every one must succeed first time.
+        for attempt in 1..=pids.len() {
+            sqlx::query("SELECT 1")
+                .fetch_one(&pool)
+                .await
+                .with_context(|| {
+                    format!("query {attempt} was given a pooled connection the server had closed")
+                })?;
+        }
+
+        pool.close().await;
+        Ok(())
     }
 
     #[test]
