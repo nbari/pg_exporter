@@ -86,6 +86,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and hyper 1.13.0.
 - Use `Option::map_or_default` where Rust 1.100 Clippy now requires it.
 
+### Tests
+
+- Add PostgreSQL 19 to the CI matrix and to `just test-all-pg`. The suite passes on 19
+  unchanged, with every collector enabled and no metric family missing compared to 18.
+- The primary/replica topology test now takes its image tag from
+  `PG_EXPORTER_TEST_POSTGRES_TAG` like the other container tests, so the CI matrix
+  exercises replication on every supported major instead of always on 16.
+
 ### Documentation
 
 - Statements: document that `query_short` can republish a secret from a utility

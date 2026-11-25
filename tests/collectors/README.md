@@ -49,3 +49,9 @@ Activity
 # Same test via justfile helper
 
     just test-replica
+
+The primary and replica run `postgres:16` by default. Set
+`PG_EXPORTER_TEST_POSTGRES_TAG` to use another major, as CI does for each entry of its
+version matrix:
+
+    PG_EXPORTER_TEST_POSTGRES_TAG=19 just test-replica

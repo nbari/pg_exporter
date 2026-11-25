@@ -52,7 +52,7 @@ With neither a runtime nor `PG_EXPORTER_DSN`, they skip — unless `CI=true` or
 ### CI Testing
 
 The CI pipeline automatically:
-- Tests against PostgreSQL 14, 15, 16, 17, and 18
+- Tests against PostgreSQL 14, 15, 16, 17, 18, and 19
 - Installs and configures pg_stat_statements extension
 - Runs all integration tests
 - Checks both default and telemetry-enabled builds, and guards the default
@@ -345,7 +345,7 @@ SELECT * FROM pg_extension;
 
 `pg_exporter` supports PostgreSQL 14 and newer.
 
-The test matrix currently covers PostgreSQL 14, 15, 16, 17, and 18. Some features may vary across supported versions:
+The test matrix currently covers PostgreSQL 14, 15, 16, 17, 18, and 19. Some features may vary across supported versions:
 
 - `pg_stat_checkpointer` - Added in PostgreSQL 17
 - Use explicit version guards only for features that vary across supported versions

@@ -439,12 +439,12 @@ stop-containers:
         {{container_cmd}} stop $c 2>/dev/null || true; \
   done
 
-# Test against all PostgreSQL versions (14-18)
+# Test against all PostgreSQL versions (14-19)
 test-all-pg:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    VERSIONS=(14 15 16 17 18)
+    VERSIONS=(14 15 16 17 18 19)
     FAILED=()
 
     echo "🚀 Starting all PostgreSQL versions..."
@@ -479,7 +479,9 @@ test-all-pg:
         echo "🐘 Testing PostgreSQL ${v} (port ${PORT})"
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
+        # Container-based tests start their own PostgreSQL; pin it to the same major.
         if PG_EXPORTER_DSN="postgresql://postgres:postgres@localhost:${PORT}/postgres" \
+           PG_EXPORTER_TEST_POSTGRES_TAG="${v}" \
            cargo test --quiet 2>&1 | tail -5; then
             echo "✅ PostgreSQL ${v} passed"
         else
@@ -531,7 +533,8 @@ test-pg version:
         -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;" >/dev/null
 
     echo "🧪 Running tests..."
-    PG_EXPORTER_DSN="postgresql://postgres:postgres@localhost:${PORT}/postgres" cargo test
+    PG_EXPORTER_DSN="postgresql://postgres:postgres@localhost:${PORT}/postgres" \
+        PG_EXPORTER_TEST_POSTGRES_TAG="{{version}}" cargo test
 
     echo "🧹 Cleaning up..."
     {{container_cmd}} stop pg{{version}} && {{container_cmd}} rm pg{{version}}

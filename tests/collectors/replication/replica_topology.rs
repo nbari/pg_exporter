@@ -18,7 +18,13 @@ use testcontainers::{
 use tokio::time::sleep;
 use ulid::Ulid;
 
+/// Default image tag when `PG_EXPORTER_TEST_POSTGRES_TAG` is unset. CI overrides the
+/// tag from its version matrix so this test covers every supported `PostgreSQL` major.
 const POSTGRES_TAG: &str = "16";
+
+fn postgres_tag() -> String {
+    std::env::var("PG_EXPORTER_TEST_POSTGRES_TAG").unwrap_or_else(|_| POSTGRES_TAG.to_string())
+}
 
 /// Attempts at creating the primary/replica pair before giving up.
 ///
@@ -291,7 +297,7 @@ async fn start_primary_container(
     network: &str,
     container_name: &str,
 ) -> Result<ContainerAsync<GenericImage>> {
-    GenericImage::new("postgres", POSTGRES_TAG)
+    GenericImage::new("postgres", &postgres_tag())
         .with_exposed_port(5432.tcp())
         .with_env_var("POSTGRES_USER", "postgres")
         .with_env_var("POSTGRES_PASSWORD", "postgres")
@@ -324,7 +330,7 @@ async fn start_replica_container(
     container_name: &str,
     primary_name: &str,
 ) -> Result<ContainerAsync<GenericImage>> {
-    GenericImage::new("postgres", POSTGRES_TAG)
+    GenericImage::new("postgres", &postgres_tag())
         .with_entrypoint("bash")
         .with_exposed_port(5432.tcp())
         .with_env_var("PRIMARY_HOST", primary_name)

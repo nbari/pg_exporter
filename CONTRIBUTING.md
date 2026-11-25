@@ -370,7 +370,7 @@ Check actual PostgreSQL column types and add explicit casts in SQL.
 GitHub Actions automatically:
 1. Starts PostgreSQL with pg_stat_statements preloaded
 2. Creates the extension
-3. Runs all tests across PostgreSQL 14, 15, 16, 17, and 18
+3. Runs all tests across PostgreSQL 14, 15, 16, 17, 18, and 19
 
 If CI fails but local tests pass, you probably don't have pg_stat_statements enabled locally.
 
