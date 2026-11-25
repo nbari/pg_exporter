@@ -7,6 +7,9 @@ on:
       CODECOV_TOKEN:
         required: true
 
+permissions:
+  contents: read
+
 jobs:
   coverage:
     name: Coverage
@@ -30,10 +33,12 @@ jobs:
           - 5432:5432
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Cache Rust toolchain and dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/bin/
@@ -46,7 +51,7 @@ jobs:
             ${{ runner.os }}-cargo-coverage-
             ${{ runner.os }}-cargo-
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
         with:
           components: llvm-tools-preview
 
@@ -93,7 +98,7 @@ jobs:
           docker ps -a
           CONTAINER_ID=$(docker ps --filter "ancestor=postgres:18" --format "{{.ID}}")
           echo "Restarting container $CONTAINER_ID"
-          docker restart $CONTAINER_ID
+          docker restart "$CONTAINER_ID"
 
           # Wait for PostgreSQL to be ready again
           sleep 5
@@ -140,7 +145,7 @@ jobs:
           --ignore '../**' --ignore '/*' -o coverage.lcov
 
       - name: Upload to codecov.io
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         with:
@@ -148,7 +153,7 @@ jobs:
           flags: rust
 
       - name: Coveralls GitHub Action
-        uses: coverallsapp/github-action@v2
+        uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           file: coverage.lcov

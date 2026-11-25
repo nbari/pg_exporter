@@ -1,0 +1,32 @@
+version: 2
+# Dependabot proposes updates as pull requests into sandbox, where work lands; from there
+# they reach develop and a release like any other change. main only ever holds released
+# commits, so no update targets it. Action updates arrive as one weekly pull request:
+# the workflows pin every action to a commit, and this is what moves those pins.
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    target-branch: "sandbox"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: "github-actions"
+    directories:
+      - "/"
+      - "/.github/actions/*"
+    target-branch: "sandbox"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "devcontainers"
+    directory: "/"
+    target-branch: "sandbox"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5

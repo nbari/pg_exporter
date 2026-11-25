@@ -23,10 +23,12 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Cache Rust toolchain
-        uses: actions/cache@v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/bin/
@@ -37,7 +39,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-fmt-
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
         with:
           components: rustfmt
 
@@ -48,10 +50,12 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Cache Rust dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/bin/
@@ -64,7 +68,7 @@ jobs:
             ${{ runner.os }}-cargo-clippy-
             ${{ runner.os }}-cargo-
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
         with:
           components: clippy
           targets: x86_64-unknown-freebsd, x86_64-unknown-illumos
@@ -105,10 +109,12 @@ jobs:
     name: Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Cache Rust dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/bin/
@@ -121,7 +127,7 @@ jobs:
             ${{ runner.os }}-cargo-check-
             ${{ runner.os }}-cargo-
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
 
       - name: Check both feature configurations
         run: |
@@ -173,10 +179,12 @@ jobs:
           - 5432:5432
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Cache Rust dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/bin/
@@ -191,7 +199,7 @@ jobs:
             ${{ runner.os }}-cargo-test-
             ${{ runner.os }}-cargo-
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
 
       - name: Wait for PostgreSQL
         run: |
@@ -240,7 +248,7 @@ jobs:
           docker ps -a
           CONTAINER_ID=$(docker ps --filter "ancestor=postgres:${{ matrix.postgres }}" --format "{{.ID}}")
           echo "Restarting container $CONTAINER_ID"
-          docker restart $CONTAINER_ID
+          docker restart "$CONTAINER_ID"
 
           # Wait for PostgreSQL to be ready again
           sleep 5
