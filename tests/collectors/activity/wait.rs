@@ -1,7 +1,9 @@
 use super::super::common;
-use anyhow::Result;
+use anyhow::{Context, Result, bail, ensure};
 use pg_exporter::collectors::{Collector, activity::wait::WaitEventsCollector};
 use prometheus::Registry;
+use sqlx::PgPool;
+use std::time::Duration;
 
 #[tokio::test]
 async fn test_wait_events_collector_registers_without_error() -> Result<()> {
@@ -213,4 +215,117 @@ async fn test_wait_events_collector_handles_concurrent_collection() -> Result<()
 
     pool.close().await;
     Ok(())
+}
+
+/// Waits until this database has sessions blocked on two different `Lock` wait events,
+/// then returns what the collector exports for `pg_wait_event_type{type="Lock"}`.
+async fn collect_lock_wait_total(pool: &PgPool) -> Result<f64> {
+    let mut distinct_events = 0_i64;
+    for _ in 0..100 {
+        distinct_events = sqlx::query_scalar(
+            "SELECT count(DISTINCT wait_event)::bigint
+             FROM pg_stat_activity
+             WHERE datname = current_database()
+               AND state = 'active'
+               AND wait_event_type = 'Lock'",
+        )
+        .fetch_one(pool)
+        .await?;
+        if distinct_events >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    ensure!(
+        distinct_events >= 2,
+        "expected sessions blocked on two different Lock wait events, saw {distinct_events}"
+    );
+
+    let collector = WaitEventsCollector::new();
+    let registry = Registry::new();
+    collector.register_metrics(&registry)?;
+    collector.collect(pool).await?;
+
+    registry
+        .gather()
+        .iter()
+        .find(|family| family.name() == "pg_wait_event_type")
+        .context("pg_wait_event_type was not exported")?
+        .get_metric()
+        .iter()
+        .find(|metric| {
+            metric
+                .get_label()
+                .iter()
+                .any(|label| label.name() == "type" && label.value() == "Lock")
+        })
+        .map(|metric| metric.get_gauge().value())
+        .context("pg_wait_event_type has no Lock series")
+}
+
+/// Blocks one session on a table lock (`Lock`/`relation`) and another on a row lock
+/// (`Lock`/`transactionid`), and checks that both are counted under the `Lock` type.
+async fn assert_lock_waiters_are_summed(pool: &PgPool) -> Result<()> {
+    sqlx::query("CREATE TABLE wait_relation_target (id int)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE TABLE wait_row_target (id int PRIMARY KEY, v int)")
+        .execute(pool)
+        .await?;
+    sqlx::query("INSERT INTO wait_row_target VALUES (1, 0)")
+        .execute(pool)
+        .await?;
+
+    let mut holder = pool.begin().await?;
+    sqlx::query("LOCK TABLE wait_relation_target IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *holder)
+        .await?;
+    sqlx::query("UPDATE wait_row_target SET v = v + 1 WHERE id = 1")
+        .execute(&mut *holder)
+        .await?;
+
+    let relation_waiter = tokio::spawn({
+        let pool = pool.clone();
+        async move {
+            sqlx::query("SELECT count(*) FROM wait_relation_target")
+                .execute(&pool)
+                .await
+        }
+    });
+    let row_waiter = tokio::spawn({
+        let pool = pool.clone();
+        async move {
+            sqlx::query("UPDATE wait_row_target SET v = v + 1 WHERE id = 1")
+                .execute(&pool)
+                .await
+        }
+    });
+
+    let exported = collect_lock_wait_total(pool).await;
+
+    // Release the waiters before judging the result, so a failure cannot leave them
+    // blocked behind the holder while the database is dropped.
+    holder.rollback().await?;
+    relation_waiter.await??;
+    row_waiter.await??;
+
+    let exported = exported?;
+    if exported < 2.0 {
+        bail!(
+            "two sessions wait on different Lock events, but pg_wait_event_type{{type=\"Lock\"}} \
+             exported {exported}: a type's events must be summed, not overwritten"
+        );
+    }
+    Ok(())
+}
+
+/// `pg_wait_event_type` must count every session of a type. The query yields one row per
+/// (type, event); publishing each row with `set` left only the last event's count, so a
+/// type under-reported whenever it had more than one distinct wait event.
+#[tokio::test]
+async fn test_wait_event_type_sums_distinct_events_of_one_type() -> Result<()> {
+    let test_db = common::IsolatedTestDatabase::new("wait_event_type_sum").await?;
+    let outcome = assert_lock_waiters_are_summed(test_db.pool()).await;
+    test_db.cleanup().await?;
+    outcome
 }

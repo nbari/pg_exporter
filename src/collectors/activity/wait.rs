@@ -3,6 +3,7 @@ use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, Opts, Registry};
 use sqlx::{PgPool, Row};
+use std::collections::HashMap;
 use tracing::{debug, info, info_span, instrument};
 use tracing_futures::Instrument as _;
 
@@ -134,17 +135,17 @@ impl Collector for WaitEventsCollector {
                 self.wait_event.with_label_values(&["none"]).set(0.0);
                 debug!("no active wait events");
             } else {
+                // The query returns one row per (type, event), so a type spans several
+                // rows and an event name can sit under two types (`SyncRep` is both an
+                // IPC and an LWLock wait). Sum before publishing: setting the gauge per
+                // row kept only the last row's count.
+                let mut by_type: HashMap<String, i64> = HashMap::new();
+                let mut by_event: HashMap<String, i64> = HashMap::new();
+
                 for row in &rows {
                     let event_type: String = row.try_get("wait_event_type")?;
                     let event: String = row.try_get("wait_event")?;
                     let count: i64 = row.try_get::<i64, _>("count").unwrap_or(0);
-
-                    self.wait_event_type
-                        .with_label_values(&[&event_type])
-                        .set(i64_to_f64(count));
-                    self.wait_event
-                        .with_label_values(&[&event])
-                        .set(i64_to_f64(count));
 
                     debug!(
                         wait_event_type = %event_type,
@@ -152,6 +153,20 @@ impl Collector for WaitEventsCollector {
                         count,
                         "updated wait event metrics"
                     );
+
+                    *by_type.entry(event_type).or_insert(0) += count;
+                    *by_event.entry(event).or_insert(0) += count;
+                }
+
+                for (event_type, count) in &by_type {
+                    self.wait_event_type
+                        .with_label_values(&[event_type])
+                        .set(i64_to_f64(*count));
+                }
+                for (event, count) in &by_event {
+                    self.wait_event
+                        .with_label_values(&[event])
+                        .set(i64_to_f64(*count));
                 }
             }
 

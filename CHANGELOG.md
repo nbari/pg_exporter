@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   could never fire. Both are now cast to `double precision`, and a decode failure fails
   the collector instead of publishing 0. A slot without reserved WAL and a standby
   that has not replied yet still report 0.
+- `pg_wait_event_type` under-reported any type with more than one distinct wait event.
+  The query returns one row per (type, event) and each row overwrote the gauge, so
+  three sessions waiting on `Lock`/`relation` and one on `Lock`/`transactionid`
+  exported `pg_wait_event_type{type="Lock"} 1` instead of 4. Counts are now summed
+  per type. `pg_wait_event` is summed the same way for an event name that exists
+  under two types (`SyncRep`).
 
 ### Security
 
