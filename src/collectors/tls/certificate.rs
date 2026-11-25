@@ -1,7 +1,7 @@
 use crate::collectors::util::{QueryFailure, classify_query_error};
 use crate::collectors::{NO_LABELS, Collected, Collector, blocking, i64_to_f64};
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, IntGaugeVec, Opts, Registry};
 use sqlx::PgPool;
@@ -129,7 +129,7 @@ impl CertificateCollector {
         // Extract validity information
         let not_before = cert.validity().not_before.timestamp();
         let not_after = cert.validity().not_after.timestamp();
-        let now = Utc::now().timestamp();
+        let now = Timestamp::now().as_second();
 
         // Calculate seconds until expiry
         let seconds_until_expiry = not_after - now;
@@ -150,10 +150,10 @@ impl CertificateCollector {
         // Log certificate info
         debug!(
             "Certificate: not_before={}, not_after={}, valid={is_valid}, expires_in={seconds_until_expiry}s",
-            DateTime::from_timestamp(not_before, 0)
-                .map_or_else(|| "invalid".to_string(), |dt| dt.to_rfc3339()),
-            DateTime::from_timestamp(not_after, 0)
-                .map_or_else(|| "invalid".to_string(), |dt| dt.to_rfc3339()),
+            Timestamp::from_second(not_before)
+                .map_or_else(|_| "invalid".to_string(), |ts| ts.to_string()),
+            Timestamp::from_second(not_after)
+                .map_or_else(|_| "invalid".to_string(), |ts| ts.to_string()),
         );
 
         Ok(Collected::Fresh)

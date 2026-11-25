@@ -59,7 +59,6 @@ large_stack_arrays = "deny"
 [dependencies]
 anyhow = "1.0"
 axum = { version = "0.8.9", features = ["tracing"] }
-chrono = "0.4.45"
 clap = { version = "4.6.10", features = ["env"] }
 opentelemetry = { version = "0.33.1", optional = true }
 opentelemetry-otlp = { version = "0.33.1", optional = true, default-features = false, features = ["grpc-tonic", "gzip-tonic", "tls-ring", "tls-roots", "trace"] }
@@ -79,6 +78,7 @@ url = "2.5.9"
 prometheus = "0.14.0"
 regex = "1.13.2"
 futures = "0.3.34"
+jiff = { version = "1.0.3", default-features = false, features = ["std"] }
 tonic = { version = "0.14.9", optional = true, features = ["tls-native-roots"] }
 base64 = { version = "0.23.1", optional = true }
 tracing-futures = "0.2.5"

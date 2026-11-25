@@ -84,6 +84,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recognises a bracketed IPv6 loopback host (`[::1]`) as local.
 - Refresh the remaining compatible dependencies, including clap 4.6.10, tonic 0.14.9,
   and hyper 1.13.0.
+- Replace `chrono` with `jiff` for the certificate-expiry arithmetic in the `tls`
+  collector, the only place a date-time crate is used. `chrono` is flagged as
+  unmaintained (RUSTSEC-2026-0543) and is no longer compiled into the binary; `jiff` is
+  built without its time zone database, since only UTC instants are needed. `chrono`
+  still appears in `Cargo.lock` as an optional dependency of SQLx, so `cargo audit`
+  keeps listing that warning.
 - Use `Option::map_or_default` where Rust 1.100 Clippy now requires it.
 
 ### Tests
