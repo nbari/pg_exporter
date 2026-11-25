@@ -114,7 +114,7 @@ codegen-units = 1
 strip = "symbols"
 
 [dev-dependencies]
-nix = "0.31"
+nix = "0.32"
 prometheus = "0.14"
 regex = "1.13.2"
 reqwest = { version = "0.13", features = ["json"] }
