@@ -1,0 +1,608 @@
+---
+name: Release
+
+# Run manually on `develop` (`just release`). The commit is the one Test & Build already
+# passed on; nothing is bumped or committed here. The run builds that commit once and
+# publishes the GitHub release (which creates the tag), the crate and the container
+# image. `main` is moved by `just release` once this run has succeeded and develop's own
+# Test & Build has finished (a still-pending `CI OK` blocks protected-branch updates,
+# even for the workflow's token). A failed job is fixed by "Re-run failed jobs"; nothing
+# is released before every build job has succeeded. See RELEASING.md.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+# Harden against spurious crates.io/curl network failures on hosted runners.
+env:
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  RUSTUP_MAX_RETRIES: "10"
+
+jobs:
+  guard:
+    name: Release guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      package: ${{ steps.check.outputs.package }}
+      rust: ${{ steps.rust.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Read the package name and version
+        id: info
+        uses: ./.github/actions/crate-info
+
+      # `stable` moves every few weeks and "Re-run failed jobs" can run a leg hours later, so
+      # it is resolved once here: every job of this run installs exactly this version, and a
+      # re-run keeps this job's output. Nothing in the repository has to be bumped.
+      - name: Resolve the Rust toolchain for this run
+        id: rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          version="$(rustc +stable --version | awk '{print $2}')"
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Could not resolve stable to an exact version (got '${version}')."
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "This release is built with Rust ${version}."
+
+      - name: Check the commit can be released
+        id: check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INFO_NAME: ${{ steps.info.outputs.name }}
+          INFO_VERSION: ${{ steps.info.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" != refs/heads/develop ]]; then
+            echo "::error::Run the release on develop (got ${GITHUB_REF})."
+            exit 1
+          fi
+          version="${INFO_VERSION}"
+          package="${INFO_NAME}"
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Cargo.toml has no X.Y.Z version (found '${version}')."
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/${version}" >/dev/null; then
+            echo "::error::${version} is already tagged; bump the version on develop first."
+            exit 1
+          fi
+          latest="$(git tag --list '[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -n 1)"
+          if [[ -n "${latest}" && "$(printf '%s\n%s\n' "${latest}" "${version}" | sort -V | tail -n 1)" != "${version}" ]]; then
+            echo "::error::${version} is below the latest release ${latest}; bump to a higher version."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor origin/main "${GITHUB_SHA}"; then
+            echo "::error::main has commits that develop does not; merge main into develop first."
+            exit 1
+          fi
+          # `CI OK` is Test & Build's aggregate of every gating job; it must have
+          # succeeded on exactly this commit (a non-gating job, such as coverage, failing
+          # does not block the release).
+          passed="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs?check_name=CI%20OK&status=completed" \
+            --jq '[.check_runs[] | select(.conclusion == "success")] | length')"
+          if [[ "${passed}" -lt 1 ]]; then
+            echo "::error::${GITHUB_SHA} has no successful CI OK check; wait for Test & Build to pass on develop."
+            exit 1
+          fi
+          {
+            echo "version=${version}"
+            echo "package=${package}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Releasing ${package} ${version} from ${GITHUB_SHA} (CI OK passed)."
+
+  build:
+    name: Build and package (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    needs: guard
+    env:
+      VERSION: ${{ needs.guard.outputs.version }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Build
+        id: build
+        uses: ./.github/actions/build-binary
+        with:
+          target: ${{ matrix.target }}
+          toolchain: ${{ needs.guard.outputs.rust }}
+
+      # Strips the binary too, so the archive and the image hold the same binary as the
+      # packages.
+      - name: Package RPM and DEB
+        uses: ./.github/actions/linux-packages
+        with:
+          target: ${{ matrix.target }}
+          package: ${{ steps.build.outputs.name }}
+
+      - name: Package the archive
+        shell: bash
+        env:
+          PACKAGE: ${{ steps.build.outputs.name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          dirname="${PACKAGE}-${VERSION}-${TARGET}"
+          mkdir "${dirname}"
+          cp "target/${TARGET}/release/${PACKAGE}" "${dirname}/"
+          tar -czf "dist/${dirname}.tar.gz" "${dirname}"
+
+      - name: Upload the release files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  crate:
+    name: Package the crate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: guard
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: ./.github/actions/rust-toolchain
+        with:
+          toolchain: ${{ needs.guard.outputs.rust }}
+
+      - name: Package and verify the crate
+        run: cargo package --locked
+
+      - name: Check crates.io would accept it
+        run: cargo publish --dry-run --locked
+
+      - name: Upload the crate
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: dist-crate
+          path: target/package/*.crate
+          if-no-files-found: error
+
+  # The image is made from the two binaries built above (the `prebuilt` stage of the
+  # Containerfile only copies one in), so it holds exactly what is in the archives and
+  # nothing is compiled under emulation. It is pushed under one tag, sha-<commit>; the
+  # version tags are added to this digest only after the release exists.
+  image:
+    name: Container image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs:
+      - guard
+      - build
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      digest: ${{ steps.digest.outputs.digest }}
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+      VERSION: ${{ needs.guard.outputs.version }}
+      PACKAGE: ${{ needs.guard.outputs.package }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Download the Linux archives
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: dist-*-unknown-linux-musl
+          merge-multiple: true
+          path: artifacts
+
+      # Stage <platform>/<binary>, the layout the `prebuilt` stage copies from.
+      - name: Stage the image build context
+        shell: bash
+        run: |
+          set -euo pipefail
+          for pair in amd64:x86_64 arm64:aarch64; do
+            platform="linux/${pair%%:*}"
+            target="${pair#*:}-unknown-linux-musl"
+            mkdir -p "image-context/${platform}"
+            tar -xzf "artifacts/${PACKAGE}-${VERSION}-${target}.tar.gz" \
+              --strip-components=1 -C "image-context/${platform}"
+            test -x "image-context/${platform}/${PACKAGE}"
+          done
+
+      # BuildKit takes SOURCE_DATE_EPOCH as the image creation time, so rebuilding the
+      # commit yields the same image timestamps.
+      - name: Export the commit time as SOURCE_DATE_EPOCH
+        shell: bash
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve image tags and labels
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        env:
+          # GHCR reads a multi-platform package's description from the index, so
+          # annotate it as well as each platform manifest.
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.version=${{ needs.guard.outputs.version }}
+          annotations: |
+            org.opencontainers.image.version=${{ needs.guard.outputs.version }}
+
+      - name: Build and push the image
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: image-context
+          file: ./Containerfile
+          target: prebuilt
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          build-args: |
+            SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Check the digest
+        id: digest
+        shell: bash
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::The image has no valid digest (got '${DIGEST}')."
+            exit 1
+          fi
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      # The pushed image must run and report this version (the runner is amd64; the arm64
+      # binary was run by its build leg).
+      - name: Smoke test the image
+        shell: bash
+        env:
+          DIGEST: ${{ steps.digest.outputs.digest }}
+        run: |
+          set -euo pipefail
+          out="$(docker run --rm "${IMAGE}@${DIGEST}" --version)"
+          echo "${out}"
+          if [[ "${out}" != *"${VERSION}"* ]]; then
+            echo "::error::The image does not report version ${VERSION}."
+            exit 1
+          fi
+
+      - name: Attest image provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+  release:
+    name: GitHub release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs:
+      - guard
+      - build
+      - crate
+      - image
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.guard.outputs.version }}
+      PACKAGE: ${{ needs.guard.outputs.package }}
+      RUST: ${{ needs.guard.outputs.rust }}
+      IMAGE: ghcr.io/${{ github.repository }}
+      IMAGE_DIGEST: ${{ needs.image.outputs.digest }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download the release files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+
+      # An immutable release cannot be completed later, so the file set is checked first.
+      # Keep this list in step with the build matrix: a missing or extra file stops the
+      # release. The Debian package name spells the underscore as a hyphen.
+      - name: Check the release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          deb="${PACKAGE//_/-}"
+          expected="$(
+            {
+              for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+                echo "${PACKAGE}-${VERSION}-${target}.tar.gz"
+              done
+              echo "${PACKAGE}-${VERSION}.crate"
+              echo "${deb}_${VERSION}-1_amd64.deb"
+              echo "${deb}_${VERSION}-1_arm64.deb"
+              echo "${PACKAGE}-${VERSION}-1.x86_64.rpm"
+              echo "${PACKAGE}-${VERSION}-1.aarch64.rpm"
+            } | LC_ALL=C sort
+          )"
+          actual="$(find dist -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)"
+          if [[ "${actual}" != "${expected}" ]]; then
+            echo "::error::The built files differ from the expected set."
+            diff <(echo "${expected}") <(echo "${actual}") || true
+            exit 1
+          fi
+
+      - name: Write the checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-path: dist/*
+
+      # The notes are this version's section of CHANGELOG.md. Without one they fall back to
+      # the commit subjects since the previous release (version bumps left out). Either way
+      # every re-run writes the same text.
+      - name: Write the release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          previous="$(git describe --tags --abbrev=0 --match '[0-9]*.[0-9]*.[0-9]*' "${GITHUB_SHA}" 2>/dev/null || true)"
+          changes="$(awk -v version="${VERSION}" '
+            /^## \[/ { found = (index($0, "## [" version "]") == 1); next }
+            found { print }
+          ' CHANGELOG.md)"
+          if [[ -z "${changes//[[:space:]]/}" ]]; then
+            range="${GITHUB_SHA}"
+            [[ -z "${previous}" ]] || range="${previous}..${GITHUB_SHA}"
+            subjects="$(git log --no-merges --format='- %s (%h)' "${range}" | grep -vE '^- bump version to [0-9]+\.[0-9]+\.[0-9]+ ' || true)"
+            changes="$(printf '## Changes\n\n%s\n' "${subjects:-- Only the version bump.}")"
+          fi
+          {
+            echo "${changes}"
+            if [[ -n "${previous}" ]]; then
+              echo
+              echo "**Full changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${previous}...${VERSION}"
+            fi
+            echo
+            echo "## Container image"
+            echo
+            echo '```sh'
+            echo "podman pull ${IMAGE}:${VERSION}"
+            echo '```'
+            echo
+            echo "Digest: \`${IMAGE_DIGEST}\`"
+            echo
+            echo "## Verify a download"
+            echo
+            echo '```sh'
+            echo 'sha256sum --check --ignore-missing SHA256SUMS'
+            echo "gh attestation verify <file> --repo ${GITHUB_REPOSITORY} --signer-workflow ${GITHUB_REPOSITORY}/.github/workflows/release.yml"
+            echo "gh attestation verify oci://${IMAGE}:${VERSION} --repo ${GITHUB_REPOSITORY} --signer-workflow ${GITHUB_REPOSITORY}/.github/workflows/release.yml"
+            echo '```'
+            echo
+            echo "Built with Rust ${RUST}."
+          } > "${RUNNER_TEMP}/notes.md"
+          cat "${RUNNER_TEMP}/notes.md"
+
+      # Assets go on a draft first: publishing creates the tag at the tested commit, and
+      # an immutable release accepts no uploads afterwards. A draft left by a failed run
+      # is replaced; a published release is left alone.
+      - name: Create the release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if state="$(gh release view "${VERSION}" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            if [[ "${state}" == false ]]; then
+              echo "Release ${VERSION} is already published."
+              exit 0
+            fi
+            gh release delete "${VERSION}" --yes
+          fi
+          gh release create "${VERSION}" dist/* \
+            --draft \
+            --target "${GITHUB_SHA}" \
+            --title "${VERSION}" \
+            --notes-file "${RUNNER_TEMP}/notes.md"
+          gh release edit "${VERSION}" --draft=false --latest
+
+      # What a user can download must be exactly what was built, and the tag must sit on the
+      # tested commit. This also runs when a re-run finds the release already published.
+      - name: Check the published release
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${VERSION}" --jq '.object.sha')"
+          if [[ "${tag_sha}" != "${GITHUB_SHA}" ]]; then
+            echo "::error::Tag ${VERSION} points at ${tag_sha}, not at the tested commit ${GITHUB_SHA}."
+            exit 1
+          fi
+          expected="$(find dist -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)"
+          actual="$(gh release view "${VERSION}" --json assets --jq '.assets[].name' | LC_ALL=C sort)"
+          if [[ "${actual}" != "${expected}" ]]; then
+            echo "::error::Release ${VERSION} holds: $(tr '\n' ' ' <<<"${actual}"); expected: $(tr '\n' ' ' <<<"${expected}")."
+            exit 1
+          fi
+          # The bytes too: download what a user would get and compare it with what was built.
+          published="${RUNNER_TEMP}/published"
+          rm -rf "${published}"
+          gh release download "${VERSION}" --dir "${published}"
+          if ! diff <(cd dist && sha256sum -- * | sort -k2) <(cd "${published}" && sha256sum -- * | sort -k2); then
+            echo "::error::The published files differ from the files that were built."
+            exit 1
+          fi
+          echo "Release ${VERSION} is on ${GITHUB_SHA} with $(wc -l <<<"${actual}") files."
+
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs:
+      - guard
+      - release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.guard.outputs.version }}
+      PACKAGE: ${{ needs.guard.outputs.package }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: ./.github/actions/rust-toolchain
+        with:
+          toolchain: ${{ needs.guard.outputs.rust }}
+
+      - name: Is it already on crates.io
+        id: exists
+        shell: bash
+        run: |
+          if curl -sf -A "${PACKAGE}-release" "https://crates.io/api/v1/crates/${PACKAGE}/${VERSION}" >/dev/null; then
+            echo "${PACKAGE} ${VERSION} is already on crates.io."
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Short-lived token from crates.io Trusted Publishing; no registry secret is stored.
+      - name: Get a crates.io token
+        id: auth
+        if: steps.exists.outputs.published != 'true'
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1
+
+      - name: Publish
+        if: steps.exists.outputs.published != 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --locked --no-verify
+
+  # The version tags are added to the digest the image job pushed and tested; nothing is
+  # rebuilt. The floating tags (`X.Y`, `X`, `latest`) only move when this release is the
+  # highest of its line, checked right before, so re-running an older release never moves
+  # them back.
+  image-publish:
+    name: Tag the container image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs:
+      - guard
+      - image
+      - release
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+      VERSION: ${{ needs.guard.outputs.version }}
+      DIGEST: ${{ needs.image.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Is this the latest release
+        id: latest
+        uses: ./.github/actions/release-is-latest
+        with:
+          tag: ${{ needs.guard.outputs.version }}
+          token: ${{ github.token }}
+
+      - name: Tag the tested digest
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+          LATEST: ${{ steps.latest.outputs.latest }}
+          LATEST_MINOR: ${{ steps.latest.outputs.latest_minor }}
+          LATEST_MAJOR: ${{ steps.latest.outputs.latest_major }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::The image job recorded no valid digest (got '${DIGEST}')."
+            exit 1
+          fi
+          command -v skopeo >/dev/null 2>&1 || { sudo apt-get update -y && sudo apt-get install -y skopeo; }
+          echo "${TOKEN}" | skopeo login ghcr.io -u "${ACTOR}" --password-stdin
+          tags=("${VERSION}")
+          [[ "${LATEST_MINOR}" != true ]] || tags+=("${VERSION%.*}")
+          [[ "${LATEST_MAJOR}" != true ]] || tags+=("${VERSION%%.*}")
+          [[ "${LATEST}" != true ]] || tags+=(latest)
+          source="docker://${IMAGE}@${DIGEST}"
+          skopeo inspect --raw "${source}" >/dev/null
+          for tag in "${tags[@]}"; do
+            skopeo copy --all --preserve-digests "${source}" "docker://${IMAGE}:${tag}"
+            actual="sha256:$(skopeo inspect --raw "docker://${IMAGE}:${tag}" | sha256sum | cut -d' ' -f1)"
+            if [[ "${actual}" != "${DIGEST}" ]]; then
+              echo "::error::${IMAGE}:${tag} is ${actual}, not the tested ${DIGEST}."
+              exit 1
+            fi
+            echo "${IMAGE}:${tag} -> ${DIGEST}"
+          done

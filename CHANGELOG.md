@@ -100,6 +100,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still appears in `Cargo.lock` as an optional dependency of SQLx, so `cargo audit`
   keeps listing that warning.
 - Use `Option::map_or_default` where Rust 1.100 Clippy now requires it.
+- Releases now go through one workflow run that builds the commit CI already tested;
+  see [RELEASING.md](RELEASING.md). `just release` replaces `just deploy`, and pushing a
+  tag no longer starts anything: the tag is created by publishing the GitHub release,
+  after every build succeeded. `just bump` moves to the work branch and no longer
+  pushes. What this changes for users of a release:
+  - Release files gain `SHA256SUMS`, the `.crate`, and a build-provenance attestation
+    for every file and for the container image.
+  - The container image is made from the same two binaries as the release archives
+    (the new `prebuilt` stage of the `Containerfile`) instead of being compiled a
+    second time under emulation. Building the `Containerfile` yourself is unchanged.
+  - The crate is published with crates.io Trusted Publishing instead of a stored token.
+- CI now also builds the `.deb` and `.rpm`, builds and runs the container image, and
+  runs `cargo package` and a publish dry run on every push, and reports one aggregate
+  `CI OK` check.
 
 ### Tests
 

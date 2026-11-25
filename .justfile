@@ -120,54 +120,43 @@ check-clean:
     fi
     echo "✅ Working directory is clean"
 
-# Check if on develop branch
-check-develop:
-    #!/usr/bin/env bash
-    current_branch=$(git branch --show-current)
-    if [[ "$current_branch" != "develop" ]]; then
-        echo "❌ Not on develop branch (currently on: $current_branch)"
-        echo "Switch to develop branch first: git checkout develop"
-        exit 1
-    fi
-    echo "✅ On develop branch"
-
-# Check if tag already exists for a given version
-check-tag-not-exists version:
+# Guard: refuse the fast-forward-only branches main and develop (bump from a working branch)
+check-branch:
     #!/usr/bin/env bash
     set -euo pipefail
-    version="{{version}}"
-
-    git fetch --tags --quiet
-
-    if git rev-parse -q --verify "refs/tags/${version}" >/dev/null 2>&1; then
-        echo "❌ Tag ${version} already exists!"
+    current_branch="$(git branch --show-current)"
+    if [[ "$current_branch" == "main" || "$current_branch" == "develop" ]]; then
+        echo "❌ Branch '$current_branch' is fast-forward-only; bump from a working branch (sandbox)."
         exit 1
     fi
+    echo "✅ Branch '$current_branch' is a working branch"
 
-    echo "✅ No tag exists for version ${version}"
-
-_bump bump_kind: check-develop check-clean clean update test
+# Private: bump the version, refresh dependencies, run tests, and commit (no push)
+_bump bump_kind: check-clean check-branch
     #!/usr/bin/env bash
     set -euo pipefail
 
     bump_kind="{{bump_kind}}"
+    version_files=(Cargo.toml Cargo.lock grafana/dashboard.json)
 
     cleanup() {
         status=$?
         if [ $status -ne 0 ]; then
             echo "↩️  Restoring version files after failure..."
-            git checkout -- Cargo.toml Cargo.lock >/dev/null 2>&1 || true
+            if ! git restore --staged --worktree --source=HEAD -- "${version_files[@]}"; then
+                echo "⚠️ Failed to restore ${version_files[*]} from HEAD; fix them manually."
+            fi
         fi
         exit $status
     }
     trap cleanup EXIT
 
-    previous_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+    previous_version=$(just version)
     echo "ℹ️  Current version: ${previous_version}"
 
     echo "🔧 Bumping ${bump_kind} version..."
     cargo set-version --bump "${bump_kind}"
-    new_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+    new_version=$(just version)
     echo "📝 New version: ${new_version}"
 
     validate_bump() {
@@ -200,12 +189,6 @@ _bump bump_kind: check-develop check-clean clean update test
     echo "🔄 Updating dependencies..."
     cargo update
 
-    echo "🧹 Running clean build..."
-    cargo clean
-
-    echo "🧪 Running tests with new version (via just test)..."
-    just test
-
     echo "📊 Updating Grafana dashboard version to ${new_version}..."
     jq --arg ver "${new_version}" '
       .tags = ((.tags // []) | map(select(test("^[0-9]+\\.[0-9]+\\.[0-9]+") | not))) + [$ver] |
@@ -213,10 +196,14 @@ _bump bump_kind: check-develop check-clean clean update test
     ' grafana/dashboard.json > grafana/dashboard.json.tmp
     mv grafana/dashboard.json.tmp grafana/dashboard.json
 
-    git add .
+    echo "🧪 Running tests with new version (via just test)..."
+    just test
+
+    git add "${version_files[@]}"
     git commit -m "bump version to ${new_version}"
-    git push origin develop
-    echo "✅ Version bumped and pushed to develop"
+
+    echo "✅ Version bumped to ${new_version} (commit $(git rev-parse --short HEAD))."
+    echo "Next steps: push, fast-forward develop to this commit when Test & Build is green, then run 'just release'."
 
 # Bump version and commit (patch level)
 bump:
@@ -230,99 +217,40 @@ bump-minor:
 bump-major:
     @just _bump major
 
-# Internal function to handle the merge and tag process
-_deploy-merge-and-tag:
+# Releases (see RELEASING.md): the version bump is done with `just bump` (or
+# `bump-minor`/`bump-major`) as the last commit of the work, and the Release workflow
+# builds and publishes that exact commit once CI passed.
+# `main` is moved here, after the run, because a protected branch refuses an update while
+# a `CI OK` check of the same commit is still pending (develop's own Test & Build).
+
+# Release develop: start the release workflow, follow it, then fast-forward main
+release:
     #!/usr/bin/env bash
     set -euo pipefail
-
-    new_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
-    echo "🚀 Starting deployment for version $new_version..."
-
-    # Double-check tag doesn't exist (safety check)
-    echo "🔍 Verifying tag doesn't exist..."
-    git fetch --tags --quiet
-    if git rev-parse -q --verify "refs/tags/${new_version}" >/dev/null 2>&1; then
-        echo "❌ Tag ${new_version} already exists on remote!"
-        echo "This should not happen. The tag may have been created in a previous run."
-        exit 1
-    fi
-
-    # Ensure develop is up to date
-    echo "🔄 Ensuring develop is up to date..."
-    git pull origin develop
-
-    # Switch to main and merge develop
-    echo "🔄 Switching to main branch..."
-    git checkout main
-    git pull origin main
-
-    echo "🔀 Merging develop into main..."
-    if ! git merge develop --no-edit; then
-        echo "❌ Merge failed! Please resolve conflicts manually."
-        git checkout develop
-        exit 1
-    fi
-
-    # Create signed tag
-    echo "🏷️  Creating signed tag $new_version..."
-    git tag -s "$new_version" -m "Release version $new_version"
-
-    # Push main and tag atomically
-    echo "⬆️  Pushing main branch and tag..."
-    if ! git push origin main "$new_version"; then
-        echo "❌ Push failed! Rolling back..."
-        git tag -d "$new_version"
-        git checkout develop
-        exit 1
-    fi
-
-    # Switch back to develop
-    echo "🔄 Switching back to develop..."
-    git checkout develop
-
-    echo "✅ Deployment complete!"
-    echo "🎉 Version $new_version has been released"
-    echo "📋 Summary:"
-    echo "   - develop branch: bumped and pushed"
-    echo "   - main branch: merged and pushed"
-    echo "   - tag $new_version: created and pushed"
-    echo "🔗 Monitor release: https://github.com/nbari/pg_exporter/actions"
-
-# Deploy: merge to main, tag, and push everything
-deploy: bump _deploy-merge-and-tag
-
-# Deploy with minor version bump
-deploy-minor: bump-minor _deploy-merge-and-tag
-
-# Deploy with major version bump
-deploy-major: bump-major _deploy-merge-and-tag
-
-# Create & push a test tag like t-YYYYMMDD-HHMMSS (skips publish/release in CI)
-# Usage:
-#   just t-deploy
-#   just t-deploy "optional tag message"
-t-deploy message="CI test": check-develop check-clean test
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    message="{{message}}"
-    ts="$(date -u +%Y%m%d-%H%M%S)"
-    tag="t-${ts}"
-
-    echo "🏷️  Creating signed test tag: ${tag}"
-    git fetch --tags --quiet
-
-    if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
-        echo "❌ Tag ${tag} already exists. Aborting." >&2
-        exit 1
-    fi
-
-    git tag -s "${tag}" -m "${message}"
-    git push origin "${tag}"
-
-    echo "✅ Pushed ${tag}"
-    echo "🧹 To remove it:"
-    echo "   git push origin :refs/tags/${tag} && git tag -d ${tag}"
+    git fetch --quiet origin develop
+    sha="$(git rev-parse origin/develop)"
+    last="$(gh run list --workflow release.yml --branch develop --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId // 0')"
+    gh workflow run release.yml --ref develop
+    # The dispatched run is the first new one for this commit; never just "the latest".
+    run=""
+    for _ in $(seq 30); do
+        run="$(gh run list --workflow release.yml --branch develop --event workflow_dispatch --limit 10 --json databaseId,headSha --jq "[.[] | select(.databaseId > ${last} and .headSha == \"${sha}\")][0].databaseId // empty")"
+        [[ -z "${run}" ]] || break
+        sleep 2
+    done
+    [[ -n "${run}" ]] || { echo "The dispatched release run did not appear." >&2; exit 1; }
+    gh run watch "${run}" --exit-status
+    # develop's own Test & Build must have finished, and passed, before main can move.
+    ci=""
+    for _ in $(seq 30); do
+        ci="$(gh run list --workflow build.yml --branch develop --commit "${sha}" --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+        [[ -z "${ci}" ]] || break
+        sleep 2
+    done
+    [[ -n "${ci}" ]] || { echo "No Test & Build run of develop for ${sha}; push it to main yourself when CI OK passed." >&2; exit 1; }
+    echo "Waiting for develop's Test & Build (run ${ci}) before moving main..."
+    gh run watch "${ci}" --exit-status > /dev/null || { echo "Test & Build failed on ${sha}; re-run its failed jobs, then: git push origin ${sha}:refs/heads/main" >&2; exit 1; }
+    git push origin "${sha}:refs/heads/main"
 
 # List every registered collector as a --collector.<name> flag
 collector-flags:

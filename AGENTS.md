@@ -166,9 +166,18 @@ In practice, new PRs often fail because generated code introduces `unwrap()`,
 
 ## Release Flow
 
-- The repository release flow is defined in [.justfile](.justfile).
-- Version bumps happen from `develop` via `just bump`, `just bump-minor`, or `just bump-major`.
-- Release tagging and merge flow happen via `just deploy`, `just deploy-minor`, or `just deploy-major`.
+- The release flow is described in [RELEASING.md](RELEASING.md): the commit that is
+  released is exactly the commit CI tested.
+- Work lands on `sandbox`. The version bump is the last commit there, made with
+  `just bump`, `just bump-minor`, or `just bump-major` (they refuse to run on `develop`
+  or `main`).
+- `develop` only ever fast-forwards to a `sandbox` commit whose Test & Build passed.
+- `just release` starts the Release workflow on `develop` and moves `main` afterwards.
+  Never push a release tag by hand: publishing the GitHub release creates it.
+- Keep `.github/workflows/release.yml` named as it is; attestations and crates.io
+  Trusted Publishing are tied to that file name.
+- If the build matrix changes, update the expected file list in the release job (step
+  "Check the release files") in the same change.
 - Keep docs aligned with the real release flow; do not add references to missing checklist files.
 
 ## When Updating Docs
