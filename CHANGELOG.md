@@ -78,6 +78,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     server-name verification and `.pgpass` lookup, and `hostaddr` only for the TCP
     connection.
   - `PGHOSTADDR` is applied even when the DSN names a host.
+
+  The `--collector.system` remote-database startup warning follows `hostaddr` as
+  well, so `host=localhost&hostaddr=10.0.0.5` is still recognised as remote. It also
+  recognises a bracketed IPv6 loopback host (`[::1]`) as local.
 - Refresh the remaining compatible dependencies, including clap 4.6.10, tonic 0.14.9,
   and hyper 1.13.0.
 - Use `Option::map_or_default` where Rust 1.100 Clippy now requires it.

@@ -19,7 +19,7 @@ use axum::{
 };
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use std::{str::FromStr, time::Duration};
+use std::{net::IpAddr, str::FromStr, time::Duration};
 use tokio::{net::TcpListener, time::timeout};
 use tower::ServiceBuilder;
 use tower_http::{
@@ -192,7 +192,44 @@ fn is_local_db_host(host: &str) -> bool {
         || host.starts_with('/')
         || host.eq_ignore_ascii_case("localhost")
         || host == "::1"
+        || host == "[::1]"
         || host.starts_with("127.")
+}
+
+/// The address `hostaddr` sends the TCP connection to, if one is set: the DSN parameter,
+/// or else `PGHOSTADDR`, which is the precedence `SQLx` applies.
+///
+/// Since `SQLx` 0.9.1 `hostaddr` no longer replaces `host`, and the parsed options expose
+/// no getter for it. It is read from the DSN text because the one way to get it back out
+/// of the options, `to_url_lossy`, panics on options it cannot format as a URL (an empty
+/// host, or a user name containing `/`).
+fn connect_hostaddr(dsn: &str, env_hostaddr: Option<&str>) -> Option<IpAddr> {
+    // The last `hostaddr` wins when the parameter is repeated, as it does in `SQLx`.
+    let from_dsn = url::Url::parse(dsn).ok().and_then(|url| {
+        url.query_pairs()
+            .filter(|(key, _)| key == "hostaddr")
+            .last()
+            .map(|(_, value)| value.into_owned())
+    });
+
+    from_dsn
+        .as_deref()
+        .or(env_hostaddr)
+        .and_then(|value| value.parse().ok())
+}
+
+/// Returns `true` when the DSN connects to the machine the exporter runs on.
+///
+/// A Unix socket is always local and ignores `hostaddr`. Otherwise `hostaddr` decides
+/// where the connection goes and `host` only names the server for TLS and `.pgpass`,
+/// so `host=localhost&hostaddr=10.0.0.5` is a remote database.
+fn is_local_db_target(opts: &PgConnectOptions, hostaddr: Option<IpAddr>) -> bool {
+    let host = opts.get_host();
+    if opts.get_socket().is_some() || host.starts_with('/') {
+        return true;
+    }
+
+    hostaddr.map_or_else(|| is_local_db_host(host), |addr| addr.is_loopback())
 }
 
 /// Warns when `--collector.system` is enabled but the DSN points at a remote
@@ -208,7 +245,10 @@ fn warn_if_system_collector_remote(dsn: &SecretString, enabled_collectors: &[Str
         return;
     };
 
-    if !is_local_db_host(opts.get_host()) {
+    let env_hostaddr = std::env::var("PGHOSTADDR").ok();
+    let hostaddr = connect_hostaddr(dsn.expose_secret(), env_hostaddr.as_deref());
+
+    if !is_local_db_target(&opts, hostaddr) {
         warn!(
             host = opts.get_host(),
             "--collector.system reports host CPU/memory for the exporter's own \
@@ -474,6 +514,99 @@ mod tests {
             "::2",
         ] {
             assert!(!is_local_db_host(host), "expected {host:?} to be remote");
+        }
+    }
+
+    /// `hostaddr` decides where the connection goes. `SQLx` 0.9.0 folded it into `host`;
+    /// 0.9.1 keeps them apart, so judging locality by `host` alone called
+    /// `host=localhost&hostaddr=10.0.0.5` local and dropped the system-collector warning.
+    #[test]
+    fn test_is_local_db_target_follows_hostaddr() -> Result<()> {
+        // (DSN, PGHOSTADDR, expected local)
+        for (dsn, env_hostaddr, local) in [
+            ("postgresql://user@localhost:5432/postgres", None, true),
+            (
+                "postgresql://user@db.example.com:5432/postgres",
+                None,
+                false,
+            ),
+            (
+                "postgresql://user@localhost:5432/postgres?hostaddr=10.0.0.5",
+                None,
+                false,
+            ),
+            (
+                "postgresql://user@db.example.com:5432/postgres?hostaddr=127.0.0.1",
+                None,
+                true,
+            ),
+            (
+                "postgresql://user@db.example.com:5432/postgres?hostaddr=::1",
+                None,
+                true,
+            ),
+            // `PGHOSTADDR` applies when the DSN sets no `hostaddr`, and loses to one.
+            (
+                "postgresql://user@localhost:5432/postgres",
+                Some("10.0.0.5"),
+                false,
+            ),
+            (
+                "postgresql://user@db.example.com:5432/postgres?hostaddr=127.0.0.1",
+                Some("10.0.0.5"),
+                true,
+            ),
+            // A repeated `hostaddr`: the last one is where the connection goes.
+            (
+                "postgresql://user@localhost:5432/postgres?hostaddr=127.0.0.1&hostaddr=10.0.0.5",
+                None,
+                false,
+            ),
+            (
+                "postgresql://user@localhost:5432/postgres?hostaddr=10.0.0.5&hostaddr=127.0.0.1",
+                None,
+                true,
+            ),
+            // A Unix socket ignores `hostaddr`.
+            (
+                "postgresql:///postgres?host=/var/run/postgresql&hostaddr=10.0.0.5",
+                None,
+                true,
+            ),
+            // A bracketed IPv6 loopback literal, as a URL requires it.
+            ("postgresql://user@[::1]:5432/postgres", None, true),
+            ("postgresql://user@[2001:db8::1]:5432/postgres", None, false),
+        ] {
+            let opts = PgConnectOptions::from_str(dsn)?;
+            let hostaddr = connect_hostaddr(dsn, env_hostaddr);
+            assert_eq!(
+                is_local_db_target(&opts, hostaddr),
+                local,
+                "{dsn} with PGHOSTADDR={env_hostaddr:?} should be {}",
+                if local { "local" } else { "remote" }
+            );
+        }
+        Ok(())
+    }
+
+    /// These DSNs parse, but `SQLx` cannot format them back into a URL and panics trying.
+    /// The startup warning must not go through that path: a panic here would take the
+    /// exporter down before it serves a single scrape.
+    #[test]
+    fn test_remote_warning_survives_dsns_that_do_not_round_trip() {
+        let system = vec!["system".to_owned()];
+        for dsn in [
+            // Explicitly empty host.
+            "postgresql:///postgres?host=",
+            // A user name that is only valid in a URL when percent-encoded.
+            "postgresql://user%2Frole@localhost:5432/postgres",
+            "postgresql://user%3Fname@db.example.com:5432/postgres?hostaddr=10.0.0.5",
+        ] {
+            assert!(
+                PgConnectOptions::from_str(dsn).is_ok(),
+                "{dsn} should parse; the test is only meaningful for DSNs that do"
+            );
+            warn_if_system_collector_remote(&SecretString::from(dsn.to_owned()), &system);
         }
     }
 
