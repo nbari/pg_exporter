@@ -178,6 +178,12 @@ impl StatUserTablesCollector {
 
 const USER_TABLE_LABELS: [&str; 3] = ["datname", "schemaname", "relname"];
 
+/// The two threshold ratios divide by a table's autovacuum trigger point,
+/// `threshold + scale_factor * n_live_tup`. Reloptions can set both terms to 0, which
+/// tells `PostgreSQL` to treat any dead (or modified) tuple as due. The division is
+/// guarded for that case and falls back to a divisor of 1, so such a table reports its
+/// tuple count: any work at all reads as at or past the threshold. Unguarded, one such
+/// table raised `division by zero` and failed the whole query for its database.
 const STAT_USER_TABLES_QUERY: &str = r"
     SELECT
         current_database() AS datname,
@@ -211,7 +217,7 @@ const STAT_USER_TABLES_QUERY: &str = r"
         CASE
             WHEN s.n_live_tup > 0 THEN
                 s.n_dead_tup::double precision /
-                (
+                COALESCE(NULLIF(
                     COALESCE(
                         (
                             SELECT option_value::double precision
@@ -228,13 +234,13 @@ const STAT_USER_TABLES_QUERY: &str = r"
                         ),
                         current_setting('autovacuum_vacuum_scale_factor')::double precision
                     ) * s.n_live_tup::double precision
-                )
+                , 0), 1)
             ELSE 0
         END AS autovacuum_threshold_ratio,
         CASE
             WHEN s.n_live_tup > 0 THEN
                 s.n_mod_since_analyze::double precision /
-                (
+                COALESCE(NULLIF(
                     COALESCE(
                         (
                             SELECT option_value::double precision
@@ -251,7 +257,7 @@ const STAT_USER_TABLES_QUERY: &str = r"
                         ),
                         current_setting('autovacuum_analyze_scale_factor')::double precision
                     ) * s.n_live_tup::double precision
-                )
+                , 0), 1)
             ELSE 0
         END AS autoanalyze_threshold_ratio,
         COALESCE(io.heap_blks_read::bigint, 0) AS heap_blks_read,

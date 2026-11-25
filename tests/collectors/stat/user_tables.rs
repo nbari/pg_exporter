@@ -927,6 +927,110 @@ async fn test_stat_user_tables_collector_autovacuum_threshold_metrics() -> Resul
     Ok(())
 }
 
+/// Creates a table whose autovacuum and autoanalyze trigger points are both zero, gives
+/// it dead tuples, and returns the autovacuum threshold ratio the collector exports.
+async fn collect_zero_threshold_ratio(pool: &sqlx::PgPool, table_name: &str) -> Result<f64> {
+    // Autovacuum is disabled so it cannot remove the dead tuples mid-test; the zeroed
+    // options still define the trigger point the ratio divides by.
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "CREATE TABLE {table_name} (id int, data text) WITH (
+             autovacuum_enabled = false,
+             autovacuum_vacuum_threshold = 0,
+             autovacuum_vacuum_scale_factor = 0,
+             autovacuum_analyze_threshold = 0,
+             autovacuum_analyze_scale_factor = 0
+         )"
+    )))
+    .execute(pool)
+    .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "INSERT INTO {table_name} SELECT g, 'row' FROM generate_series(1, 100) g"
+    )))
+    .execute(pool)
+    .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "UPDATE {table_name} SET data = 'modified'"
+    )))
+    .execute(pool)
+    .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!("ANALYZE {table_name}")))
+        .execute(pool)
+        .await?;
+
+    // ANALYZE publishes live and dead tuple counts; wait until both are visible.
+    let mut counts = (0_i64, 0_i64);
+    for _ in 0..100 {
+        counts = sqlx::query_as(
+            "SELECT n_live_tup::bigint, n_dead_tup::bigint
+             FROM pg_stat_user_tables WHERE relname = $1",
+        )
+        .bind(table_name)
+        .fetch_one(pool)
+        .await?;
+        if counts.0 > 0 && counts.1 > 0 {
+            break;
+        }
+        tokio::time::sleep(StdDuration::from_millis(100)).await;
+    }
+    anyhow::ensure!(
+        counts.0 > 0 && counts.1 > 0,
+        "table statistics never showed live and dead tuples: {counts:?}"
+    );
+
+    let collector = StatUserTablesCollector::new();
+    let registry = Registry::new();
+    collector.register_metrics(&registry)?;
+    collector.collect(pool).await?;
+    let metric_families = registry.gather();
+
+    for metric_name in [
+        "pg_stat_user_tables_autovacuum_threshold_ratio",
+        "pg_stat_user_tables_autoanalyze_threshold_ratio",
+        "pg_stat_user_tables_n_dead_tup",
+    ] {
+        anyhow::ensure!(
+            find_metric_for_table(&metric_families, metric_name, table_name).is_some(),
+            "{metric_name} is missing for {table_name}: a zero autovacuum trigger point must \
+             not fail the query for the whole database"
+        );
+    }
+
+    find_metric_for_table(
+        &metric_families,
+        "pg_stat_user_tables_autovacuum_threshold_ratio",
+        table_name,
+    )
+    .map(|metric| metric.get_gauge().value())
+    .ok_or_else(|| anyhow::anyhow!("autovacuum threshold ratio missing for {table_name}"))
+}
+
+/// Reloptions may set both the autovacuum threshold and scale factor to 0. The ratio's
+/// divisor is then 0, and `PostgreSQL` raises `division by zero` for `double precision`:
+/// unguarded, one such table removed every `pg_stat_user_tables_*` series of its database,
+/// and failed the scrape when it happened in every database.
+#[tokio::test]
+async fn test_stat_user_tables_collector_survives_zero_autovacuum_threshold() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+    let table_name = unique_table_name("test_zero_autovac_threshold");
+
+    let outcome = collect_zero_threshold_ratio(&pool, &table_name).await;
+
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "DROP TABLE IF EXISTS {table_name}"
+    )))
+    .execute(&pool)
+    .await?;
+    pool.close().await;
+
+    let ratio = outcome?;
+    assert!(
+        ratio >= 1.0,
+        "with a zero trigger point any dead tuple is due for autovacuum, so the ratio must \
+         be at least 1, got {ratio}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_stat_user_tables_collector_marks_never_autovacuumed_tables() -> Result<()> {
     let pool = common::create_test_pool().await?;

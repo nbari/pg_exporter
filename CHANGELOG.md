@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exported `pg_wait_event_type{type="Lock"} 1` instead of 4. Counts are now summed
   per type. `pg_wait_event` is summed the same way for an event name that exists
   under two types (`SyncRep`).
+- A table whose reloptions set both `autovacuum_vacuum_threshold` and
+  `autovacuum_vacuum_scale_factor` (or the analyze pair) to 0 made the `stat` collector
+  query fail with `division by zero`. Every `pg_stat_user_tables_*` series of that
+  database disappeared, and the scrape returned 503 when every database had such a
+  table. The divisor is now guarded. Such a table reports its dead (or modified) tuple
+  count as the ratio, so any pending work reads as at or past the threshold.
 
 ### Security
 
