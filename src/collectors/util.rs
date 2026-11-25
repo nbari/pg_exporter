@@ -9,7 +9,14 @@ use once_cell::sync::OnceCell;
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::postgres::{PgConnectOptions, PgConnection};
 use sqlx::{Connection, PgPool, Row};
-use std::{str::FromStr, sync::Arc, time::Duration};
+use std::{
+    str::FromStr,
+    sync::{
+        Arc,
+        atomic::{AtomicI32, Ordering},
+    },
+    time::Duration,
+};
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore},
     time::timeout,
@@ -24,8 +31,14 @@ static BASE_OPTS: OnceCell<PgConnectOptions> = OnceCell::new();
 /// Default database name parsed from DSN.
 static DEFAULT_DB: OnceCell<String> = OnceCell::new();
 
-/// `PostgreSQL` version number (e.g., `140_000` for v14.0, `170_000` for v17.0).
-static PG_VERSION: OnceCell<i32> = OnceCell::new();
+/// `PostgreSQL` version number (e.g., `140_000` for v14.0, `170_000` for v17.0); 0 until
+/// it has been detected.
+///
+/// Not a set-once value: the server can be upgraded, or replaced by a newer one behind
+/// the same address, while the exporter keeps running. The registry refreshes this on
+/// every successful scrape so version-gated collectors follow the server they are
+/// actually talking to.
+static PG_VERSION: AtomicI32 = AtomicI32::new(0);
 
 /// Max non-default-database scrape queries that may run concurrently across the exporter,
 /// set once at startup via CLI/env. Falls back to `MAX_DB_QUERY_CONCURRENCY`.
@@ -371,16 +384,42 @@ pub fn is_database_excluded(datname: &str) -> bool {
     get_excluded_databases().iter().any(|d| d == datname)
 }
 
-/// Set the `PostgreSQL` version. Call this once during startup after connecting.
+/// Record the `PostgreSQL` version if none is known yet. Call this once during startup
+/// after connecting.
+///
+/// A version that is already known is left alone, so this cannot move the cache; use
+/// [`refresh_pg_version`] to follow the server.
 pub fn set_pg_version(version: i32) {
-    let _ = PG_VERSION.set(version);
+    init_version(&PG_VERSION, version);
+}
+
+/// Replace the cached version with the one the server reports now.
+///
+/// Returns the previous value when it differed (0 if none was known), and `None` when
+/// the version is unchanged or `version` is not a valid version number.
+#[must_use]
+pub fn refresh_pg_version(version: i32) -> Option<i32> {
+    replace_version(&PG_VERSION, version)
+}
+
+fn init_version(cell: &AtomicI32, version: i32) {
+    let _ = cell.compare_exchange(0, version, Ordering::Relaxed, Ordering::Relaxed);
+}
+
+fn replace_version(cell: &AtomicI32, version: i32) -> Option<i32> {
+    if version <= 0 {
+        return None;
+    }
+
+    let previous = cell.swap(version, Ordering::Relaxed);
+    (previous != version).then_some(previous)
 }
 
 /// Get the `PostgreSQL` version number.
 /// Returns 0 if not set (should never happen in production).
 #[inline]
 pub fn get_pg_version() -> i32 {
-    PG_VERSION.get().copied().unwrap_or(0)
+    PG_VERSION.load(Ordering::Relaxed)
 }
 
 /// Check if `PostgreSQL` version is at least the specified minimum.
@@ -992,28 +1031,42 @@ mod tests {
         }
     }
 
+    // These exercise the helpers on a local cell. The process-wide cache is refreshed
+    // by every DB-backed test that runs a scrape, so asserting on it here would depend
+    // on test execution order.
     #[test]
-    fn test_pg_version_utilities() {
-        let initial = get_pg_version();
-        if initial == 0 {
-            assert!(!is_pg_version_at_least(140_000));
+    fn startup_version_is_recorded_once() {
+        let cell = AtomicI32::new(0);
 
-            set_pg_version(160_000); // PostgreSQL 16
-            assert_eq!(get_pg_version(), 160_000);
-            assert!(is_pg_version_at_least(140_000)); // >= 14
-            assert!(is_pg_version_at_least(160_000)); // >= 16
-            assert!(!is_pg_version_at_least(170_000)); // < 17
-        } else {
-            // Other DB-backed tests may initialize this OnceCell first when
-            // PG_EXPORTER_DSN is present. Verify the helpers without depending on
-            // test execution order.
-            assert_eq!(get_pg_version(), initial);
-            assert!(is_pg_version_at_least(initial));
-            assert!(!is_pg_version_at_least(initial + 1));
+        init_version(&cell, 160_000);
+        assert_eq!(cell.load(Ordering::Relaxed), 160_000);
 
-            set_pg_version(160_000);
-            assert_eq!(get_pg_version(), initial);
-        }
+        // A second startup-style write must not move a known version.
+        init_version(&cell, 170_000);
+        assert_eq!(cell.load(Ordering::Relaxed), 160_000);
+    }
+
+    #[test]
+    fn refreshed_version_follows_the_server() {
+        let cell = AtomicI32::new(0);
+
+        // First detection reports that nothing was known before.
+        assert_eq!(replace_version(&cell, 170_011), Some(0));
+        // An unchanged server is not a change.
+        assert_eq!(replace_version(&cell, 170_011), None);
+        // A major upgrade under a running exporter replaces the cached version and
+        // reports the one it replaced.
+        assert_eq!(replace_version(&cell, 180_006), Some(170_011));
+        assert_eq!(cell.load(Ordering::Relaxed), 180_006);
+    }
+
+    #[test]
+    fn refresh_ignores_values_that_are_not_versions() {
+        let cell = AtomicI32::new(170_011);
+
+        assert_eq!(replace_version(&cell, 0), None);
+        assert_eq!(replace_version(&cell, -1), None);
+        assert_eq!(cell.load(Ordering::Relaxed), 170_011);
     }
 
     #[test]

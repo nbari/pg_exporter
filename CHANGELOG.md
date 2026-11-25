@@ -22,6 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exported `pg_wait_event_type{type="Lock"} 1` instead of 4. Counts are now summed
   per type. `pg_wait_event` is summed the same way for an event name that exists
   under two types (`SyncRep`).
+- A PostgreSQL major upgrade under a running exporter no longer needs an exporter
+  restart. The server version was detected once per process, so version-gated
+  collectors kept using the old server's SQL: after a 17 to 18 upgrade
+  `--collector.stat_io` failed every scrape with `column "op_bytes" does not exist`
+  (503), and after a 16 to 17 upgrade `pg_stat_checkpointer_*` stayed absent. The
+  version is now read on every scrape, in the same round trip as the connectivity
+  check (`SHOW server_version_num` replaces `SELECT 1`), and a change is logged.
 - A table whose reloptions set both `autovacuum_vacuum_threshold` and
   `autovacuum_vacuum_scale_factor` (or the analyze pair) to 0 made the `stat` collector
   query fail with `division by zero`. Every `pg_stat_user_tables_*` series of that

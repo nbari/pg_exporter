@@ -6,7 +6,7 @@ use crate::{
         sequences::SequencesCollector,
         statements::StatementsCollector,
         system::SystemCollector,
-        util::{get_pg_version, get_scrape_timeout, set_pg_version},
+        util::{get_scrape_timeout, refresh_pg_version},
     },
     exporter::GIT_COMMIT_HASH,
 };
@@ -330,45 +330,52 @@ impl CollectorRegistry {
         }
     }
 
-    async fn connectivity_check(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
+    /// Proves the server answers and reads its version in the same round trip.
+    ///
+    /// The version is read on every scrape rather than once per process. `PostgreSQL`
+    /// can be upgraded, or replaced by a newer server behind the same address, while the
+    /// exporter keeps running; the scrapes in between just see `pg_up 0`. Collectors that
+    /// choose their SQL by version would otherwise keep using the old server's: after a
+    /// 17 to 18 upgrade `stat_io` selected a column that no longer exists and failed
+    /// every scrape until the exporter was restarted.
+    async fn connectivity_check(pool: &sqlx::PgPool) -> Result<Option<i32>, sqlx::Error> {
         let connect_span = info_span!(
             "db.connectivity_check",
             otel.kind = "client",
             db.system = "postgresql",
-            db.operation = "SELECT",
-            db.statement = "SELECT 1"
+            db.operation = "SHOW",
+            db.statement = "SHOW server_version_num"
         );
 
-        sqlx::query("SELECT 1")
+        let version_num: String = sqlx::query_scalar("SHOW server_version_num")
             .fetch_one(pool)
             .instrument(connect_span)
-            .await
-            .map(|_| ())
+            .await?;
+
+        Ok(version_num.parse::<i32>().ok())
     }
 
-    async fn ensure_version_initialized(&self, pool: &sqlx::PgPool) {
-        if get_pg_version() != 0 {
-            return;
-        }
-
-        let version_num_res: Result<String, sqlx::Error> =
-            sqlx::query_scalar("SHOW server_version_num")
-                .fetch_one(pool)
-                .await;
-
-        if let Ok(version_num) = version_num_res
-            && let Ok(version) = version_num.parse::<i32>()
-        {
-            set_pg_version(version);
-            info!(version, "Deferred PostgreSQL version detection successful");
+    /// Makes the version the server just reported the one collectors gate on.
+    fn record_server_version(version: i32) {
+        match refresh_pg_version(version) {
+            Some(0) => info!(version, "PostgreSQL version detected"),
+            Some(previous) => warn!(
+                previous,
+                version,
+                "PostgreSQL server version changed while the exporter was running; \
+                 version-gated collectors now follow the new server"
+            ),
+            None => {}
         }
     }
 
     async fn select_active_pool(&self, shared_pool: &sqlx::PgPool) -> ActivePool {
         match Self::connectivity_check(shared_pool).await {
-            Ok(()) => {
+            Ok(version) => {
                 self.pg_up_gauge.set(1.0);
-                self.ensure_version_initialized(shared_pool).await;
+                if let Some(version) = version {
+                    Self::record_server_version(version);
+                }
                 ActivePool::Available(shared_pool.clone())
             }
             Err(error) => {
