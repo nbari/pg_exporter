@@ -7,7 +7,7 @@ use pg_exporter::collectors::{
 };
 use prometheus::Registry;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Metric families the system collector exposes (host-wide, per-core CPU).
 const SYSTEM_METRICS: [&str; 10] = [
@@ -226,43 +226,75 @@ async fn test_system_metrics_have_no_database_label() -> Result<()> {
 /// Issue #35 regression: the `system` collector must not run its blocking `/proc` walk
 /// on a Tokio worker thread.
 ///
-/// Pinned to a single-threaded runtime so there is exactly one worker. A spinner task is
-/// left ready to run; if `collect` performs its OS reads inline in the async block — as
-/// it did in 0.18.0 — the future never yields, the spinner cannot be polled, and the
-/// counter cannot advance. In production that same monopolised worker stopped the `sqlx`
-/// pool's futures from being polled, so every *other* collector failed with a misleading
-/// `pool timed out while waiting for an open connection`.
+/// The runtime has exactly one worker and exactly one blocking thread, and the test
+/// holds that blocking thread. A collector that offloads its OS reads then has to wait
+/// for it, which yields the worker: a spinner task gets to run, sees that a collection
+/// is in flight, and only then frees the blocking thread. A collector that performs the
+/// reads inline in its async block, as it did in 0.18.0, never needs the blocking
+/// thread and never yields, so it finishes with the spinner still waiting. In production
+/// that monopolised worker stopped the `sqlx` pool's futures from being polled, so every
+/// *other* collector failed with a misleading `pool timed out while waiting for an open
+/// connection`.
 ///
-/// This asserts the property (does the collector yield?) rather than a duration, so it
-/// catches the defect on a fast lab host where the raw syscall cost is negligible.
-#[tokio::test(flavor = "current_thread")]
-async fn test_system_collect_does_not_monopolise_the_runtime_worker() -> Result<()> {
-    let pool = common::create_test_pool().await?;
-    let collector = SystemCollector::new();
+/// Holding the blocking thread is what makes this deterministic. Merely checking that
+/// another task ran while `collect` was awaited is a race: on a busy host the offloaded
+/// reads can finish before `collect` is first suspended, and a correct collector then
+/// completes without ever yielding.
+#[test]
+fn test_system_collect_does_not_monopolise_the_runtime_worker() -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()?;
 
-    let progress = Arc::new(AtomicUsize::new(0));
-    let ticker = Arc::clone(&progress);
-    let spinner = tokio::spawn(async move {
-        loop {
-            ticker.fetch_add(1, Ordering::Relaxed);
-            tokio::task::yield_now().await;
-        }
-    });
+    let ran_during_collect = runtime.block_on(async {
+        // Connect first: resolving the host name needs the blocking thread too.
+        let pool = common::create_test_pool().await?;
+        let collector = SystemCollector::new();
 
-    // Let the spinner reach its first yield point so it is queued and ready.
-    tokio::task::yield_now().await;
-    let before = progress.load(Ordering::Relaxed);
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let (started, running) = tokio::sync::oneshot::channel::<()>();
+        let blocker = tokio::task::spawn_blocking(move || {
+            let _ = started.send(());
+            let _ = held.recv();
+        });
+        running.await?;
 
-    collector.collect(&pool).await?;
+        let collecting = Arc::new(AtomicBool::new(false));
+        let observed = Arc::new(AtomicBool::new(false));
+        let spinner = tokio::spawn({
+            let collecting = Arc::clone(&collecting);
+            let observed = Arc::clone(&observed);
+            let release = release.clone();
+            async move {
+                loop {
+                    if collecting.load(Ordering::Relaxed) {
+                        observed.store(true, Ordering::Relaxed);
+                        let _ = release.send(());
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }
+        });
 
-    let after = progress.load(Ordering::Relaxed);
-    spinner.abort();
-    pool.close().await;
+        collecting.store(true, Ordering::Relaxed);
+        let collected = collector.collect(&pool).await;
+        collecting.store(false, Ordering::Relaxed);
+
+        // Free the blocking thread whatever happened, or the runtime cannot shut down.
+        let _ = release.send(());
+        spinner.abort();
+        blocker.await?;
+        pool.close().await;
+        collected?;
+
+        Result::<bool>::Ok(observed.load(Ordering::Relaxed))
+    })?;
 
     assert!(
-        after > before,
-        "no other task ran while the system collector was collecting ({before} -> {after}): \
-         its blocking /proc reads are executing on a runtime worker instead of the blocking \
+        ran_during_collect,
+        "the system collector finished without ever yielding the runtime worker: its \
+         blocking /proc reads are executing on a runtime worker instead of the blocking \
          pool, which starves every concurrent collector (issue #35)"
     );
     Ok(())

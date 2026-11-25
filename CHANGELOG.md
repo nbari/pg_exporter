@@ -25,6 +25,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hash that `--version` and `/health` report.
 - Remove the `nix` development dependency; nothing used it.
 
+### Tests
+
+- Make the issue 35 regression test deterministic. It checked that another task ran
+  while the `system` collector was collecting, which is a race: on a busy host the
+  offloaded reads can finish before the collector is first suspended, and a correct
+  collector then never yields. Under full CPU load it failed about 1 run in 30, and now
+  that `CI OK` gates a release, that blocks releases. The test now holds the runtime's
+  only blocking thread, so an offloading collector must yield and an inline one cannot.
+
 ## [0.22.3] - 2026-11-25
 
 ### Fixed
