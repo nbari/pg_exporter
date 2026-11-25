@@ -129,7 +129,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "pg_version_info{job=\"$job\", instance=\"$instance\"}",
+          "expr": "label_replace(pg_version_info{job=\"$job\", instance=\"$instance\"}, \"short_version\", \"$1\", \"short_version\", \"(\\\\d+\\\\.\\\\d+)\\\\.0\")",
           "format": "table",
           "instant": true,
           "refId": "A"

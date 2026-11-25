@@ -48,6 +48,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   database disappeared, and the scrape returned 503 when every database had such a
   table. The divisor is now guarded. Such a table reports its dead (or modified) tuple
   count as the ratio, so any pending work reads as at or past the threshold.
+- `pg_version_info` reported a version PostgreSQL does not use: `short_version` was
+  padded to three parts, so a 18.6 server showed as `18.6.0` in the dashboard's
+  Version panel (#42). The label is now `major.minor` (`18.6`), taken from
+  `server_version_num`. A pre-release such as `19beta1` reports `19.0`; the full
+  string stays in the `version` label. **A rule that matches the three-part form
+  exactly, such as `short_version="18.6.0"`, must be updated**; matches on the
+  major (`short_version=~"18\\..*"`) keep working. The dashboard also trims the old
+  padding itself, so it shows `18.6` against an exporter older than this release.
+  The collector no longer runs `SELECT version()` twice per scrape.
 
 ### Security
 
@@ -105,6 +114,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tens of gigabytes that never shrank; the series is now streamed from the `SELECT`
   list and bounded by `statement_timeout`. The database catalog test rejected
   `datconnlimit = -2`, which PostgreSQL sets while a database is being dropped.
+- Cover the `short_version` fix (#42) on both sides: the collector tests compare the
+  label with `server_version_num` and `server_version` of the live server, and a
+  dashboard test applies the Version panel's own `label_replace` pattern to old
+  (`18.6.0`) and new (`18.6`, `18.0`) label values.
 
 ### Documentation
 

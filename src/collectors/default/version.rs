@@ -2,7 +2,6 @@ use crate::collectors::{Collected, Collector};
 use anyhow::{Result, anyhow};
 use futures::future::BoxFuture;
 use prometheus::{IntGaugeVec, Opts, Registry};
-use regex::Regex;
 use sqlx::PgPool;
 use tracing::{debug, error, info_span, instrument};
 use tracing_futures::Instrument as _;
@@ -12,8 +11,6 @@ use tracing_futures::Instrument as _;
 pub struct VersionCollector {
     pub pg_version_info: IntGaugeVec,
     pub pg_settings_server_version_num: IntGaugeVec,
-    version_regex: Regex,
-    server_version_regex: Regex,
 }
 
 impl Default for VersionCollector {
@@ -49,16 +46,9 @@ impl VersionCollector {
         )
         .expect("valid pg_settings_server_version_num metric opts");
 
-        let version_regex =
-            Regex::new(r"^\w+ ((\d+)(\.\d+)?(\.\d+)?)").expect("valid version regex");
-        let server_version_regex =
-            Regex::new(r"^((\d+)(\.\d+)?(\.\d+)?)").expect("valid server version regex");
-
         Self {
             pg_version_info,
             pg_settings_server_version_num,
-            version_regex,
-            server_version_regex,
         }
     }
 
@@ -116,51 +106,16 @@ impl VersionCollector {
         }
     }
 
-    #[instrument(skip(self, pool), level = "info", err, fields(db.system = "postgresql", otel.kind = "client"))]
-    async fn query_version(&self, pool: &PgPool) -> Result<String> {
-        // Try: SELECT version()
-        let span = info_span!(
-            "db.query",
-            db.operation = "SELECT",
-            db.statement = "SELECT version()"
-        );
-        if let Ok(version_str) = sqlx::query_scalar::<_, String>("SELECT version()")
-            .fetch_one(pool)
-            .instrument(span)
-            .await
-            && let Some(captures) = self.version_regex.captures(&version_str)
-            && let Some(version_match) = captures.get(1)
-        {
-            return Ok(Self::normalize_version(version_match.as_str()));
-        }
-
-        // Fallback: SHOW server_version
-        let span = info_span!(
-            "db.query",
-            db.operation = "SHOW",
-            db.statement = "SHOW server_version"
-        );
-        let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
-            .fetch_one(pool)
-            .instrument(span)
-            .await?;
-
-        if let Some(captures) = self.server_version_regex.captures(&server_version)
-            && let Some(version_match) = captures.get(1)
-        {
-            return Ok(Self::normalize_version(version_match.as_str()));
-        }
-
-        Err(anyhow!("could not parse version from server response"))
-    }
-
-    fn normalize_version(version: &str) -> String {
-        let parts: Vec<&str> = version.split('.').collect();
-        match parts.len() {
-            1 => format!("{}.0.0", parts.first().copied().unwrap_or("0")),
-            2 => format!("{}.{}.0", parts.first().copied().unwrap_or("0"), parts.get(1).copied().unwrap_or("0")),
-            _ => version.to_string(),
-        }
+    /// Formats `server_version_num` as the `major.minor` version `PostgreSQL` has used
+    /// since release 10, for example `180006` as `18.6`.
+    ///
+    /// The number is the one source every build agrees on: `version()` and
+    /// `server_version` carry packaging suffixes and pre-release names (`19beta1`),
+    /// which the full `version` label keeps. A pre-release reports minor `0`.
+    fn short_version(server_version_num: i64) -> String {
+        let major = server_version_num / 10_000;
+        let minor = server_version_num % 10_000;
+        format!("{major}.{minor}")
     }
 }
 
@@ -197,9 +152,6 @@ impl Collector for VersionCollector {
                 .instrument(span)
                 .await?;
 
-            // Normalized short version
-            let short_version = self.query_version(pool).await?;
-
             // SHOW server_version_num
             let span = info_span!(
                 "db.query",
@@ -219,6 +171,8 @@ impl Collector for VersionCollector {
                     "Failed to parse server_version_num '{server_version_num_str}': {e}"
                 )
             })?;
+
+            let short_version = Self::short_version(server_version_num);
 
             // Server label lookup
             let server_label = self.get_server_info(pool).await?;
@@ -247,5 +201,44 @@ impl Collector for VersionCollector {
 
     fn enabled_by_default(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VersionCollector;
+
+    #[test]
+    fn short_version_is_major_and_minor() {
+        for (server_version_num, expected) in [
+            (140_000, "14.0"),
+            (140_013, "14.13"),
+            (160_004, "16.4"),
+            (170_010, "17.10"),
+            (180_000, "18.0"),
+            (180_006, "18.6"),
+            // 19devel, 19beta1 and 19rc1 all report 190000.
+            (190_000, "19.0"),
+        ] {
+            assert_eq!(
+                VersionCollector::short_version(server_version_num),
+                expected,
+                "server_version_num {server_version_num}"
+            );
+        }
+    }
+
+    /// Issue 42: the label was padded to three parts (`18.6.0`), a version
+    /// `PostgreSQL` has not used since release 10.
+    #[test]
+    fn short_version_never_has_a_third_part() {
+        for server_version_num in [140_000, 150_017, 180_006, 190_000, 200_001] {
+            let short = VersionCollector::short_version(server_version_num);
+            assert_eq!(
+                short.split('.').count(),
+                2,
+                "{short} from server_version_num {server_version_num}"
+            );
+        }
     }
 }

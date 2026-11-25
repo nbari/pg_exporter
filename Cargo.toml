@@ -76,7 +76,6 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 ulid = "3.0.0"
 url = "2.5.9"
 prometheus = "0.14.0"
-regex = "1.13.2"
 futures = "0.3.34"
 jiff = { version = "1.0.3", default-features = false, features = ["std"] }
 tonic = { version = "0.14.9", optional = true, features = ["tls-native-roots"] }
@@ -117,6 +116,7 @@ strip = "symbols"
 [dev-dependencies]
 nix = "0.31"
 prometheus = "0.14"
+regex = "1.13.2"
 reqwest = { version = "0.13", features = ["json"] }
 serde_json = "1.0"
 temp-env = "0.3"

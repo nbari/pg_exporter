@@ -539,3 +539,62 @@ async fn temp_safeguard_settings_keep_their_sentinels() -> Result<()> {
 
     Ok(())
 }
+
+/// Issue 42: exporters up to 0.22.2 padded `short_version` to three parts
+/// (`18.6.0`). The Version panel trims that padding with `label_replace`, so the
+/// dashboard shows `18.6` whichever exporter it is pointed at.
+///
+/// Prometheus anchors the pattern on both ends, which is what keeps a real
+/// `18.0` from losing its minor; the test applies the panel's own pattern the
+/// same way.
+#[test]
+fn version_panel_shows_major_and_minor_for_old_and_new_exporters() -> Result<()> {
+    let dashboard: Value = serde_json::from_str(DASHBOARD)?;
+    let panel = dashboard["panels"]
+        .as_array()
+        .context("dashboard has no panels array")?
+        .iter()
+        .find(|panel| panel["title"] == "Version")
+        .context("dashboard has no Version panel")?;
+
+    assert_eq!(
+        panel["options"]["reduceOptions"]["fields"], "/^short_version$/",
+        "the Version panel should display the short_version label"
+    );
+
+    let expr = panel["targets"][0]["expr"]
+        .as_str()
+        .context("Version panel has no query")?;
+    let call = Regex::new(
+        r#"^label_replace\(pg_version_info\{[^}]*\}, "short_version", "\$1", "short_version", "(.+)"\)$"#,
+    )?;
+    let pattern = call
+        .captures(expr)
+        .with_context(|| format!("Version panel should rewrite short_version, got: {expr}"))?[1]
+        // A PromQL string literal escapes each backslash.
+        .replace(r"\\", r"\");
+    let anchored = Regex::new(&format!("^(?:{pattern})$"))?;
+
+    for (exported, shown) in [
+        // Exporters up to 0.22.2.
+        ("18.6.0", "18.6"),
+        ("18.0.0", "18.0"),
+        ("14.13.0", "14.13"),
+        ("19.0.0", "19.0"),
+        // Exporters from 0.22.3 on are left alone.
+        ("18.6", "18.6"),
+        ("18.0", "18.0"),
+        ("17.10", "17.10"),
+        ("19.0", "19.0"),
+    ] {
+        let displayed = anchored.captures(exported).map_or(exported, |found| {
+            found.get(1).map_or(exported, |m| m.as_str())
+        });
+        assert_eq!(
+            displayed, shown,
+            "short_version {exported} should display as {shown}"
+        );
+    }
+
+    Ok(())
+}
