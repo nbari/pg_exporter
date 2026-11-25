@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- `--help` and `-h` no longer print the value of `PG_EXPORTER_DSN`. With a password
+  embedded in the DSN, help output showed it in clear text
+  (`[env: PG_EXPORTER_DSN=postgresql://user:password@...]`); it now shows only the
+  variable name.
 - Refresh dependencies to clear the security audit: libz-sys 1.1.33
   (RUSTSEC-2026-0418, RUSTSEC-2026-0544), url 2.5.9 (RUSTSEC-2026-0592), and
   libsqlite3-sys 0.40.0 (RUSTSEC-2026-0459). None was reachable from the shipped

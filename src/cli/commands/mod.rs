@@ -98,6 +98,9 @@ pub fn new() -> Command {
                 )
                 .default_value("postgresql://postgres@localhost:5432/postgres")
                 .env("PG_EXPORTER_DSN")
+                // A DSN can embed a password. Without this, `--help` prints the live
+                // value of the variable; with it, help names the variable only.
+                .hide_env_values(true)
                 .value_name("DSN"),
         )
         .arg(

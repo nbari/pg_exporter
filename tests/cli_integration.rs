@@ -131,6 +131,41 @@ fn test_binary_help_flag() {
     assert!(stdout.contains("--dsn"), "Help should show dsn option");
 }
 
+/// Help must name `PG_EXPORTER_DSN` without printing its value: a DSN can embed a
+/// password, and help output ends up in terminals, CI logs, and bug reports.
+#[test]
+fn test_help_does_not_print_the_dsn_from_the_environment() {
+    const SECRET: &str = "s3cr3t-help-probe";
+    let dsn = format!("postgresql://monitor:{SECRET}@db.invalid:5432/postgres");
+
+    for flag in ["--help", "-h"] {
+        let output = Command::new(get_binary_path())
+            .arg(flag)
+            .env("PG_EXPORTER_DSN", &dsn)
+            .output()
+            .expect("Failed to execute binary");
+
+        assert!(output.status.success(), "{flag} should exit successfully");
+        let printed = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !printed.contains(SECRET),
+            "{flag} printed the password from PG_EXPORTER_DSN"
+        );
+        assert!(
+            !printed.contains("db.invalid"),
+            "{flag} printed the DSN from PG_EXPORTER_DSN"
+        );
+        assert!(
+            printed.contains("PG_EXPORTER_DSN"),
+            "{flag} should still name the environment variable"
+        );
+    }
+}
+
 /// Test that the binary shows version information
 #[test]
 fn test_binary_version_flag() {
