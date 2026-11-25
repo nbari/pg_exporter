@@ -1,7 +1,75 @@
 use super::super::common;
-use anyhow::Result;
+use anyhow::{Context, Result, ensure};
 use pg_exporter::collectors::{Collector, replication::slots::ReplicationSlotsCollector};
 use prometheus::Registry;
+use sqlx::PgPool;
+
+/// WAL written past the slot before collecting, so a correct reading is unmistakably
+/// non-zero.
+const WAL_BURST_BYTES: i32 = 1_048_576;
+
+/// `SQLSTATE`s for a server that cannot hold another slot: `wal_level = minimal`
+/// (`55000`) or every `max_replication_slots` entry in use (`53400`).
+fn slots_unavailable(error: &sqlx::Error) -> bool {
+    matches!(
+        error,
+        sqlx::Error::Database(db) if matches!(db.code().as_deref(), Some("55000" | "53400"))
+    )
+}
+
+fn exported_slot_lag(registry: &Registry, slot: &str) -> Option<f64> {
+    registry
+        .gather()
+        .iter()
+        .find(|family| family.name() == "pg_replication_slots_pg_wal_lsn_diff")?
+        .get_metric()
+        .iter()
+        .find(|metric| {
+            metric
+                .get_label()
+                .iter()
+                .any(|label| label.name() == "slot_name" && label.value() == slot)
+        })
+        .map(|metric| metric.get_gauge().value())
+}
+
+async fn assert_slot_lag_is_exported(pool: &PgPool, slot: &str) -> Result<()> {
+    // Transactional, so the commit flushes it and `pg_current_wal_lsn()` moves past it.
+    sqlx::query("SELECT pg_logical_emit_message(true, 'pg_exporter_test', repeat('x', $1))")
+        .bind(WAL_BURST_BYTES)
+        .execute(pool)
+        .await
+        .context("failed to write WAL past the slot")?;
+
+    let registry = Registry::new();
+    let collector = ReplicationSlotsCollector::new();
+    collector.register_metrics(&registry)?;
+    collector.collect(pool).await?;
+
+    let exported = exported_slot_lag(&registry, slot)
+        .with_context(|| format!("no pg_replication_slots_pg_wal_lsn_diff series for {slot}"))?;
+
+    // The slot is inactive, so its `restart_lsn` cannot move, and WAL only grows: a later
+    // reading from PostgreSQL is an upper bound for what the collector saw.
+    let retained_after: f64 = sqlx::query_scalar(
+        "SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)::double precision
+         FROM pg_replication_slots WHERE slot_name = $1",
+    )
+    .bind(slot)
+    .fetch_one(pool)
+    .await?;
+
+    ensure!(
+        exported >= f64::from(WAL_BURST_BYTES),
+        "slot {slot} retains at least {WAL_BURST_BYTES} bytes of WAL but the collector \
+         exported {exported}"
+    );
+    ensure!(
+        exported <= retained_after,
+        "exported lag {exported} exceeds what PostgreSQL reports afterwards ({retained_after})"
+    );
+    Ok(())
+}
 
 #[tokio::test]
 async fn test_replication_slots_collector_name() {
@@ -93,6 +161,42 @@ async fn test_replication_slots_collector_active_is_boolean() -> Result<()> {
 
     pool.close().await;
     Ok(())
+}
+
+/// The lag of a slot that retains WAL must reach the metric. `pg_wal_lsn_diff` returns
+/// `numeric`; decoded as `f64` without a cast it failed on every row and the collector
+/// published 0 for every slot, so the documented retention alert could never fire.
+#[tokio::test]
+async fn test_replication_slots_lag_reports_retained_wal() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let slot = format!("pgx_slot_lag_{}_{nanos}", std::process::id());
+
+    // `true` reserves WAL immediately, giving the slot a `restart_lsn`.
+    let created = sqlx::query("SELECT pg_create_physical_replication_slot($1, true)")
+        .bind(&slot)
+        .execute(&pool)
+        .await;
+    if let Err(error) = created {
+        pool.close().await;
+        if slots_unavailable(&error) {
+            eprintln!("skipping slot lag test: this server cannot create a slot: {error}");
+            return Ok(());
+        }
+        return Err(error).context("failed to create the test replication slot");
+    }
+
+    let outcome = assert_slot_lag_is_exported(&pool, &slot).await;
+
+    sqlx::query("SELECT pg_drop_replication_slot($1)")
+        .bind(&slot)
+        .execute(&pool)
+        .await
+        .context("failed to drop the test replication slot")?;
+    pool.close().await;
+    outcome
 }
 
 #[tokio::test]

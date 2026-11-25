@@ -105,7 +105,7 @@ impl Collector for ReplicationSlotsCollector {
                     (CASE pg_is_in_recovery() 
                         WHEN 't' THEN pg_wal_lsn_diff(pg_last_wal_receive_lsn(), restart_lsn) 
                         ELSE pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn) 
-                    END) AS pg_wal_lsn_diff
+                    END)::double precision AS pg_wal_lsn_diff
                 FROM pg_replication_slots
                 ",
             )
@@ -122,7 +122,13 @@ impl Collector for ReplicationSlotsCollector {
                 let slot_type: String = row.try_get("slot_type").unwrap_or_default();
                 let database: String = row.try_get("database").unwrap_or_default();
                 let is_active: bool = row.try_get("active").unwrap_or(false);
-                let lsn_diff: f64 = row.try_get("pg_wal_lsn_diff").unwrap_or(0.0);
+                // `restart_lsn` is NULL until a slot reserves WAL; that is the only case
+                // reported as 0. A decode failure must not be: `pg_wal_lsn_diff` returns
+                // `numeric`, and reading it as `f64` without the cast above failed on
+                // every row and silently published 0 for every slot.
+                let lsn_diff: f64 = row
+                    .try_get::<Option<f64>, _>("pg_wal_lsn_diff")?
+                    .unwrap_or(0.0);
 
                 self.wal_lsn_diff
                     .with_label_values(&[&slot_name, &slot_type, &database])

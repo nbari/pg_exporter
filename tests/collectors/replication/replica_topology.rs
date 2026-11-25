@@ -30,6 +30,9 @@ const CONNECT_ATTEMPTS: u32 = 60;
 const OBSERVE_ATTEMPTS: u32 = 60;
 const REPLAY_WAIT_ATTEMPTS: u32 = 80;
 const NON_REPLICA_LAG_SENTINEL_SECONDS: f64 = 0.0;
+/// A reply age large enough that a correct reading cannot be mistaken for the 0 the
+/// collector used to publish.
+const MIN_OBSERVABLE_REPLY_AGE_SECONDS: f64 = 0.05;
 
 const REPLICA_BOOTSTRAP_SCRIPT: &str = r#"
 set -euo pipefail
@@ -185,6 +188,50 @@ async fn wait_for_primary_stat_replication_metrics(
     bail!(
         "primary never exposed pg_stat_replication metrics with samples; last_samples={last_samples}"
     )
+}
+
+/// Seconds since the standby's last reply, as `PostgreSQL` reports it.
+async fn query_reply_age_seconds(primary_pool: &PgPool) -> Result<Option<f64>> {
+    let age: Option<Option<f64>> = sqlx::query_scalar(
+        "SELECT EXTRACT(EPOCH FROM (now() - reply_time))::double precision
+         FROM pg_stat_replication
+         LIMIT 1",
+    )
+    .fetch_optional(primary_pool)
+    .await
+    .context("failed to query reply_time on the primary")?;
+    Ok(age.flatten())
+}
+
+/// `pg_stat_replication_reply_time` must carry the age `PostgreSQL` reports.
+///
+/// `EXTRACT` returns `numeric` since `PostgreSQL` 14; decoded as `f64` without a cast it
+/// failed on every row and the collector published 0 for every standby. The age is read
+/// before and after the collection: while no reply lands in between it only grows, so the
+/// two readings bracket the exported value. A reading where one did land is discarded.
+async fn assert_reply_time_tracks_postgres(primary_pool: &PgPool) -> Result<()> {
+    for _ in 0..OBSERVE_ATTEMPTS {
+        let before = query_reply_age_seconds(primary_pool).await?;
+        let metrics = collect_stat_replication_metrics(primary_pool).await?;
+        let after = query_reply_age_seconds(primary_pool).await?;
+
+        if let (Some(before), Some(after)) = (before, after)
+            && before >= MIN_OBSERVABLE_REPLY_AGE_SECONDS
+            && after >= before
+        {
+            let exported = gauge_value(&metrics, "pg_stat_replication_reply_time")?;
+            ensure!(
+                exported >= before && exported <= after,
+                "pg_stat_replication_reply_time exported {exported}, but PostgreSQL reported \
+                 {before} before and {after} after the collection"
+            );
+            return Ok(());
+        }
+
+        sleep(Duration::from_millis(200)).await;
+    }
+
+    bail!("never observed a reply_time window without an intervening standby reply")
 }
 
 async fn query_postgres_exporter_replication(pool: &PgPool) -> Result<ReplicaSnapshot> {
@@ -574,6 +621,7 @@ async fn assert_primary_role_and_dependent_collectors(primary_pool: &PgPool) -> 
             >= 1,
         "primary should expose reply time metrics for connected replicas"
     );
+    assert_reply_time_tracks_postgres(primary_pool).await?;
     ensure!(
         optional_gauge_sample_count(&primary_stat_metrics, "pg_stat_replication_slots")
             .unwrap_or(0)

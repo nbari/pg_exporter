@@ -141,7 +141,7 @@ impl Collector for StatReplicationCollector {
                         WHEN 't' THEN pg_wal_lsn_diff(pg_last_wal_receive_lsn(), replay_lsn)::float 
                         ELSE pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)::float 
                     END) AS pg_wal_lsn_diff,
-                    EXTRACT(EPOCH FROM (now() - reply_time)) AS reply_time_seconds
+                    EXTRACT(EPOCH FROM (now() - reply_time))::double precision AS reply_time_seconds
                 FROM pg_stat_replication
                 ",
             )
@@ -165,7 +165,12 @@ impl Collector for StatReplicationCollector {
                 let state: String = row.try_get("state").unwrap_or_default();
                 let current_wal_bytes: f64 = row.try_get("pg_current_wal_lsn_bytes").unwrap_or(0.0);
                 let lsn_diff: f64 = row.try_get("pg_wal_lsn_diff").unwrap_or(0.0);
-                let reply_time: f64 = row.try_get("reply_time_seconds").unwrap_or(0.0);
+                // `reply_time` is NULL until the standby sends its first reply; that is the
+                // only case reported as 0. `EXTRACT` returns `numeric` since PostgreSQL 14,
+                // so without the cast above the `f64` decode failed and published 0 always.
+                let reply_time: f64 = row
+                    .try_get::<Option<f64>, _>("reply_time_seconds")?
+                    .unwrap_or(0.0);
 
                 self.current_wal_lsn_bytes
                     .with_label_values(&[&app_name, &client_addr, &state])

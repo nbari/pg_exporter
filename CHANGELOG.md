@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.22.3] - 2026-11-25
 
+### Fixed
+
+- `pg_replication_slots_pg_wal_lsn_diff` reported 0 for every slot and
+  `pg_stat_replication_reply_time` reported 0 for every standby on PostgreSQL 14+.
+  Both values are `numeric` in PostgreSQL and were read as `f64` without a cast; the
+  failed decode was swallowed and replaced by 0, so the documented WAL-retention alert
+  could never fire. Both are now cast to `double precision`, and a decode failure fails
+  the collector instead of publishing 0. A slot without reserved WAL and a standby
+  that has not replied yet still report 0.
+
 ### Security
 
 - Refresh dependencies to clear the security audit: libz-sys 1.1.33
