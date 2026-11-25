@@ -99,6 +99,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The primary/replica topology test now takes its image tag from
   `PG_EXPORTER_TEST_POSTGRES_TAG` like the other container tests, so the CI matrix
   exercises replication on every supported major instead of always on 16.
+- Fix two races between tests that share one PostgreSQL. The on-CPU backend test ran
+  `generate_series(1, 2000000000)` in `FROM`, which spills to disk at about 300 MB/s
+  and kept running after the test ended, so the cluster-wide temp-file test could see
+  tens of gigabytes that never shrank; the series is now streamed from the `SELECT`
+  list and bounded by `statement_timeout`. The database catalog test rejected
+  `datconnlimit = -2`, which PostgreSQL sets while a database is being dropped.
 
 ### Documentation
 

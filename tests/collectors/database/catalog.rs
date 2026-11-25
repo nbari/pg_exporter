@@ -113,7 +113,9 @@ async fn test_database_size_and_connection_limit_values_reasonable() -> Result<(
         }
     }
 
-    // Connection limit: -1 (unlimited) or >= 1 (non-negative ok for safety)
+    // Connection limit: -1 (unlimited), a non-negative limit, or -2. PostgreSQL sets
+    // `datconnlimit = -2` to mark a database invalid as soon as a `DROP DATABASE`
+    // starts, and other tests drop their isolated databases while this one runs.
     if let Some(limit_fam) = families
         .iter()
         .find(|m| m.name() == "pg_database_connection_limit")
@@ -121,8 +123,8 @@ async fn test_database_size_and_connection_limit_values_reasonable() -> Result<(
         for m in limit_fam.get_metric() {
             let v = common::metric_value_to_i64(m.get_gauge().value());
             assert!(
-                v == -1 || v >= 0,
-                "connection limit should be -1 or >= 0, got {v}"
+                v >= -2,
+                "connection limit should be -2, -1 or >= 0, got {v}"
             );
         }
     }

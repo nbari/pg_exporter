@@ -246,17 +246,30 @@ async fn test_connections_collector_handles_query_error() -> Result<()> {
 // An active query that burns CPU (no wait event) must be counted as on-CPU.
 // Uses generate_series (CPU-bound, wait_event IS NULL) rather than pg_sleep,
 // which would register a Timeout wait event and therefore NOT be on-CPU.
+//
+// The series is produced in the SELECT list, not in FROM. A function in FROM is
+// materialized into a tuplestore that spills to disk: this statement then wrote
+// about 300 MB of temporary files per second and, because the backend keeps running
+// after the test abandons it, tens of gigabytes in CI. That also broke the temp
+// collector's test, which reads the cluster-wide temporary-file footprint. In the
+// SELECT list the rows are streamed and nothing is written.
 #[tokio::test]
 async fn test_connections_collector_detects_on_cpu_backend() -> Result<()> {
     let pool = common::create_test_pool().await?;
 
     let mut conn = pool.acquire().await?;
+    // The test stops waiting after a few seconds but cannot cancel the statement, so
+    // the server has to: without a timeout the backend burns a CPU for the full count.
+    sqlx::query("SET statement_timeout = '30s'")
+        .execute(&mut *conn)
+        .await?;
     let query_handle = tokio::spawn(async move {
         // CPU-heavy aggregate; runs for many seconds with wait_event = NULL, giving
         // the poll loop below ample time to sample it as on-CPU.
-        let _ = sqlx::query("SELECT count(*) FROM generate_series(1, 2000000000)")
-            .execute(&mut *conn)
-            .await;
+        let _ =
+            sqlx::query("SELECT count(*) FROM (SELECT generate_series(1, 2000000000)) AS streamed")
+                .execute(&mut *conn)
+                .await;
         conn
     });
 
