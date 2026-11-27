@@ -319,9 +319,12 @@ exported on its own — its cost is still counted in the top-level statement tha
 it. Under the default `track = top` nothing changes, because nested statements are never
 recorded in the first place.
 
-The column arrived in `pg_stat_statements` 1.9 (PostgreSQL 14). On older extension
-versions the filter is omitted, since `track = all` there cannot produce the duplicate in
-the first place.
+The column arrived in `pg_stat_statements` 1.9 (PostgreSQL 14). The filter is written as
+a `NATURAL JOIN` with a one-row relation whose only column is `toplevel = true`, so it is
+decided by the columns the function call itself returns, in the same statement: on older
+extension versions there is no common column and every row is kept, since `track = all`
+there cannot produce the duplicate in the first place. No catalog probe is involved, so
+the monitoring role needs no access to `pg_proc` or `pg_attribute` for it.
 
 Convert temp blocks to bytes with `pg_settings_block_size_bytes` (from
 `--collector.default`):

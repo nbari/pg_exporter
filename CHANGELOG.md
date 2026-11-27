@@ -9,26 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- The `statements` collector failed every scrape with `column s.toplevel does not
-  exist` (503) after `pg_stat_statements` was replaced under a running exporter by a
-  version with other columns, for example dropped and created again at 1.8, until the
-  exporter was restarted. The column probes were cached for the life of the process.
-  They are now forgotten when the extension disappears, and a query that hits a missing
-  column asks the catalog again and retries once.
-- The same collector kept reading without its top-level filter after
-  `ALTER EXTENSION pg_stat_statements UPDATE` from a version older than 1.9, until it was
-  restarted. Under `pg_stat_statements.track = all` a statement that only runs inside a
-  function was exported, and one that runs both ways had its two entries overwrite each
-  other. The column probes now record the extension version they looked at, the scrape
-  query reports the version with its rows, and rows from another version make the
-  collector probe again and read once more within the same scrape.
-- The `statements` collector decided how to read `pg_stat_statements` by looking at the
-  *view* of that name, while it reads the *function*. A relation called
-  `pg_stat_statements` earlier in `search_path` answered for the extension and could
-  switch the top-level filter off, and a failed lookup was taken to mean "no such
-  column", either of which could publish nested statements on top of top-level ones.
-  The probe now inspects the output columns of the function the scrape calls. A probe
-  that fails is an error for that scrape instead of a guess.
+- The `statements` collector decided whether to filter on `toplevel` with a catalog
+  probe that it cached for the life of the process, and that looked at the
+  `pg_stat_statements` *view* while the scrape reads the *function*. That could:
+  - fail every scrape with `column s.toplevel does not exist` (503) after the extension
+    was dropped and created again at 1.8, until the exporter was restarted;
+  - keep reading without the filter after `ALTER EXTENSION pg_stat_statements UPDATE`
+    from a version older than 1.9, until the exporter was restarted;
+  - drop the filter when a relation called `pg_stat_statements` came earlier in
+    `search_path`, or when the role could not read `pg_attribute`.
+
+  Without the filter, under `pg_stat_statements.track = all` a statement that only runs
+  inside a function was exported, and one that runs both ways had its two entries
+  overwrite each other. The filter is now part of the scrape query: a `NATURAL JOIN` on
+  `toplevel` keeps only top-level rows wherever the function returns that column, and
+  every row on 1.8, which has none. There is no probe left to go stale or to disagree
+  with the call it describes, and the scrape needs no catalog access beyond what 0.22.3
+  needed.
 - The `database` collector failed whenever a scrape overlapped a `DROP DATABASE`.
   `pg_database_size` raises an error for a database that was dropped after the statement
   had listed it, and that error failed the collector for the scrape. When that happens
@@ -37,7 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The same collector asked for each size by database *name*, which PostgreSQL looks up
   a second time. A database dropped and created again under its name in between was
   reported with the old connection limit and the new size. Sizes are now asked for by
-  the OID of the row that was listed, so both values always describe one database.
+  the OID of the row that was listed, so both values describe one database (short of
+  recreating it with an explicitly chosen old OID in the middle of a scrape).
 - `pg_database_size_bytes` reported 0 for a database whose size PostgreSQL answered as
   NULL. An unknown size is no longer published as 0 bytes; the series is absent for
   that scrape.

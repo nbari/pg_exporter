@@ -4,7 +4,7 @@ use crate::collectors::{Collected, Collector, i64_to_f64,
         MS_TO_SEC, QueryFailure, TEMPLATE0, TEMPLATE1, classify_query_error, is_undefined_column,
     },
 };
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, IntGaugeVec, Opts, Registry};
 use sqlx::{postgres::PgRow, PgPool, Row};
@@ -102,11 +102,6 @@ pub struct PgStatementsCollector {
     /// that self-exclusion does not depend on some other component having initialised
     /// that global first.
     query_id_state: Arc<AtomicU8>,
-
-    /// Cached `pg_stat_statements.toplevel` probe, see [`query_id_support`] for the
-    /// shared state encoding and [`PgStatementsCollector::supports_toplevel`] for why
-    /// the column is gated.
-    toplevel_state: Arc<AtomicU8>,
 }
 
 /// Cached query texts and self-identification state.
@@ -139,12 +134,7 @@ impl Drop for TextLookupInFlightGuard {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ExtensionState {
     Unknown,
-    /// `version` is the extension version the cached column probes were made against,
-    /// recorded by the probe itself; see
-    /// [`PgStatementsCollector::rows_match_probed_version`]. `None` until a probe ran.
-    Installed {
-        version: Option<String>,
-    },
+    Installed,
     Missing {
         last_checked: Instant,
     },
@@ -328,7 +318,6 @@ impl PgStatementsCollector {
             work_mem_refusal_warned: Arc::new(AtomicBool::new(false)),
             extension_state: Arc::new(Mutex::new(ExtensionState::Unknown)),
             query_id_state: Arc::new(AtomicU8::new(query_id_support::UNKNOWN)),
-            toplevel_state: Arc::new(AtomicU8::new(query_id_support::UNKNOWN)),
         }
     }
 
@@ -369,19 +358,31 @@ impl PgStatementsCollector {
     /// particular when `--statements.query-text-refresh=0` disables the text lookup that
     /// would otherwise be the only way to learn the collector's own queryid.
     ///
-    /// `supports_toplevel` restricts the scan to top-level statements. See
-    /// [`Self::supports_toplevel`] for why that matters and what it costs.
-    fn build_pg_statements_query(supports_query_id: bool, supports_toplevel: bool) -> String {
+    /// Only top-level statements are read. `pg_stat_statements` is keyed by
+    /// `(userid, dbid, queryid, toplevel)`: with `pg_stat_statements.track = all` a
+    /// statement executed both directly and from inside a function has **two** entries
+    /// with the same `(userid, dbid, queryid)` and different counters. Both would survive
+    /// the `UNION`, then collapse onto one `{queryid, datname, usename, query_short}`
+    /// label set, so one silently overwrites the other, and each duplicate would also
+    /// consume a slot of the `2 * top_n` budget. The cost is that under `track = all` a
+    /// statement *only* ever called from inside a function is not exported. Under the
+    /// default `track = top` nothing changes, because nested statements are never
+    /// recorded in the first place.
+    ///
+    /// `toplevel` only exists from extension version 1.9, so the filter is a `NATURAL
+    /// JOIN` with a one-row relation that has a single column, `toplevel = true`. Where
+    /// the function returns `toplevel`, the join keeps exactly the top-level rows; on 1.8
+    /// there is no common column and the join keeps every row. The filter is decided by
+    /// the columns of the very function call that returns the data, in the same
+    /// statement, so no catalog probe is needed. Probes were tried and each one could
+    /// disagree with the call it described: a view of the same name earlier in
+    /// `search_path`, an extension updated or made visible between the probe and the
+    /// read, or a role allowed to call the function but not to read the catalog.
+    fn build_pg_statements_query(supports_query_id: bool) -> String {
         // A NULL query_id (compute_query_id off) makes IS DISTINCT FROM true for every
         // row, so this degrades to "exclude nothing" rather than dropping the scrape.
         let self_exclusion = if supports_query_id {
             "AND s.queryid IS DISTINCT FROM (SELECT a.query_id FROM pg_stat_activity a WHERE a.pid = pg_backend_pid())"
-        } else {
-            ""
-        };
-
-        let toplevel_only = if supports_toplevel {
-            "AND s.toplevel"
         } else {
             ""
         };
@@ -411,12 +412,12 @@ impl PgStatementsCollector {
                     s.temp_blks_written::bigint AS temp_blks_written,
                     COALESCE(s.wal_bytes, 0)::bigint AS wal_bytes
                 FROM pg_stat_statements(false) s
+                NATURAL JOIN (VALUES (true)) AS top_level_only(toplevel)
                 JOIN pg_database d ON d.oid = s.dbid
                 WHERE s.queryid IS NOT NULL
                   AND s.total_exec_time > 0
                   AND d.datname NOT IN ('{TEMPLATE0}', '{TEMPLATE1}')
                   AND s.queryid <> ALL($1::bigint[])
-                  {toplevel_only}
                   {self_exclusion}
             ),
             top_by_time AS (
@@ -451,11 +452,7 @@ impl PgStatementsCollector {
                 sel.local_blks_written,
                 sel.temp_blks_read,
                 sel.temp_blks_written,
-                sel.wal_bytes,
-                (
-                    SELECT e.extversion FROM pg_extension e
-                    WHERE e.extname = 'pg_stat_statements'
-                ) AS extversion
+                sel.wal_bytes
             FROM selected sel
             LEFT JOIN pg_roles r ON r.oid = sel.userid
             "
@@ -653,72 +650,6 @@ impl PgStatementsCollector {
         supported
     }
 
-    /// Probes once whether `pg_stat_statements` exposes `toplevel`
-    /// (`pg_stat_statements` 1.9, shipped with `PostgreSQL` 14).
-    ///
-    /// `pg_stat_statements` is keyed by `(userid, dbid, queryid, toplevel)`. With
-    /// `pg_stat_statements.track = all` a statement executed both directly and from
-    /// inside a function has **two** entries with the same `(userid, dbid, queryid)` and
-    /// different counters. Both survive the `UNION`, then collapse onto one
-    /// `{queryid, datname, usename, query_short}` label set, so one silently overwrites
-    /// the other and each duplicate also consumes a slot of the `2 * top_n` budget.
-    /// Restricting the scan to `s.toplevel` makes the key unambiguous.
-    ///
-    /// The cost is that under `track = all` a statement *only* ever called from inside a
-    /// function is no longer exported. Under the default `track = top` nothing changes,
-    /// because nested statements are never recorded in the first place.
-    ///
-    /// The probe asks about the **function** the scrape query reads,
-    /// `pg_stat_statements(boolean)`, resolved the way that query resolves it, and looks
-    /// for `toplevel` among its output columns. It used to look at the view of the same
-    /// name, which is another object: a view earlier in `search_path` answered for the
-    /// extension, and a role that could call the function but not read `pg_attribute`
-    /// got no answer at all. The server version is not compared, for the same reason as
-    /// in [`Self::supports_query_id`].
-    ///
-    /// A probe that fails is an error for this scrape: reading on a guess could publish
-    /// nested entries on top of top-level ones. When the function cannot be resolved the
-    /// answer is `false` and nothing is cached; the scrape query then fails as well, and
-    /// that is handled as a missing extension.
-    async fn supports_toplevel(&self, pool: &PgPool) -> Result<bool> {
-        match self.toplevel_state.load(Ordering::Relaxed) {
-            query_id_support::SUPPORTED => return Ok(true),
-            query_id_support::UNSUPPORTED => return Ok(false),
-            _ => {}
-        }
-
-        // The extension version is read in the same statement, so the answer and the
-        // version it holds for cannot come apart.
-        let probed: Option<(bool, Option<String>)> = sqlx::query_as(
-            "SELECT COALESCE('toplevel' = ANY(p.proargnames), false),
-                    (SELECT e.extversion FROM pg_extension e WHERE e.extname = 'pg_stat_statements')
-             FROM pg_proc p
-             WHERE p.oid = to_regprocedure('pg_stat_statements(boolean)')",
-        )
-        .fetch_optional(pool)
-        .await
-        .context("could not probe the columns of pg_stat_statements(boolean)")?;
-
-        let Some((supported, version)) = probed else {
-            debug!("pg_stat_statements(boolean) is not resolvable, retrying next scrape");
-            return Ok(false);
-        };
-
-        if let ExtensionState::Installed { version: probed_for } = &mut *self.extension_state_lock()
-        {
-            *probed_for = version;
-        }
-        self.toplevel_state.store(
-            if supported {
-                query_id_support::SUPPORTED
-            } else {
-                query_id_support::UNSUPPORTED
-            },
-            Ordering::Relaxed,
-        );
-        Ok(supported)
-    }
-
     /// Decides whether a looked-up query text is worth caching.
     ///
     /// `pg_stat_statements` returns NULL when it has no text for an entry, for
@@ -886,7 +817,7 @@ impl PgStatementsCollector {
 
     fn cached_extension_availability(&self) -> Option<bool> {
         match *self.extension_state_lock() {
-            ExtensionState::Installed { .. } => Some(true),
+            ExtensionState::Installed => Some(true),
             ExtensionState::Missing { last_checked }
                 if last_checked.elapsed() < MISSING_EXTENSION_RECHECK_AFTER =>
             {
@@ -898,119 +829,52 @@ impl PgStatementsCollector {
 
     fn update_extension_state(&self, installed: bool) {
         if !installed {
-            // Whatever comes back may not be what left: a different extension version,
-            // or another server altogether.
+            // Whatever comes back may be another server altogether.
             self.forget_schema_capabilities();
         }
-        let mut state = self.extension_state_lock();
-        *state = match (installed, &*state) {
-            // Still installed: keep the version the probes were made against.
-            (true, ExtensionState::Installed { .. }) => return,
-            (true, _) => ExtensionState::Installed { version: None },
-            (false, _) => ExtensionState::Missing {
+        *self.extension_state_lock() = if installed {
+            ExtensionState::Installed
+        } else {
+            ExtensionState::Missing {
                 last_checked: Instant::now(),
-            },
+            }
         };
     }
 
-    /// Forgets the cached column probes so the next scrape asks the catalog again.
+    /// Forgets the cached `query_id` probe so the next scrape asks the catalog again.
     ///
-    /// The probes are cached for the life of the process because the columns normally
-    /// only change with the server. They do change when the extension is dropped and
-    /// created again at another version (`toplevel` arrived in 1.9), and when the
-    /// exporter reaches a different server after a failover or an upgrade. Keeping a
-    /// stale "supported" then fails every scrape with `column s.toplevel does not
-    /// exist` until the exporter restarts.
+    /// The probe is cached for the life of the process because the column normally only
+    /// changes with the server. It does change when the exporter reaches a different
+    /// server after a failover or an upgrade; keeping a stale "supported" would then fail
+    /// every scrape with `column a.query_id does not exist` until the exporter restarts.
     fn forget_schema_capabilities(&self) {
         self.query_id_state
             .store(query_id_support::UNKNOWN, Ordering::Relaxed);
-        self.toplevel_state
-            .store(query_id_support::UNKNOWN, Ordering::Relaxed);
-    }
-
-    /// Whether `rows` were read from the extension version the column probes were made
-    /// against.
-    ///
-    /// A missing column announces itself, because the query fails. A column that
-    /// *appeared* does not: after `ALTER EXTENSION pg_stat_statements UPDATE` from 1.8 the
-    /// query without the `toplevel` filter is still valid, and keeps letting a nested
-    /// entry overwrite the top-level one that shares its labels. The scrape query
-    /// therefore carries `extversion` on every row, at no extra round trip, and the probe
-    /// records the version it looked at, in the same statement as its answer. Rows from
-    /// another version must not be published. Without rows there is nothing to publish,
-    /// and nothing to compare.
-    fn rows_match_probed_version(&self, rows: &[PgRow]) -> bool {
-        let Some(read_from) = rows
-            .first()
-            .and_then(|row| row.try_get::<Option<String>, _>("extversion").ok())
-            .flatten()
-        else {
-            return true;
-        };
-        match &*self.extension_state_lock() {
-            ExtensionState::Installed {
-                version: Some(probed_for),
-            } => *probed_for == read_from,
-            // No probe has recorded a version: nothing to contradict.
-            _ => true,
-        }
     }
 
     /// Reads the statements to publish, or `None` when this scrape has to be skipped.
     ///
-    /// The query is built from the cached column probes, and every result is checked
-    /// against them. Two things can show the probes to be stale, and each gets one new
-    /// probe and one more read: the query fails on a column that is gone, or its rows
-    /// come from another extension version than the probes were made against. A probe
-    /// that fails is an error for the scrape: rows are only published when it is known
-    /// which columns they were read with.
+    /// A query that fails on a column the cached `query_id` probe promised gets one new
+    /// probe and one more read; a second failure is a real fault.
     async fn read_statements(&self, pool: &PgPool) -> Result<Option<Vec<PgRow>>> {
         let top_n = i64::try_from(self.top_n).unwrap_or(i64::MAX);
         let mut reprobed = false;
         loop {
-            let supports_toplevel = self.supports_toplevel(pool).await?;
-            let query = Self::build_pg_statements_query(
-                self.supports_query_id(pool).await,
-                supports_toplevel,
-            );
+            let query = Self::build_pg_statements_query(self.supports_query_id(pool).await);
             match sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
                 .bind(self.self_queryids())
                 .bind(top_n)
                 .fetch_all(pool)
                 .await
             {
-                Ok(rows) if self.rows_match_probed_version(&rows) => return Ok(Some(rows)),
-                // The rows came from another extension version than the one the probes
-                // were made against: probe again and read once more, so not even this
-                // scrape is built on the old answers.
-                Ok(_) if !reprobed => {
-                    reprobed = true;
-                    self.forget_schema_capabilities();
-                    debug!(
-                        collector = "pg_statements",
-                        "pg_stat_statements version changed - probing its columns again"
-                    );
-                }
-                // It changed again between the new probe and the second read. Rows that
-                // fit no probe are not published; the next scrape starts over.
-                Ok(_) => {
-                    self.forget_schema_capabilities();
-                    warn!(
-                        collector = "pg_statements",
-                        "pg_stat_statements keeps changing version - skipping collection"
-                    );
-                    return Ok(None);
-                }
-                // A column the cached probes promised is gone: the extension was replaced
-                // by another version between two scrapes. Ask the catalog again and retry
-                // once; a second failure is a real fault.
+                Ok(rows) => return Ok(Some(rows)),
                 Err(error) if !reprobed && is_undefined_column(&error) => {
                     reprobed = true;
                     self.forget_schema_capabilities();
                     debug!(
                         collector = "pg_statements",
                         error = %error,
-                        "pg_stat_statements columns changed - probing them again"
+                        "a probed column is gone - probing again"
                     );
                 }
                 // The extension was installed when last checked and is gone now: it was
@@ -1410,7 +1274,7 @@ mod tests {
 
     #[test]
     fn test_build_pg_statements_query_uses_roles_left_join() {
-        let query = PgStatementsCollector::build_pg_statements_query(true, true);
+        let query = PgStatementsCollector::build_pg_statements_query(true);
 
         assert!(query.contains("LEFT JOIN pg_roles r ON r.oid = sel.userid"));
         assert!(query.contains("COALESCE(r.rolname, '<unknown>') AS usename"));
@@ -1418,7 +1282,7 @@ mod tests {
 
     #[test]
     fn test_scrape_query_never_reads_query_texts() {
-        let query = PgStatementsCollector::build_pg_statements_query(true, true);
+        let query = PgStatementsCollector::build_pg_statements_query(true);
 
         // Reading pg_stat_statements with showtext = true makes PostgreSQL load the
         // whole query-text file and materialize every row into a work_mem-bounded
@@ -1435,7 +1299,7 @@ mod tests {
 
     #[test]
     fn test_scrape_query_excludes_self_by_queryid() {
-        let query = PgStatementsCollector::build_pg_statements_query(true, true);
+        let query = PgStatementsCollector::build_pg_statements_query(true);
 
         assert!(query.contains("AND s.queryid <> ALL($1::bigint[])"));
         assert!(!query.contains("NOT LIKE"));
@@ -1443,7 +1307,7 @@ mod tests {
 
     #[test]
     fn test_scrape_query_carries_the_self_marker_after_the_first_keyword() {
-        let query = PgStatementsCollector::build_pg_statements_query(true, true);
+        let query = PgStatementsCollector::build_pg_statements_query(true);
 
         // PostgreSQL stores statement text from its first token onwards, so a leading
         // comment would be dropped and the marker lost.
@@ -1454,7 +1318,7 @@ mod tests {
 
     #[test]
     fn test_scrape_query_unions_time_and_temp_rankings() {
-        let query = PgStatementsCollector::build_pg_statements_query(true, true);
+        let query = PgStatementsCollector::build_pg_statements_query(true);
 
         assert!(query.contains("ORDER BY total_exec_time_sec DESC LIMIT $2"));
         assert!(query.contains("WHERE temp_blks_written > 0"));
@@ -1466,7 +1330,7 @@ mod tests {
 
     #[test]
     fn test_scrape_query_casts_numeric_columns() {
-        let query = PgStatementsCollector::build_pg_statements_query(true, true);
+        let query = PgStatementsCollector::build_pg_statements_query(true);
 
         for column in [
             "calls",
@@ -1629,8 +1493,8 @@ mod tests {
         }
 
         for query in [
-            PgStatementsCollector::build_pg_statements_query(true, true),
-            PgStatementsCollector::build_pg_statements_query(false, true),
+            PgStatementsCollector::build_pg_statements_query(true),
+            PgStatementsCollector::build_pg_statements_query(false),
             PgStatementsCollector::build_query_text_lookup(true),
         ] {
             assert!(
@@ -1658,7 +1522,7 @@ mod tests {
     /// so that `--statements.query-text-refresh=0` still keeps it out of the metrics.
     #[test]
     fn test_query_id_self_exclusion_is_text_free_and_version_gated() {
-        let modern = PgStatementsCollector::build_pg_statements_query(true, true);
+        let modern = PgStatementsCollector::build_pg_statements_query(true);
         assert!(modern.contains("pg_backend_pid()"));
         assert!(modern.contains("a.query_id"));
         assert!(
@@ -1670,28 +1534,25 @@ mod tests {
             "self-exclusion must not reintroduce a full text read"
         );
 
-        let legacy = PgStatementsCollector::build_pg_statements_query(false, true);
+        let legacy = PgStatementsCollector::build_pg_statements_query(false);
         assert!(!legacy.contains("pg_backend_pid()"));
         assert!(!legacy.contains("query_id"));
         assert!(legacy.contains("s.queryid <> ALL($1::bigint[])"));
     }
 
-    /// `toplevel` arrived in `pg_stat_statements` 1.9 (`PostgreSQL` 14). Emitting the
-    /// filter unconditionally would fail on 12/13 with `column does not exist`, taking
-    /// the whole collector down instead of degrading.
+    /// `track = all` must not collapse a nested and a top-level entry onto one series,
+    /// and the filter must not name `toplevel`, which 1.8 does not have: a `NATURAL
+    /// JOIN` on it filters where the column exists and keeps every row where it does not.
     #[test]
-    fn test_toplevel_filter_is_version_gated() {
-        let modern = PgStatementsCollector::build_pg_statements_query(true, true);
-        assert!(
-            modern.contains("AND s.toplevel"),
-            "track = all must not collapse a nested and a top-level entry onto one series"
-        );
-
-        let legacy = PgStatementsCollector::build_pg_statements_query(true, false);
-        assert!(!legacy.contains("toplevel"));
-        // Dropping the filter must not disturb the rest of the predicate.
-        assert!(legacy.contains("AND s.queryid <> ALL($1::bigint[])"));
-        assert!(legacy.contains("FROM pg_stat_statements(false) s"));
+    fn test_toplevel_filter_works_without_naming_the_column() {
+        for supports_query_id in [true, false] {
+            let query = PgStatementsCollector::build_pg_statements_query(supports_query_id);
+            assert!(query.contains(
+                "FROM pg_stat_statements(false) s\n                NATURAL JOIN (VALUES (true)) AS top_level_only(toplevel)"
+            ));
+            assert!(!query.contains("s.toplevel"));
+            assert!(!query.contains("extversion"));
+        }
     }
 
     /// The text lookup must anchor its self-match instead of scanning for the bare
@@ -1737,92 +1598,27 @@ mod tests {
     }
 
 
-    /// A capability probed against one extension version must not survive the
-    /// extension going away: it may come back as 1.8, which has no `toplevel`.
+    /// The `query_id` probe must not survive the extension going away: the exporter may
+    /// now reach another server.
     #[test]
-    fn test_a_missing_extension_forgets_the_cached_column_probes() {
+    fn test_a_missing_extension_forgets_the_cached_column_probe() {
         let collector = PgStatementsCollector::with_top_n(25);
         collector
             .query_id_state
             .store(query_id_support::SUPPORTED, Ordering::Relaxed);
-        collector
-            .toplevel_state
-            .store(query_id_support::SUPPORTED, Ordering::Relaxed);
 
         collector.update_extension_state(true);
         assert_eq!(
-            collector.toplevel_state.load(Ordering::Relaxed),
+            collector.query_id_state.load(Ordering::Relaxed),
             query_id_support::SUPPORTED,
-            "an installed extension keeps its probes"
+            "an installed extension keeps the probe"
         );
 
         collector.update_extension_state(false);
-        assert_eq!(
-            collector.toplevel_state.load(Ordering::Relaxed),
-            query_id_support::UNKNOWN
-        );
         assert_eq!(
             collector.query_id_state.load(Ordering::Relaxed),
             query_id_support::UNKNOWN
         );
-    }
-
-    /// Staying installed must not lose the version the probes belong to, and a version
-    /// is only held while the extension is installed.
-    #[test]
-    fn test_the_extension_version_lives_and_dies_with_the_installed_state() {
-        let collector = PgStatementsCollector::with_top_n(25);
-        collector.update_extension_state(true);
-        *collector.extension_state_lock() = ExtensionState::Installed {
-            version: Some("1.8".to_owned()),
-        };
-
-        collector.update_extension_state(true);
-        assert_eq!(
-            *collector.extension_state_lock(),
-            ExtensionState::Installed {
-                version: Some("1.8".to_owned())
-            }
-        );
-
-        collector.update_extension_state(false);
-        collector.update_extension_state(true);
-        assert_eq!(
-            *collector.extension_state_lock(),
-            ExtensionState::Installed { version: None }
-        );
-    }
-
-    /// The probe itself records the version it looked at. Learning it from the rows of
-    /// a scrape was not enough: a first scrape without rows left it unknown, and an
-    /// update that followed went unnoticed.
-    #[tokio::test]
-    async fn test_the_column_probe_records_the_extension_version() -> Result<()> {
-        let pool = sqlx::PgPool::connect(&crate::test_dsn::test_dsn()).await?;
-        let installed: Option<String> = sqlx::query_scalar(
-            "SELECT extversion FROM pg_extension WHERE extname = 'pg_stat_statements'",
-        )
-        .fetch_optional(&pool)
-        .await?;
-        let Some(installed) = installed else {
-            println!("pg_stat_statements extension not installed, skipping test");
-            return Ok(());
-        };
-
-        let collector = PgStatementsCollector::with_top_n(25);
-        collector.update_extension_state(true);
-        let probed = collector.supports_toplevel(&pool).await;
-        let recorded = collector.extension_state_lock().clone();
-        pool.close().await;
-        probed?;
-
-        assert_eq!(
-            recorded,
-            ExtensionState::Installed {
-                version: Some(installed)
-            }
-        );
-        Ok(())
     }
 
     #[test]

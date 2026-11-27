@@ -439,12 +439,12 @@ async fn nested_witness_queryids(pool: &sqlx::PgPool) -> Result<Vec<String>> {
     Ok(ids.iter().map(ToString::to_string).collect())
 }
 
-/// The probe must ask about the function the scrape reads, not about the view of the
-/// same name: they are different objects. With the view renamed the function is still
-/// there and still has `toplevel`, so statements are exported and a nested-only one is
-/// filtered out. Probing the view gave no answer here, and nothing was exported.
+/// The scrape reads the function, not the view of the same name: they are different
+/// objects. With the view renamed the function is still there and still has
+/// `toplevel`, so statements are exported and a nested-only one is filtered out.
+/// Probing the view gave no answer here, and nothing was exported.
 #[tokio::test]
-async fn test_pg_statements_collector_probes_the_function_not_the_view() -> Result<()> {
+async fn test_pg_statements_collector_reads_the_function_not_the_view() -> Result<()> {
     let Some(test_db) = setup_pg_statements_test_db().await? else {
         println!("pg_stat_statements extension not installed, skipping test");
         return Ok(());
@@ -512,6 +512,94 @@ async fn test_pg_statements_collector_ignores_a_view_that_shadows_the_extension(
     assert!(
         !nested_exported,
         "the shadowing view has no say: the nested-only statement must be filtered out"
+    );
+    Ok(())
+}
+
+/// A monitoring role may call `pg_stat_statements(false)` without being allowed to read
+/// the catalogs a column probe would need. 0.22.3 scraped such a role, and the
+/// collector has to as well: a probe of `pg_proc` answered HTTP 503 here, a probe of
+/// `pg_attribute` exported nothing, and reading the extension version from
+/// `pg_extension.extversion` failed the scrape. The nested-only statement must still be
+/// filtered out.
+#[tokio::test]
+async fn test_pg_statements_collector_needs_no_catalog_probe() -> Result<()> {
+    // Role names starting with `pg_` are reserved by PostgreSQL.
+    const ROLE: &str = "exporter_statements_restricted";
+    let Some(test_db) = setup_pg_statements_test_db().await? else {
+        println!("pg_stat_statements extension not installed, skipping test");
+        return Ok(());
+    };
+    let pool = test_db.pool();
+    let is_superuser: bool =
+        sqlx::query_scalar("SELECT usesuper FROM pg_user WHERE usename = current_user")
+            .fetch_optional(pool)
+            .await?
+            .unwrap_or(false);
+    if !is_superuser {
+        test_db.cleanup().await?;
+        println!("not a superuser, skipping test");
+        return Ok(());
+    }
+
+    let _ = sqlx::query(sqlx::AssertSqlSafe(format!("DROP ROLE IF EXISTS {ROLE}")))
+        .execute(pool)
+        .await;
+    let outcome = async {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE ROLE {ROLE} LOGIN PASSWORD 'statements_probe' NOSUPERUSER IN ROLE pg_monitor"
+        )))
+        .execute(pool)
+        .await?;
+        // Only in this database, which is dropped afterwards.
+        for statement in [
+            "REVOKE SELECT ON pg_catalog.pg_proc FROM PUBLIC",
+            "REVOKE SELECT ON pg_catalog.pg_attribute FROM PUBLIC",
+            "REVOKE SELECT ON pg_catalog.pg_extension FROM PUBLIC",
+        ] {
+            sqlx::query(statement).execute(pool).await?;
+        }
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "GRANT SELECT (extname) ON pg_catalog.pg_extension TO {ROLE}"
+        )))
+        .execute(pool)
+        .await?;
+
+        let restricted = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&common::dsn_for_database_role(
+                &common::get_test_dsn(),
+                test_db.database_name(),
+                ROLE,
+                "statements_probe",
+            )?)
+            .await?;
+        // The restriction must hold, or this test proves nothing.
+        let probe = sqlx::query("SELECT proargnames FROM pg_catalog.pg_proc LIMIT 1")
+            .fetch_optional(&restricted)
+            .await;
+        anyhow::ensure!(probe.is_err(), "the role can still read pg_proc");
+        let scraped = scrape_with_nested_witness(pool, &restricted).await;
+        restricted.close().await;
+        scraped
+    }
+    .await;
+    test_db.cleanup().await?;
+    // The database holding the grants is gone, so the role can be dropped.
+    let admin = sqlx::PgPool::connect(&common::get_test_dsn()).await?;
+    let _ = sqlx::query(sqlx::AssertSqlSafe(format!("DROP ROLE IF EXISTS {ROLE}")))
+        .execute(&admin)
+        .await;
+    admin.close().await;
+
+    let (any_exported, nested_exported) = outcome?;
+    assert!(
+        any_exported,
+        "a role that can call the function must get statements without reading the catalogs"
+    );
+    assert!(
+        !nested_exported,
+        "the nested-only statement must be filtered out without a catalog probe"
     );
     Ok(())
 }
