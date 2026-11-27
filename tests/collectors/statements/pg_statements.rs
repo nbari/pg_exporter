@@ -439,6 +439,59 @@ async fn nested_witness_queryids(pool: &sqlx::PgPool) -> Result<Vec<String>> {
     Ok(ids.iter().map(ToString::to_string).collect())
 }
 
+/// The collector decides how to read `pg_stat_statements` from a probe of its columns.
+/// When the probe itself cannot be made, it must not guess: it used to read as if the
+/// `toplevel` column were absent, and published nested entries on top of top-level ones.
+/// Here the view the probe looks at is renamed, while the function the scrape reads
+/// still works; nothing may be published until the probe can be made again.
+#[tokio::test]
+async fn test_pg_statements_collector_publishes_nothing_without_a_column_probe() -> Result<()> {
+    let Some(test_db) = setup_pg_statements_test_db().await? else {
+        println!("pg_stat_statements extension not installed, skipping test");
+        return Ok(());
+    };
+    let pool = test_db.pool();
+
+    let outcome = exported_with_and_without_the_probed_view(pool).await;
+    test_db.cleanup().await?;
+
+    let (without_view, with_view_again) = outcome?;
+    assert!(
+        without_view.is_empty(),
+        "nothing may be published while the columns cannot be probed, got: {without_view:?}"
+    );
+    assert!(
+        !with_view_again.is_empty(),
+        "statements should be exported again once the probe works"
+    );
+    Ok(())
+}
+
+/// Scrapes with a fresh collector while the `pg_stat_statements` view is renamed, then
+/// again after it is restored, and returns what was exported each time.
+async fn exported_with_and_without_the_probed_view(
+    pool: &sqlx::PgPool,
+) -> Result<(Vec<String>, Vec<String>)> {
+    let collector = PgStatementsCollector::with_config(100_000, None);
+    let registry = Registry::new();
+    collector.register_metrics(&registry)?;
+    sqlx::query("SELECT 1").execute(pool).await?;
+
+    sqlx::query("ALTER VIEW pg_stat_statements RENAME TO pg_stat_statements_renamed")
+        .execute(pool)
+        .await?;
+    let scraped = collector.collect(pool).await;
+    let without_view = exported_queryids(&registry);
+    sqlx::query("ALTER VIEW pg_stat_statements_renamed RENAME TO pg_stat_statements")
+        .execute(pool)
+        .await?;
+    scraped.context("an unprobeable extension must be a skip, not a failed scrape")?;
+
+    sqlx::query("SELECT 1").execute(pool).await?;
+    collector.collect(pool).await?;
+    Ok((without_view, exported_queryids(&registry)))
+}
+
 #[tokio::test]
 async fn test_pg_statements_collector_excludes_own_query() -> Result<()> {
     let Some(test_db) = setup_pg_statements_test_db().await? else {

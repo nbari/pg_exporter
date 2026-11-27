@@ -672,12 +672,15 @@ impl PgStatementsCollector {
     /// same reason as [`Self::supports_query_id`]: the version global is initialised by
     /// the exporter/registry and would be unset when a collector is driven on its own.
     /// The view is defined as `SELECT * FROM pg_stat_statements(true)`, so its columns
-    /// mirror the function the scrape query actually reads. A failed probe is treated as
-    /// "unsupported" and retried on the next scrape rather than failing the collection.
-    async fn supports_toplevel(&self, pool: &PgPool) -> bool {
+    /// mirror the function the scrape query actually reads.
+    ///
+    /// `None` means the probe itself failed. That is not "unsupported": reading without
+    /// the filter on a guess would publish nested entries on top of top-level ones, so
+    /// the caller publishes nothing for this scrape and the probe runs again on the next.
+    async fn supports_toplevel(&self, pool: &PgPool) -> Option<bool> {
         match self.toplevel_state.load(Ordering::Relaxed) {
-            query_id_support::SUPPORTED => return true,
-            query_id_support::UNSUPPORTED => return false,
+            query_id_support::SUPPORTED => return Some(true),
+            query_id_support::UNSUPPORTED => return Some(false),
             _ => {}
         }
 
@@ -699,7 +702,7 @@ impl PgStatementsCollector {
 
         let Some((supported, version)) = probed else {
             debug!("could not probe pg_stat_statements.toplevel, retrying next scrape");
-            return false;
+            return None;
         };
 
         if let ExtensionState::Installed { version: probed_for } = &mut *self.extension_state_lock()
@@ -714,7 +717,7 @@ impl PgStatementsCollector {
             },
             Ordering::Relaxed,
         );
-        supported
+        Some(supported)
     }
 
     /// Decides whether a looked-up query text is worth caching.
@@ -959,14 +962,24 @@ impl PgStatementsCollector {
     /// The query is built from the cached column probes, and every result is checked
     /// against them. Two things can show the probes to be stale, and each gets one new
     /// probe and one more read: the query fails on a column that is gone, or its rows
-    /// come from another extension version than the probes were made against.
+    /// come from another extension version than the probes were made against. A probe
+    /// that cannot be made at all skips the scrape: rows are only published when it is
+    /// known which columns they were read with.
     async fn read_statements(&self, pool: &PgPool) -> Result<Option<Vec<PgRow>>> {
         let top_n = i64::try_from(self.top_n).unwrap_or(i64::MAX);
         let mut reprobed = false;
         loop {
+            let Some(supports_toplevel) = self.supports_toplevel(pool).await else {
+                warn!(
+                    collector = "pg_statements",
+                    "could not tell whether pg_stat_statements has the toplevel column - \
+                     skipping collection"
+                );
+                return Ok(None);
+            };
             let query = Self::build_pg_statements_query(
                 self.supports_query_id(pool).await,
-                self.supports_toplevel(pool).await,
+                supports_toplevel,
             );
             match sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
                 .bind(self.self_queryids())

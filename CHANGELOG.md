@@ -22,11 +22,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other. The column probes now record the extension version they looked at, the scrape
   query reports the version with its rows, and rows from another version make the
   collector probe again and read once more within the same scrape.
+- When that column probe cannot be made at all, the `statements` collector publishes
+  nothing for the scrape and logs a warning. It used to read as if the column were
+  absent, which could publish nested statements on top of top-level ones.
 - The `database` collector failed whenever a scrape overlapped a `DROP DATABASE`.
   `pg_database_size` raises `database "..." does not exist` for a database that was
   dropped after the statement had listed it, and that error failed the collector for
   the scrape. When that happens the databases are now read one by one, so only the one
   that vanished is left out. The normal case is still a single statement.
+- `pg_database_size_bytes` reported 0 for a database whose size PostgreSQL answered as
+  NULL. An unknown size is no longer published as 0 bytes; the series is absent for
+  that scrape.
 - `pg_stat_user_tables_autovacuum_threshold_ratio` and
   `pg_stat_user_tables_autoanalyze_threshold_ratio` did not follow the server's own
   trigger point, in two ways:

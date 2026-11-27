@@ -60,10 +60,12 @@ impl DatabaseSubCollector {
 }
 
 /// One row of the catalog snapshot.
+#[derive(Debug)]
 struct DatabaseRow {
     name: String,
     connection_limit: i32,
-    size_bytes: i64,
+    /// `None` when `PostgreSQL` reported no size for the database.
+    size_bytes: Option<i64>,
 }
 
 fn query_span(statement: &'static str) -> tracing::Span {
@@ -109,20 +111,20 @@ async fn read_all_at_once(pool: &PgPool, excluded: &[String]) -> Result<Vec<Data
         databases.push(DatabaseRow {
             name,
             connection_limit: row.try_get::<Option<i32>, _>("datconnlimit")?.unwrap_or(0),
-            size_bytes: row.try_get::<Option<i64>, _>("size")?.unwrap_or(0),
+            size_bytes: row.try_get::<Option<i64>, _>("size")?,
         });
     }
     Ok(databases)
 }
 
-/// The same snapshot read with one statement per database, for a scrape that overlaps a
-/// `DROP DATABASE`. A database that is gone by the time its size is asked for is left out;
-/// every other one is reported. Costs one round trip per database, which is why it is
-/// only the fallback.
-async fn read_one_by_one(pool: &PgPool, excluded: &[String]) -> Result<Vec<DatabaseRow>> {
-    let listed: Vec<(Option<String>, Option<i32>)> = sqlx::query_as(
+/// Connection limit and size of one database, as read in one statement.
+type LimitAndSize = (Option<i32>, Option<i64>);
+
+/// The databases to report, by name, with the same server-side exclusion.
+async fn list_database_names(pool: &PgPool, excluded: &[String]) -> Result<Vec<String>> {
+    let names: Vec<Option<String>> = sqlx::query_scalar(
         r"
-        SELECT datname, datconnlimit
+        SELECT datname
         FROM pg_database
         WHERE NOT (datname = ANY($1))
         ORDER BY datname
@@ -131,26 +133,48 @@ async fn read_one_by_one(pool: &PgPool, excluded: &[String]) -> Result<Vec<Datab
     .bind(excluded)
     .fetch_all(pool)
     .instrument(query_span(
-        "SELECT datname, datconnlimit FROM pg_database WHERE NOT (datname = ANY($1))",
+        "SELECT datname FROM pg_database WHERE NOT (datname = ANY($1))",
     ))
     .await?;
+    Ok(names
+        .into_iter()
+        .flatten()
+        .filter(|name| !name.is_empty())
+        .collect())
+}
 
-    let mut databases = Vec::with_capacity(listed.len());
-    for (name, connection_limit) in listed {
-        let Some(name) = name.filter(|name| !name.is_empty()) else {
-            continue;
-        };
-        let size = sqlx::query_scalar::<_, Option<i64>>("SELECT pg_database_size($1::name)::bigint")
-            .bind(&name)
-            .fetch_one(pool)
-            .instrument(query_span("SELECT pg_database_size($1)"))
-            .await;
-        match size {
-            Ok(size) => databases.push(DatabaseRow {
-                name,
+/// The snapshot read with one statement per database, for a scrape that overlaps a
+/// `DROP DATABASE`. Each statement reads the connection limit and the size of one
+/// database together, so both describe the same database even when one was dropped and
+/// created again under its name in between. A database that is gone by the time it is
+/// asked for is left out; every other one is reported. This costs one round trip per
+/// database, which is why it is only the fallback.
+async fn read_each(pool: &PgPool, names: &[String]) -> Result<Vec<DatabaseRow>> {
+    let mut databases = Vec::with_capacity(names.len());
+    for name in names {
+        let read: Result<Option<LimitAndSize>, sqlx::Error> = sqlx::query_as(
+            r"
+            SELECT datconnlimit, pg_database_size(datname)::bigint
+            FROM pg_database
+            WHERE datname = $1
+            ",
+        )
+        .bind(name)
+        .fetch_optional(pool)
+        .instrument(query_span(
+            "SELECT datconnlimit, pg_database_size(datname) FROM pg_database WHERE datname = $1",
+        ))
+        .await;
+        match read {
+            Ok(Some((connection_limit, size_bytes))) => databases.push(DatabaseRow {
+                name: name.clone(),
                 connection_limit: connection_limit.unwrap_or(0),
-                size_bytes: size.unwrap_or(0),
+                size_bytes,
             }),
+            // Dropped before this statement ran, or while it was running.
+            Ok(None) => {
+                debug!(datname = %name, "database was dropped during the scrape - left out");
+            }
             Err(error) if is_undefined_database(&error) => {
                 debug!(datname = %name, "database was dropped during the scrape - left out");
             }
@@ -193,7 +217,8 @@ impl Collector for DatabaseSubCollector {
                         error = %error,
                         "a database was dropped while its size was read - reading one by one"
                     );
-                    read_one_by_one(pool, &excluded).await?
+                    let names = list_database_names(pool, &excluded).await?;
+                    read_each(pool, &names).await?
                 }
                 Err(error) => return Err(error.into()),
             };
@@ -213,15 +238,17 @@ impl Collector for DatabaseSubCollector {
                     .with_label_values(&[&database.name])
                     .set(limit_val);
 
-                let size_val = i64_to_f64(database.size_bytes);
-                self.size_bytes
-                    .with_label_values(&[&database.name])
-                    .set(size_val);
+                // `pg_database_size` can answer NULL; that is "unknown", not 0 bytes.
+                if let Some(size) = database.size_bytes {
+                    self.size_bytes
+                        .with_label_values(&[&database.name])
+                        .set(i64_to_f64(size));
+                }
 
                 debug!(
                     datname = %database.name,
                     connection_limit = limit_val,
-                    size_bytes = size_val,
+                    size_bytes = ?database.size_bytes,
                     "updated pg_database metrics"
                 );
             }
@@ -234,5 +261,67 @@ impl Collector for DatabaseSubCollector {
     fn reset_metrics(&self) {
         self.size_bytes.reset();
         self.connection_limit.reset();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{list_database_names, read_all_at_once, read_each};
+    use anyhow::Result;
+
+    /// The fallback is only taken when a database vanishes mid-scrape, which a test cannot
+    /// time. Handing it a name that does not exist is the same situation, on demand: the
+    /// database that is gone is left out and the one that exists is reported in full.
+    #[tokio::test]
+    async fn the_one_by_one_read_leaves_out_a_database_that_is_gone() -> Result<()> {
+        let pool = sqlx::PgPool::connect(&crate::test_dsn::test_dsn()).await?;
+        let current: String = sqlx::query_scalar("SELECT current_database()::text")
+            .fetch_one(&pool)
+            .await?;
+
+        let names = vec![
+            "no_such_database_for_the_catalog_test".to_owned(),
+            current.clone(),
+        ];
+        let read = read_each(&pool, &names).await;
+        pool.close().await;
+        let databases = read?;
+
+        assert_eq!(databases.len(), 1, "only the existing database: {databases:?}");
+        let reported = databases
+            .first()
+            .map(|database| (database.name.as_str(), database.size_bytes));
+        assert!(
+            matches!(reported, Some((name, Some(size))) if name == current && size > 0),
+            "the existing database keeps its name and size: {databases:?}"
+        );
+        Ok(())
+    }
+
+    /// Both ways of reading must agree on a database nobody is dropping.
+    #[tokio::test]
+    async fn both_reads_report_the_same_connection_limit() -> Result<()> {
+        let pool = sqlx::PgPool::connect(&crate::test_dsn::test_dsn()).await?;
+        let current: String = sqlx::query_scalar("SELECT current_database()::text")
+            .fetch_one(&pool)
+            .await?;
+
+        let listed = list_database_names(&pool, &[]).await?;
+        let at_once = read_all_at_once(&pool, &[]).await;
+        let one_by_one = read_each(&pool, std::slice::from_ref(&current)).await;
+        pool.close().await;
+
+        assert!(listed.contains(&current), "the list names this database");
+        let limit_at_once = at_once
+            .ok()
+            .and_then(|rows| rows.into_iter().find(|row| row.name == current))
+            .map(|row| row.connection_limit);
+        let limit_one_by_one = one_by_one?.first().map(|row| row.connection_limit);
+        // A database dropped elsewhere can fail the bulk read; then there is nothing to
+        // compare, and the other test covers the fallback.
+        if limit_at_once.is_some() {
+            assert_eq!(limit_at_once, limit_one_by_one);
+        }
+        Ok(())
     }
 }
