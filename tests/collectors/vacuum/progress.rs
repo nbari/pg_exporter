@@ -409,6 +409,9 @@ async fn observe_vacuum<T>(
 
 #[tokio::test]
 async fn test_vacuum_progress_resolves_table_name_in_other_database() -> Result<()> {
+    // The pool that observes and cancels comes first: once the database exists and the
+    // VACUUM runs, nothing that can fail may stand between them and the cleanup.
+    let pool = common::create_test_pool().await?;
     let test_db = common::IsolatedTestDatabase::new("vacuum_progress").await?;
     let dbname = test_db.database_name().to_string();
     let table_name = "test_vacuum_progress_cross_db";
@@ -436,13 +439,20 @@ async fn test_vacuum_progress_resolves_table_name_in_other_database() -> Result<
     // Throttled, this VACUUM would run for minutes, so it is cancelled once the collector
     // has seen it. Everything from here to the cleanup runs whatever the observation
     // returned: an early return would leave the backend vacuuming and the database behind.
-    let (vacuum_pid, vacuum_task) = start_throttled_vacuum(
+    let started = start_throttled_vacuum(
         test_db.pool(),
         "VACUUM (VERBOSE) public.test_vacuum_progress_cross_db",
     )
-    .await?;
+    .await;
+    let (vacuum_pid, vacuum_task) = match started {
+        Ok(started) => started,
+        Err(error) => {
+            pool.close().await;
+            test_db.cleanup().await?;
+            return Err(error);
+        }
+    };
 
-    let pool = common::create_test_pool().await?;
     let observation = observe_vacuum(&pool, &dbname, &table_label, &vacuum_task).await;
 
     let cancel = sqlx::query("SELECT pg_cancel_backend($1)")
