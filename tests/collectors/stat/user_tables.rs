@@ -1065,35 +1065,31 @@ async fn threshold_ratios_after_delete(
     .execute(pool)
     .await?;
 
-    // The dead-tuple count is what both ratios are measured in. The live count is only
-    // predictable without an ANALYZE in between: ANALYZE overwrites it with an estimate,
-    // and statistics another pooled connection had not reported yet are added on top.
-    let mut counts = (-1_i64, -1_i64);
-    let settled = |counts: (i64, i64)| {
-        counts.1 == deleted && (analyze_before_delete || counts.0 == rows - deleted)
-    };
+    // Only the dead-tuple count is waited for. It is what both ratios are measured in,
+    // and the trigger point follows `reltuples`, so the live-tuple counter plays no part.
+    // That counter is also not predictable here: ANALYZE overwrites it with an estimate,
+    // and statistics reported late by another pooled connection are added on top; CI saw
+    // 100 live tuples in a table whose rows had all been deleted.
+    let mut dead = -1_i64;
     for _ in 0..100 {
         // Not available before PostgreSQL 15, where the statistics arrive on their own.
         let _ = sqlx::query("SELECT pg_stat_force_next_flush()")
             .execute(pool)
             .await;
-        counts = sqlx::query_as(
-            "SELECT n_live_tup::bigint, n_dead_tup::bigint
-             FROM pg_stat_user_tables WHERE relname = $1",
+        dead = sqlx::query_scalar(
+            "SELECT n_dead_tup::bigint FROM pg_stat_user_tables WHERE relname = $1",
         )
         .bind(table_name)
         .fetch_one(pool)
         .await?;
-        if settled(counts) {
+        if dead == deleted {
             break;
         }
         tokio::time::sleep(StdDuration::from_millis(100)).await;
     }
     anyhow::ensure!(
-        settled(counts),
-        "table statistics never showed {deleted} dead tuples (and, without ANALYZE, {} live), \
-         last saw live and dead {counts:?}",
-        rows - deleted
+        dead == deleted,
+        "table statistics never showed {deleted} dead tuples, last saw {dead}"
     );
 
     let collector = StatUserTablesCollector::new();
