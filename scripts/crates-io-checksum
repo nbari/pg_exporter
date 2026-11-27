@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Print the SHA-256 crates.io holds for a crate version, or `absent` when it has none.
+#
+#   scripts/crates-io-checksum <crate> <version>
+#
+# The release workflow asks twice: before anything is published, to refuse a version
+# that already exists with other bytes, and after the upload, to confirm that crates.io
+# serves the crate this release built. Only a 404 means `absent`; any other answer that
+# is not a 200 with a checksum is the registry failing, and exits non-zero.
+set -euo pipefail
+
+if [[ $# -ne 2 ]]; then
+    echo "usage: ${0##*/} <crate> <version>" >&2
+    exit 2
+fi
+crate=$1
+version=$2
+
+body="$(mktemp)"
+trap 'rm -f "${body}"' EXIT
+if ! status="$(curl -s -o "${body}" -w '%{http_code}' -A "${crate}-release" \
+    "${CRATES_IO_API:-https://crates.io/api/v1}/crates/${crate}/${version}")"; then
+    echo "${0##*/}: crates.io could not be reached for ${crate} ${version}" >&2
+    exit 1
+fi
+case "${status}" in
+    200)
+        checksum="$(jq -r '.version.checksum // empty' "${body}")"
+        if [[ ! "${checksum}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "${0##*/}: crates.io lists ${crate} ${version} without a usable checksum" >&2
+            exit 1
+        fi
+        echo "${checksum}"
+        ;;
+    404) echo absent ;;
+    *)
+        echo "${0##*/}: crates.io answered HTTP ${status} for ${crate} ${version}" >&2
+        exit 1
+        ;;
+esac

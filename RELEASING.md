@@ -22,11 +22,12 @@ the whole release is one workflow, [`release.yml`](.github/workflows/release.yml
 ## Release contract
 
 1. **Exact commit.** The release builds the commit `develop` points at, and the guard
-   refuses it unless `CI OK` succeeded in the latest completed Test & Build run of that
-   exact SHA. `CI OK` covers formatting, Clippy, the test suite on every supported
-   PostgreSQL major, both feature builds, both architectures, the Linux packages, the
-   container image and the crate. `just release` tells the run which commit it means, so
-   a `develop` that moved in the meantime is refused, not released.
+   refuses it unless the `CI OK` job that completed last for that exact SHA, in any
+   Test & Build run or re-run attempt, succeeded. `CI OK` covers formatting, Clippy, the
+   test suite on every supported PostgreSQL major, both feature builds, both
+   architectures, the Linux packages, the container image and the crate. `just release`
+   tells the run which commit it means, so a `develop` that moved in the meantime is
+   refused, not released.
 2. **Tag last.** The `X.Y.Z` tag is created by publishing the GitHub release, after every
    build succeeded. There is never a tag to delete or move.
 3. **Versions only go up.** The version must be untagged and above the latest release.
@@ -73,8 +74,11 @@ operator's machine. It asks for `CI OK` itself, not for the whole run: coverage 
 reported, not a gate, so a failed coverage job does not keep `main` back.
 
 The guard and the recipe both get that answer from
-[`scripts/ci-ok-status`](scripts/ci-ok-status), which reads the `CI OK` job of the Test & Build workflow's own runs. A check that only
-carries the name, published by another workflow or integration, does not count.
+[`scripts/ci-ok-status`](scripts/ci-ok-status), which reads the `CI OK` jobs of the
+Test & Build workflow's own runs, every attempt of them, and goes by the one that
+completed last. A failed run that is being re-run therefore still counts as failed until
+the new attempt has finished. A check that only carries the name, published by another
+workflow or integration, does not count.
 
 ## What a release publishes
 
@@ -114,24 +118,28 @@ again and fails on a version that is already tagged.)
 - **After the tag exists** the release is public, and the crates.io and image-tagging
   jobs can still fail. Transient failures are fixed by re-running. A failure that needs a
   code change is released as the next version; never move the tag.
-- **If `just release` stopped before moving `main`**, push it yourself once `develop`'s
-  Test & Build is done: `git push origin <released-sha>:refs/heads/main`.
+- **If `just release` stopped before moving `main`**, move it yourself, but only when
+  both are true: the Release run succeeded for that commit, and `scripts/ci-ok-status
+  nbari/pg_exporter <released-sha>` prints `success`. Then
+  `git push origin <released-sha>:refs/heads/main`.
 - **The guard refuses** when the version is already tagged (you forgot to bump) or below
   the latest release, when `develop` does not contain `main`, when the run is not on
   `develop`, when `develop` is no longer at the commit `just release` asked for, or when
-  `CI OK` did not succeed in the latest completed Test & Build run of the commit. The
+  the `CI OK` job that completed last for the commit did not succeed. The
   message says which.
 - **`just release` says "The dispatched release run did not appear".** Look at the
-  Actions page before doing anything else: the run may exist under another commit if
-  `develop` moved, and its guard will have refused it.
+  Actions page before doing anything else. The recipe looks for a run titled with the
+  request id it sent; a run it could not find may still exist, and if `develop` had
+  moved, its guard will have refused it.
 - **CI is flaky.** Re-run the failed jobs in Test & Build until `CI OK` is green on the
   commit. The commit is tested on `sandbox` and again on `develop`; the most recently
   completed `CI OK` decides, for the guard and for the protected `main` alike.
 - **crates.io refuses the upload.** Trusted Publishing is probably not configured for
   `release.yml` (see [Settings](#settings)); fix it and re-run the failed job.
-- **crates.io holds another checksum.** The publish job found the version on crates.io
-  with bytes that differ from the `.crate` in the GitHub release. A crate version cannot
-  be replaced: yank it and release the next version.
+- **crates.io already holds this version with other bytes.** The release job checks
+  that before it publishes anything and stops; bump the version. If it only shows up
+  after the upload, in the publish job, the GitHub release is already public: a crate
+  version cannot be replaced, so yank it and release the next version.
 
 ## How the workflow is built
 
@@ -139,7 +147,7 @@ again and fails on a version that is already tagged.)
 Release workflow (workflow_dispatch on develop)
  guard          develop only, and at the commit `just release` asked for; the version is
                 X.Y.Z, above the latest tag and untagged; main is an ancestor; `CI OK`
-                succeeded in the latest completed Test & Build run of this exact commit;
+                is green in the Test & Build job that completed last for this commit;
                 Rust `stable` is resolved to an exact version, used by every Rust job
  build          x86_64 and aarch64, each on a native runner: the binary (run once,
                 --version must report the crate's version), the .deb (checked for its
@@ -149,7 +157,8 @@ Release workflow (workflow_dispatch on develop)
  image          after build and crate: a multi-platform image made from the two binaries
                 (the `prebuilt` stage of the Containerfile), run before it is pushed as
                 sha-<commit>, run again from the registry, attested
- release        the exact file set is checked, SHA256SUMS, a build-provenance attestation,
+ release        the exact file set is checked; crates.io must not already hold this
+                version with other bytes; SHA256SUMS, a build-provenance attestation,
                 a draft GitHub release, then publish (this creates the tag at the tested
                 commit; it is marked Latest only when it is the highest version), then a
                 check that the tag is right and the published files, downloaded again,

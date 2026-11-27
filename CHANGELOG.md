@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exporter was restarted. The column probes were cached for the life of the process.
   They are now forgotten when the extension disappears, and a query that hits a missing
   column asks the catalog again and retries once.
+- The same collector kept reading without its top-level filter after
+  `ALTER EXTENSION pg_stat_statements UPDATE` from a version older than 1.9, until it was
+  restarted. Under `pg_stat_statements.track = all` a statement that only runs inside a
+  function was exported, and one that runs both ways had its two entries overwrite each
+  other. The scrape query now reports the extension version with its rows, and a change
+  makes the collector probe the columns again within the same scrape.
 - `pg_stat_user_tables_autovacuum_threshold_ratio` and
   `pg_stat_user_tables_autoanalyze_threshold_ratio` did not follow the server's own
   trigger point, in two ways:
@@ -42,18 +48,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the crate build was still running, and it was pushed before it had been run. It now
   waits for the crate too and runs the image before pushing it.
 - The release guard and `just release` take `CI OK` from the Test & Build workflow's own
-  runs. They used to accept the latest check named `CI OK` on the commit, whoever
-  published it.
+  jobs, and go by the one that completed last across runs and re-run attempts. They used
+  to accept the latest check named `CI OK` on the commit, whoever published it, and an
+  earlier success could stand in for a later failure.
 - `just release` tells the workflow which commit it means, and the guard refuses any
   other. `develop` moving between the two could otherwise release a commit the operator
-  had not looked at.
-- The publish job compares the checksum crates.io reports with the `.crate` in the
-  GitHub release, on a fresh upload and on a retry, and treats any registry answer other
-  than "found" or "not found" as an error instead of as "not published yet".
-- The test suite checks where its database connection really goes. The old guard
-  looked for `localhost` anywhere in the DSN and did not see `PGHOSTADDR`, so the suite,
-  which drops databases and terminates backends, could be pointed at another server
-  while the DSN looked local.
+  had not looked at. The recipe also follows its own run by a request id, not "the
+  newest run of this commit".
+- crates.io is asked before anything is published: a version that already exists there
+  with other bytes stops the release while nothing is public. After the upload the
+  publish job compares the checksum crates.io reports with the `.crate` in the GitHub
+  release. Any registry answer other than "found" or "not found" is an error, not "not
+  published yet".
+- The test suite checks where its database connection really goes, in the Rust tests,
+  in `scripts/setup-local-test-db.sh` and for the containers tests start themselves. The
+  old guard looked for `localhost` anywhere in the DSN and did not see `PGHOSTADDR`, so
+  the suite, which drops databases and terminates backends, could be pointed at another
+  server while the DSN looked local. The devcontainer opt-in now admits its `postgres`
+  service only, where it used to switch the guard off.
+- Test fixtures derive their isolated-database and role connections without the
+  `dbname`, `user` and `password` query parameters, which SQLx lets override the URL, and
+  verify `current_database()` before use. With `?dbname=` in `PG_EXPORTER_DSN` a test
+  could change the caller's database and still pass.
 
 ### Changed
 
@@ -82,9 +98,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Tests
 
 - CI now exports the two-platform image as an OCI archive, checks that its index holds
-  both platforms with an attestation for each, and runs the amd64 image out of that
-  archive. It used to leave the two-platform build in the build cache and run a second,
-  separate build.
+  both platforms and, for each, its own attestation with an SBOM and provenance, and
+  runs the amd64 image out of that archive. It used to leave the two-platform build in
+  the build cache and run a second, separate build.
 - The vacuum-progress test always cancels its throttled `VACUUM` and drops its database,
   also when a scrape fails; the issue 35 test checks each `system` sub-collector on its
   own; the standby reply-time test identifies the reply by its timestamp; and the
@@ -99,7 +115,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Documentation
 
 - Replication: `pg_replication_slots_pg_wal_lsn_diff` on a standby is measured against
-  the last WAL received by streaming, so an archive-fed standby reports 0.
+  the last WAL received by streaming. A standby that never streamed reports 0, and one
+  that switched from streaming to the archive keeps measuring against its last streamed
+  position.
+- Statements: the metric names in the README carry the `postgres_` prefix they are
+  exported with; the PromQL examples returned nothing as written.
 - Statements: of the measures against secrets in `query_short`, only
   `--statements.query-text-refresh=0` rules exposure out; the two server-side ones are
   prospective and partial, and nothing removes a label Prometheus already stored.

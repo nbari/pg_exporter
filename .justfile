@@ -243,14 +243,15 @@ release:
     set -euo pipefail
     git fetch --quiet origin develop
     sha="$(git rev-parse origin/develop)"
-    last="$(gh run list --workflow release.yml --branch develop --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId // 0')"
     # The run is told which commit is meant: if develop moved in the meantime, its guard
-    # refuses instead of releasing something else.
-    gh workflow run release.yml --ref develop -f sha="${sha}"
-    # The dispatched run is the first new one for this commit; never just "the latest".
+    # refuses instead of releasing something else. It also carries a request id, shown in
+    # its title, so the run followed below is the one dispatched here and never somebody
+    # else's run of the same commit, or simply "the latest".
+    request="$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM}"
+    gh workflow run release.yml --ref develop -f sha="${sha}" -f request="${request}"
     run=""
     for _ in $(seq 30); do
-        run="$(gh run list --workflow release.yml --branch develop --event workflow_dispatch --limit 10 --json databaseId,headSha --jq "[.[] | select(.databaseId > ${last} and .headSha == \"${sha}\")][0].databaseId // empty")"
+        run="$(gh run list --workflow release.yml --event workflow_dispatch --limit 20 --json databaseId,displayTitle --jq "[.[] | select(.displayTitle | contains(\"${request}\"))][0].databaseId // empty")"
         [[ -z "${run}" ]] || break
         sleep 2
     done

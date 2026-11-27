@@ -1,6 +1,10 @@
 ---
 name: Release
 
+# `just release` passes a request id and looks the run up by it, so it follows the run
+# it started and not somebody else's dispatch of the same commit.
+run-name: ${{ inputs.request != '' && format('Release ({0})', inputs.request) || 'Release' }}
+
 # Run manually on `develop` (`just release`). The commit is the one Test & Build already
 # passed on; nothing is bumped or committed here. The run builds that commit once and
 # publishes the GitHub release (which creates the tag), the crate and the container
@@ -15,6 +19,12 @@ on:
         description: >-
           The commit the operator means to release. `just release` passes develop's tip
           as it saw it; the guard refuses to release anything else. Empty skips the check.
+        required: false
+        default: ''
+      request:
+        description: >-
+          An id that names this run (shown in its title). `just release` generates one
+          to find the run it dispatched; leave empty when starting the run by hand.
         required: false
         default: ''
 
@@ -419,6 +429,25 @@ jobs:
             exit 1
           fi
 
+      # A crate version can never be replaced. If crates.io already holds this version
+      # with other bytes, the release must stop here, while nothing is public yet: after
+      # the tag exists it could only be discovered, not repaired. The same version with
+      # the same bytes is a re-run of this release and passes.
+      - name: Check crates.io can take this version
+        shell: bash
+        run: |
+          set -euo pipefail
+          built="$(sha256sum "dist/${PACKAGE}-${VERSION}.crate" | cut -d' ' -f1)"
+          held="$(scripts/crates-io-checksum "${PACKAGE}" "${VERSION}")"
+          if [[ "${held}" == absent ]]; then
+            echo "${PACKAGE} ${VERSION} is not on crates.io yet."
+          elif [[ "${held}" == "${built}" ]]; then
+            echo "crates.io already holds this exact crate (${built})."
+          else
+            echo "::error::crates.io already holds ${PACKAGE} ${VERSION} as ${held}, but this run built ${built}; nothing was released. Bump the version."
+            exit 1
+          fi
+
       - name: Write the checksums
         run: |
           set -euo pipefail
@@ -571,19 +600,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          status="$(curl -s -o /dev/null -w '%{http_code}' -A "${PACKAGE}-release" \
-            "https://crates.io/api/v1/crates/${PACKAGE}/${VERSION}")"
-          case "${status}" in
-            200)
-              echo "${PACKAGE} ${VERSION} is already on crates.io."
-              echo "published=true" >> "$GITHUB_OUTPUT"
-              ;;
-            404) echo "${PACKAGE} ${VERSION} is not on crates.io yet." ;;
-            *)
-              echo "::error::crates.io answered HTTP ${status} for ${PACKAGE} ${VERSION}; re-run this job when it is reachable."
-              exit 1
-              ;;
-          esac
+          held="$(scripts/crates-io-checksum "${PACKAGE}" "${VERSION}")"
+          if [[ "${held}" == absent ]]; then
+            echo "${PACKAGE} ${VERSION} is not on crates.io yet."
+          else
+            echo "${PACKAGE} ${VERSION} is already on crates.io."
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          fi
 
       # Short-lived token from crates.io Trusted Publishing; no registry secret is stored.
       - name: Get a crates.io token
@@ -610,15 +633,16 @@ jobs:
         run: |
           set -euo pipefail
           built="$(sha256sum "${RUNNER_TEMP}/crate/${PACKAGE}-${VERSION}.crate" | cut -d' ' -f1)"
-          published=""
+          # The API can lag a moment behind an upload, so "absent" and a registry error
+          # are retried; a checksum is an answer and ends the wait.
+          published=absent
           for _ in $(seq 30); do
-            published="$(curl -sf -A "${PACKAGE}-release" \
-              "https://crates.io/api/v1/crates/${PACKAGE}/${VERSION}" | jq -r '.version.checksum // empty' || true)"
-            [[ -z "${published}" ]] || break
+            published="$(scripts/crates-io-checksum "${PACKAGE}" "${VERSION}" || echo absent)"
+            [[ "${published}" == absent ]] || break
             sleep 10
           done
-          if [[ -z "${published}" ]]; then
-            echo "::error::crates.io did not report a checksum for ${PACKAGE} ${VERSION}."
+          if [[ "${published}" == absent ]]; then
+            echo "::error::crates.io did not report a checksum for ${PACKAGE} ${VERSION}; re-run this job."
             exit 1
           fi
           if [[ "${published}" != "${built}" ]]; then
