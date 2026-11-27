@@ -23,7 +23,8 @@ jobs:
 
   coverage:
     uses: ./.github/workflows/coverage.yml
-    secrets: inherit
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   # The release builds, packages and containerizes the default binary with the same local
   # actions and the same Containerfile stage, on the same two runners, so a broken build
@@ -92,10 +93,11 @@ jobs:
           name: archive-${{ matrix.target }}
           path: dist/*.tar.gz
           if-no-files-found: error
-          retention-days: 1
+          # Long enough to re-run the image job alone a few days later.
+          retention-days: 7
 
   # The image exactly as a release makes it (both platforms, with provenance and an
-  # SBOM), but not pushed anywhere. The amd64 image is then loaded and run.
+  # SBOM), exported instead of pushed. Its index is checked and its amd64 image is run.
   image:
     name: Container image
     runs-on: ubuntu-latest
@@ -127,6 +129,8 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
+      # Exported as an OCI archive instead of left in the build cache, so the index a
+      # release would push exists here and can be inspected and run.
       - name: Build the image for both platforms
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
@@ -134,21 +138,34 @@ jobs:
           file: ./Containerfile
           target: prebuilt
           platforms: linux/amd64,linux/arm64
-          push: false
+          outputs: type=oci,dest=${{ runner.temp }}/image.oci.tar
           provenance: mode=max
           sbom: true
 
-      - name: Load the amd64 image
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
-        with:
-          context: image-context
-          file: ./Containerfile
-          target: prebuilt
-          platforms: linux/amd64
-          load: true
-          tags: ${{ steps.info.outputs.name }}:ci
-          provenance: false
+      # One image per platform and one attestation manifest for each: nothing missing,
+      # nothing extra.
+      - name: Check the image index
+        shell: bash
+        run: |
+          set -euo pipefail
+          layout="${RUNNER_TEMP}/image-oci"
+          mkdir -p "${layout}"
+          tar -xf "${RUNNER_TEMP}/image.oci.tar" -C "${layout}"
+          top="$(jq -r '.manifests[0].digest' "${layout}/index.json")"
+          index="${layout}/blobs/${top/://}"
+          entries="$(jq -r '
+            .manifests[]
+            | if (.annotations["vnd.docker.reference.type"] // "") == "attestation-manifest"
+              then "attestation"
+              else .platform.os + "/" + .platform.architecture
+              end' "${index}" | LC_ALL=C sort | tr '\n' ' ')"
+          echo "Index ${top} holds: ${entries}"
+          if [[ "${entries}" != "attestation attestation linux/amd64 linux/arm64 " ]]; then
+            echo "::error::The image index should hold linux/amd64, linux/arm64 and an attestation for each."
+            exit 1
+          fi
 
+      # The amd64 image out of that same archive, not a second build.
       - name: Smoke test the image
         shell: bash
         env:
@@ -156,6 +173,8 @@ jobs:
           VERSION: ${{ steps.info.outputs.version }}
         run: |
           set -euo pipefail
+          command -v skopeo >/dev/null 2>&1 || { sudo apt-get update -y && sudo apt-get install -y skopeo; }
+          skopeo copy "oci-archive:${RUNNER_TEMP}/image.oci.tar" "docker-daemon:${PACKAGE}:ci"
           out="$(docker run --rm "${PACKAGE}:ci" --version)"
           echo "${out}"
           if [[ "${out}" != *"${VERSION}"* ]]; then
