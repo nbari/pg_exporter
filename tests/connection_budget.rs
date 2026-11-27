@@ -81,6 +81,7 @@ async fn resolve_admin_server(
             Ok(container) => {
                 let (host, port) = container_endpoint(&container).await?;
                 let admin_dsn = format!("postgresql://postgres:postgres@{host}:{port}/postgres");
+                common::test_dsn::ensure_local(&admin_dsn);
                 return Ok(Some((
                     PgConnectOptions::from_str(&admin_dsn)?,
                     Some(container),
@@ -487,6 +488,7 @@ async fn run_budget_scenario(
     let host = admin_options.get_host();
     let port = admin_options.get_port();
     let role_dsn = format!("postgresql://{EXPORTER_ROLE}@{host}:{port}/postgres?sslmode=disable");
+    common::test_dsn::ensure_local(&role_dsn);
 
     let role_options = PgConnectOptions::from_str(&role_dsn)?;
     assert_role_limit_is_immediate(&role_options).await?;

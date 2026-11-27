@@ -271,6 +271,7 @@ async fn receive_and_replay_lsn_equal(pool: &PgPool) -> Result<bool> {
 
 async fn connect_pool_with_retry(host: &str, port: u16) -> Result<PgPool> {
     let dsn = format!("postgresql://postgres:postgres@{host}:{port}/postgres");
+    common::test_dsn::ensure_local(&dsn);
     let mut last_error = None;
 
     for _ in 0..CONNECT_ATTEMPTS {

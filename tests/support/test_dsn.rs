@@ -18,13 +18,18 @@ use std::{env, net::IpAddr, str::FromStr};
 /// DSN used when `PG_EXPORTER_DSN` is not set.
 pub const DEFAULT_TEST_DSN: &str = "postgresql://postgres:postgres@localhost:5432/postgres";
 
+/// The one host name `PG_EXPORTER_TEST_ALLOW_NONLOCAL=1` admits besides this machine: the
+/// `PostgreSQL` service of the devcontainer's compose project.
+pub const COMPOSE_SERVICE_HOST: &str = "postgres";
+
 /// Returns the DSN tests connect to.
 ///
 /// # Panics
 ///
 /// Panics when the DSN would connect to another machine. A devcontainer whose
-/// `PostgreSQL` is a trusted, disposable compose sibling reachable as `postgres` opts
-/// out with `PG_EXPORTER_TEST_ALLOW_NONLOCAL=1` (set in `.devcontainer/compose.yaml`).
+/// `PostgreSQL` is a trusted, disposable compose sibling opts in to that one service with
+/// `PG_EXPORTER_TEST_ALLOW_NONLOCAL=1` (set in `.devcontainer/compose.yaml`); the variable
+/// admits the host name `postgres` and nothing else.
 #[must_use]
 pub fn test_dsn() -> String {
     // Some unit tests set `PG_EXPORTER_DSN` to a made-up value for a moment with
@@ -40,7 +45,9 @@ pub fn test_dsn() -> String {
         )
     });
 
-    if !allow_nonlocal && !target_is_local(&dsn, env_hostaddr.as_deref()) {
+    let allowed = target_is_local(&dsn, env_hostaddr.as_deref())
+        || (allow_nonlocal && target_is_compose_service(&dsn, env_hostaddr.as_deref()));
+    if !allowed {
         eprintln!("WARNING: the test database is not on this machine!");
         eprintln!("DSN: {}", dsn.replace(char::is_alphanumeric, "*"));
         if env_hostaddr.is_some() {
@@ -50,12 +57,46 @@ pub fn test_dsn() -> String {
         eprintln!("Use: just test (handles this automatically)");
         eprintln!("Or:   PG_EXPORTER_DSN='{DEFAULT_TEST_DSN}' cargo test");
         eprintln!(
-            "(In a devcontainer with a trusted local postgres service, set PG_EXPORTER_TEST_ALLOW_NONLOCAL=1.)"
+            "(In a devcontainer, PG_EXPORTER_TEST_ALLOW_NONLOCAL=1 admits the compose service host '{COMPOSE_SERVICE_HOST}' only.)"
         );
         panic!("Refusing to run tests against a remote database. Use localhost.");
     }
 
     dsn
+}
+
+/// Refuses, by panicking, a DSN a test built itself (for a container it started) when a
+/// connection made from it would not stay on this machine.
+///
+/// Such a DSN names `127.0.0.1` and a mapped port, but `PGHOSTADDR` in the environment
+/// still redirects it: `SQLx` would knock on that port of another machine.
+///
+/// # Panics
+///
+/// Panics when the effective target is not local.
+pub fn ensure_local(dsn: &str) {
+    let no_changes: [(&str, Option<&str>); 0] = [];
+    let env_hostaddr = temp_env::with_vars(no_changes, || env::var("PGHOSTADDR").ok());
+    assert!(
+        target_is_local(dsn, env_hostaddr.as_deref()),
+        "Refusing to connect a test to another machine: the DSN for a local container does \
+         not resolve locally (is PGHOSTADDR set?)"
+    );
+}
+
+/// Whether `dsn` names the devcontainer's compose service by host name, with no
+/// `hostaddr` anywhere to send the connection somewhere else.
+#[must_use]
+pub fn target_is_compose_service(dsn: &str, env_hostaddr: Option<&str>) -> bool {
+    let Ok(options) = PgConnectOptions::from_str(dsn) else {
+        return false;
+    };
+    let dsn_has_hostaddr =
+        url::Url::parse(dsn).is_ok_and(|url| url.query_pairs().any(|(key, _)| key == "hostaddr"));
+    options.get_socket().is_none()
+        && options.get_host() == COMPOSE_SERVICE_HOST
+        && !dsn_has_hostaddr
+        && env_hostaddr.is_none()
 }
 
 /// Whether a connection made from `dsn` would stay on this machine.

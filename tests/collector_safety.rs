@@ -873,3 +873,33 @@ fn test_database_guard_follows_hostaddr() {
         "a loopback hostaddr stays on this machine whatever the host name"
     );
 }
+
+/// The devcontainer opt-in admits its compose service by name and nothing else: it used
+/// to switch the guard off for every target.
+#[test]
+fn test_database_guard_opt_in_admits_only_the_compose_service() {
+    use test_dsn::target_is_compose_service;
+
+    assert!(target_is_compose_service(
+        "postgresql://postgres:postgres@postgres:5432/postgres",
+        None
+    ));
+
+    for (dsn, env_hostaddr) in [
+        ("postgresql://postgres@db.example.com:5432/postgres", None),
+        ("postgresql://postgres@postgres.example.com/postgres", None),
+        ("postgresql://postgres@10.0.0.5/postgres", None),
+        // The service name with an address that leads elsewhere.
+        (
+            "postgresql://postgres@postgres/postgres?hostaddr=10.0.0.5",
+            None,
+        ),
+        ("postgresql://postgres@postgres/postgres", Some("10.0.0.5")),
+        ("not a dsn", None),
+    ] {
+        assert!(
+            !target_is_compose_service(dsn, env_hostaddr),
+            "{dsn} with PGHOSTADDR={env_hostaddr:?} is not the compose service"
+        );
+    }
+}

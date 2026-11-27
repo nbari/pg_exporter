@@ -186,6 +186,23 @@ run_pgbench_db() {
     pg_connection_pgbench_cmd "${db}" "$@"
 }
 
+# This script resets statement statistics, creates databases and terminates backends,
+# so it only ever runs against a disposable local server. The check is on where libpq
+# would really connect: PGHOSTADDR redirects a connection whatever the host name says.
+require_local_target() {
+    if pg_connection_is_local "$PG_HOST"; then
+        return
+    fi
+    log_error "Refusing to set up a test database on another machine."
+    log_error "  target: $(pg_connection_description "$PG_DATABASE")"
+    if [[ -n "${PGHOSTADDR:-}" ]]; then
+        log_error "  PGHOSTADDR=${PGHOSTADDR} overrides the host name."
+    fi
+    log_error "Use localhost (just postgres), or unset PGHOSTADDR."
+    log_error "(In the devcontainer, PG_EXPORTER_TEST_ALLOW_NONLOCAL=1 admits the host 'postgres' only.)"
+    exit 1
+}
+
 # Check if PostgreSQL is running
 check_postgres() {
     log_info "Checking PostgreSQL connection at $(pg_connection_description "$PG_DATABASE")..."
@@ -486,6 +503,7 @@ main() {
     fi
     echo ""
 
+    require_local_target
     check_postgres
     check_version
     verify_extension

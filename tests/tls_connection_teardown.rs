@@ -413,6 +413,7 @@ async fn scenario(container: &ContainerAsync<GenericImage>) -> Result<()> {
     let host = container.get_host().await?;
     let port = container.get_host_port_ipv4(5432.tcp()).await?;
     let dsn = format!("postgresql://postgres:postgres@{host}:{port}/postgres?sslmode=require");
+    common::test_dsn::ensure_local(&dsn);
     let options = PgConnectOptions::from_str(&dsn)?;
     let mut admin = connect(&options).await?;
     let result = async {
