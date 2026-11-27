@@ -293,9 +293,7 @@ mod tests {
         use sqlx::postgres::PgPoolOptions;
 
         // This test requires a database connection
-        let dsn = std::env::var("PG_EXPORTER_DSN").unwrap_or_else(|_| {
-            "postgresql://postgres:postgres@localhost:5432/postgres".to_string()
-        });
+        let dsn = crate::test_dsn::test_dsn();
 
         let Ok(pool) = PgPoolOptions::new()
             .min_connections(1)

@@ -1,6 +1,9 @@
 use anyhow::{Result, anyhow};
 use std::path::{Path, PathBuf};
 
+#[path = "support/test_dsn.rs"]
+mod test_dsn;
+
 #[test]
 fn production_collectors_do_not_bypass_connection_budget() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -790,4 +793,83 @@ fn rust_files_under(root: &Path) -> Result<Vec<PathBuf>> {
 
     files.sort();
     Ok(files)
+}
+
+/// The suite drops databases and terminates backends, so the guard on its target must go
+/// by where a connection really ends up. These cases need no database.
+#[test]
+fn test_database_guard_accepts_only_this_machine() {
+    use test_dsn::target_is_local;
+
+    for dsn in [
+        "postgresql://postgres:postgres@localhost:5432/postgres",
+        "postgresql://postgres@LOCALHOST/postgres",
+        "postgresql://postgres@127.0.0.1:5432/postgres",
+        "postgresql://postgres@[::1]:5432/postgres",
+        "postgresql:///postgres?host=/var/run/postgresql",
+    ] {
+        assert!(target_is_local(dsn, None), "{dsn} is on this machine");
+    }
+
+    for dsn in [
+        "postgresql://postgres@db.example.com:5432/postgres",
+        "postgresql://postgres@10.0.0.5/postgres",
+        "postgresql://postgres@[2001:db8::1]/postgres",
+        // The word is there, the server is not: a substring check accepted all of these.
+        "postgresql://postgres@db.example.com/localhost",
+        "postgresql://postgres@db.example.com/postgres?application_name=localhost",
+        "postgresql://localhost@db.example.com/postgres",
+        "postgresql://postgres:127.0.0.1@db.example.com/postgres",
+        "postgresql://postgres@localhost.example.com/postgres",
+        "postgresql://postgres@127.0.0.1.example.com/postgres",
+        "not a dsn",
+    ] {
+        assert!(!target_is_local(dsn, None), "{dsn} is another machine");
+    }
+}
+
+/// `hostaddr` decides where `SQLx` connects, from the DSN first and from `PGHOSTADDR`
+/// otherwise; the host name is then only a label.
+#[test]
+fn test_database_guard_follows_hostaddr() {
+    use test_dsn::target_is_local;
+
+    let local = "postgresql://postgres@localhost:5432/postgres";
+
+    assert!(
+        !target_is_local(local, Some("10.0.0.5")),
+        "PGHOSTADDR sends a localhost DSN to another machine"
+    );
+    assert!(target_is_local(local, Some("127.0.0.1")));
+    assert!(target_is_local(local, Some("::1")));
+    assert!(
+        !target_is_local(local, Some("not-an-address")),
+        "an address that cannot be read is not trusted"
+    );
+
+    assert!(!target_is_local(
+        "postgresql://postgres@localhost/postgres?hostaddr=10.0.0.5",
+        None
+    ));
+    assert!(
+        target_is_local(
+            "postgresql://postgres@localhost/postgres?hostaddr=127.0.0.1",
+            Some("10.0.0.5")
+        ),
+        "a hostaddr in the DSN wins over PGHOSTADDR"
+    );
+    assert!(
+        !target_is_local(
+            "postgresql://postgres@localhost/postgres?hostaddr=127.0.0.1&hostaddr=10.0.0.5",
+            None
+        ),
+        "the last hostaddr wins"
+    );
+    assert!(
+        target_is_local(
+            "postgresql://postgres@db.example.com/postgres?hostaddr=127.0.0.1",
+            None
+        ),
+        "a loopback hostaddr stays on this machine whatever the host name"
+    );
 }

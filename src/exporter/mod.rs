@@ -394,9 +394,7 @@ mod tests {
         use anyhow::Context as _;
         use sqlx::Connection as _;
 
-        let dsn = std::env::var("PG_EXPORTER_DSN").unwrap_or_else(|_| {
-            "postgresql://postgres:postgres@localhost:5432/postgres".to_owned()
-        });
+        let dsn = crate::test_dsn::test_dsn();
         let pool = connect_pool(&SecretString::from(dsn.clone()))?;
         if sqlx::query("SELECT 1").fetch_one(&pool).await.is_err() {
             eprintln!("skipping: PostgreSQL is not reachable");

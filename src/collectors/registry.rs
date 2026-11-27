@@ -650,9 +650,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn test_pg_up_recovery() {
-        let dsn = std::env::var("PG_EXPORTER_DSN").unwrap_or_else(|_| {
-            "postgresql://postgres:postgres@localhost:5432/postgres".to_string()
-        });
+        let dsn = crate::test_dsn::test_dsn();
         let config = CollectorConfig::new(25).with_enabled(&["exporter".to_string()]);
 
         // 1. Start with a broken pool
@@ -770,9 +768,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn test_database_outage_response_filters_stale_collector_metrics() {
-        let dsn = std::env::var("PG_EXPORTER_DSN").unwrap_or_else(|_| {
-            "postgresql://postgres:postgres@localhost:5432/postgres".to_string()
-        });
+        let dsn = crate::test_dsn::test_dsn();
         let config = CollectorConfig::new(25).with_enabled(&["default".to_string()]);
         let registry = CollectorRegistry::new(&config);
 
