@@ -142,8 +142,8 @@ jobs:
           provenance: mode=max
           sbom: true
 
-      # One image per platform and one attestation manifest for each: nothing missing,
-      # nothing extra.
+      # Both platforms, and for each its own attestation with an SBOM and provenance:
+      # nothing missing, nothing extra, nothing attached to the wrong image.
       - name: Check the image index
         shell: bash
         run: |
@@ -151,19 +151,7 @@ jobs:
           layout="${RUNNER_TEMP}/image-oci"
           mkdir -p "${layout}"
           tar -xf "${RUNNER_TEMP}/image.oci.tar" -C "${layout}"
-          top="$(jq -r '.manifests[0].digest' "${layout}/index.json")"
-          index="${layout}/blobs/${top/://}"
-          entries="$(jq -r '
-            .manifests[]
-            | if (.annotations["vnd.docker.reference.type"] // "") == "attestation-manifest"
-              then "attestation"
-              else .platform.os + "/" + .platform.architecture
-              end' "${index}" | LC_ALL=C sort | tr '\n' ' ')"
-          echo "Index ${top} holds: ${entries}"
-          if [[ "${entries}" != "attestation attestation linux/amd64 linux/arm64 " ]]; then
-            echo "::error::The image index should hold linux/amd64, linux/arm64 and an attestation for each."
-            exit 1
-          fi
+          scripts/check-image-index "${layout}"
 
       # The amd64 image out of that same archive, not a second build.
       - name: Smoke test the image

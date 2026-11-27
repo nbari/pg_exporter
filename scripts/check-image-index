@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Check the image index in an unpacked OCI layout: the two platforms a release ships, and
+# for each of them its own attestation carrying both an SBOM and build provenance.
+#
+#   scripts/check-image-index <oci-layout-dir>
+#
+# CI runs this on the image it builds the way a release does. Counting entries is not
+# enough: two attestations that both describe the amd64 image, or one that holds an SBOM
+# and no provenance, would add up to the same numbers.
+set -euo pipefail
+
+if [[ $# -ne 1 || ! -f "$1/index.json" ]]; then
+    echo "usage: ${0##*/} <oci-layout-dir>" >&2
+    exit 2
+fi
+layout=$1
+fail() {
+    echo "::error::$*"
+    exit 1
+}
+blob() { echo "${layout}/blobs/${1/://}"; }
+
+top="$(jq -r '.manifests[0].digest' "${layout}/index.json")"
+index="$(blob "${top}")"
+[[ -f "${index}" ]] || fail "The layout has no blob for its index ${top}."
+
+is_attestation='(.annotations["vnd.docker.reference.type"] // "") == "attestation-manifest"'
+
+platforms="$(jq -r ".manifests[] | select(${is_attestation} | not)
+    | .platform.os + \"/\" + .platform.architecture" "${index}" | LC_ALL=C sort | tr '\n' ' ')"
+echo "Index ${top} holds images for: ${platforms}"
+[[ "${platforms}" == "linux/amd64 linux/arm64 " ]] ||
+    fail "The image index should hold exactly linux/amd64 and linux/arm64, got: ${platforms}"
+
+images="$(jq -r ".manifests[] | select(${is_attestation} | not) | .digest" "${index}" | LC_ALL=C sort)"
+described="$(jq -r ".manifests[] | select(${is_attestation})
+    | .annotations[\"vnd.docker.reference.digest\"] // \"none\"" "${index}" | LC_ALL=C sort)"
+[[ "${described}" == "${images}" ]] ||
+    fail "Each image needs exactly one attestation of its own; the attestations describe: $(tr '\n' ' ' <<<"${described}")"
+
+while read -r attestation subject; do
+    manifest="$(blob "${attestation}")"
+    [[ -f "${manifest}" ]] || fail "The layout has no blob for the attestation ${attestation}."
+    predicates="$(jq -r '.layers[].annotations["in-toto.io/predicate-type"] // empty' "${manifest}")"
+    grep -q '^https://spdx\.dev/Document$' <<<"${predicates}" ||
+        fail "The attestation of ${subject} has no SBOM (SPDX) statement."
+    grep -q '^https://slsa\.dev/provenance/' <<<"${predicates}" ||
+        fail "The attestation of ${subject} has no provenance (SLSA) statement."
+    echo "${subject}: SBOM and provenance attached"
+done < <(jq -r ".manifests[] | select(${is_attestation})
+    | .digest + \" \" + .annotations[\"vnd.docker.reference.digest\"]" "${index}")
