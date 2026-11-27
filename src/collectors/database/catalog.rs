@@ -81,10 +81,6 @@ impl Collector for DatabaseSubCollector {
     )]
     fn collect_once<'a>(&'a self, pool: &'a PgPool) -> BoxFuture<'a, Result<Collected>> {
         Box::pin(async move {
-            // 0) Reset all metrics to clear stale data (e.g. dropped databases)
-            self.size_bytes.reset();
-            self.connection_limit.reset();
-
             // Build exclusion list from global OnceCell (set at startup via Clap/env).
             let excluded_list: Vec<String> = get_excluded_databases().to_vec();
 
@@ -135,6 +131,11 @@ impl Collector for DatabaseSubCollector {
                     Err(error) => return Err(error.into()),
                 }
             };
+
+            // Only now that the read succeeded: drop the previous snapshot, so a dropped
+            // database does not linger, and publish the new one.
+            self.size_bytes.reset();
+            self.connection_limit.reset();
 
             let apply_span = info_span!("pg_database.apply_metrics", databases = rows.len());
             let _g = apply_span.enter();
