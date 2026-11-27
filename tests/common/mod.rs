@@ -93,9 +93,47 @@ fn next_test_database_name(prefix: &str) -> String {
     format!("test_{prefix}_{}_{}", std::process::id(), counter)
 }
 
-fn dsn_for_database(base_dsn: &str, database_name: &str) -> Result<String> {
+/// Removes the query parameters named in `keys` from `url`.
+///
+/// `SQLx` reads `dbname`, `user` and `password` from the query string **after** the URL's
+/// path and user info, so a parameter left in place overrides whatever those were set
+/// to. A base DSN such as `postgresql://localhost/postgres?dbname=app` would otherwise
+/// keep every "isolated" connection in `app`.
+fn remove_query_keys(url: &mut Url, keys: &[&str]) {
+    let kept: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| !keys.contains(&key.as_ref()))
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    if kept.is_empty() {
+        url.set_query(None);
+    } else {
+        url.query_pairs_mut().clear().extend_pairs(kept);
+    }
+}
+
+/// `base_dsn` pointed at `database_name` instead of its own database.
+pub fn dsn_for_database(base_dsn: &str, database_name: &str) -> Result<String> {
     let mut url = Url::parse(base_dsn).context("Failed to parse test DSN")?;
     url.set_path(&format!("/{database_name}"));
+    remove_query_keys(&mut url, &["dbname"]);
+    Ok(url.to_string())
+}
+
+/// `base_dsn` pointed at `database_name` and logging in as `user`.
+pub fn dsn_for_database_role(
+    base_dsn: &str,
+    database_name: &str,
+    user: &str,
+    password: &str,
+) -> Result<String> {
+    let mut url = Url::parse(base_dsn).context("Failed to parse test DSN")?;
+    url.set_path(&format!("/{database_name}"));
+    url.set_username(user)
+        .map_err(|()| anyhow::anyhow!("cannot set username on test DSN"))?;
+    url.set_password(Some(password))
+        .map_err(|()| anyhow::anyhow!("cannot set password on test DSN"))?;
+    remove_query_keys(&mut url, &["dbname", "user", "password"]);
     Ok(url.to_string())
 }
 
@@ -183,11 +221,25 @@ impl IsolatedTestDatabase {
             .await
             .with_context(|| format!("Failed to connect to isolated database {database_name}"))?;
 
-        Ok(Self {
+        // Everything a test does next (dropping extensions, revoking grants, vacuuming)
+        // assumes it is inside the database created above. Verify it instead of trusting
+        // the DSN; from here on `Drop` removes the database again.
+        let test_db = Self {
             admin_dsn,
             database_name,
             pool: Some(pool),
-        })
+        };
+        let connected_to: String = sqlx::query_scalar("SELECT current_database()::text")
+            .fetch_one(test_db.pool())
+            .await
+            .context("Failed to read the isolated connection's database")?;
+        anyhow::ensure!(
+            connected_to == test_db.database_name,
+            "the isolated pool is connected to {connected_to}, not to {}",
+            test_db.database_name
+        );
+
+        Ok(test_db)
     }
 
     /// DSN for this isolated database as another role.
@@ -200,13 +252,7 @@ impl IsolatedTestDatabase {
     ///
     /// Returns an error if the administrative DSN cannot be parsed.
     pub fn dsn_for_role(&self, user: &str, password: &str) -> Result<String> {
-        let mut url = url::Url::parse(&self.admin_dsn).context("Failed to parse test DSN")?;
-        url.set_path(&format!("/{}", self.database_name));
-        url.set_username(user)
-            .map_err(|()| anyhow::anyhow!("cannot set username on test DSN"))?;
-        url.set_password(Some(password))
-            .map_err(|()| anyhow::anyhow!("cannot set password on test DSN"))?;
-        Ok(url.to_string())
+        dsn_for_database_role(&self.admin_dsn, &self.database_name, user, password)
     }
 
     pub async fn with_pg_stat_statements(prefix: &str) -> Result<Option<Self>> {

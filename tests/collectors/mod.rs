@@ -19,5 +19,6 @@ pub mod stat_io;
 pub mod statements;
 pub mod system;
 pub mod temp;
+pub mod test_fixtures;
 pub mod tls;
 pub mod vacuum;
