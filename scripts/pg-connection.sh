@@ -19,9 +19,9 @@ pg_connection_is_loopback() {
 # cases, because libpq reads it whatever the host says.
 #
 # This is deliberately narrower than libpq. It refuses, instead of guessing at, a service
-# file entry (`service=`, PGSERVICE), a list of hosts, quoting, backslashes or spaces
-# around "=" in a keyword string, and any percent-encoding other than %2F (the slash of
-# a socket path): each of those can name a host this function would not see.
+# file entry (`service=`, PGSERVICE), a list of hosts, a "#", quoting, backslashes or
+# spaces around "=" in a keyword string, and any percent-encoding other than %2F (the
+# slash of a socket path): each of those can name a host this function would not see.
 pg_connection_effective_target() {
     local host="$1" hostaddr="${PGHOSTADDR:-}"
     local dsn="${PG_EXPORTER_DSN:-}"
@@ -29,7 +29,9 @@ pg_connection_effective_target() {
     [[ -z "${PGSERVICE:-}" && -z "${PGSERVICEFILE:-}" ]] || return 1
 
     if [[ -n "${dsn}" ]]; then
-        dsn="${dsn%%#*}"
+        # Text after a "#" is cut off here but still handed to libpq with the rest of the
+        # DSN, where it can carry a `hostaddr` this function never saw.
+        [[ "${dsn}" != *#* ]] || return 1
         if [[ "${dsn}" == *://* ]]; then
             local rest="${dsn#*://}" query="" pair key value
             local authority="${rest%%[/?]*}"
@@ -119,7 +121,7 @@ pg_connection_is_local() {
 pg_connection_target_summary() {
     local target host hostaddr
     if ! target="$(pg_connection_effective_target "$1")"; then
-        printf 'settings this script cannot read with certainty (a service, several hosts, quoting, spaces around "=", or percent-encoding)\n'
+        printf 'settings this script cannot read with certainty (a service, several hosts, a "#", quoting, spaces around "=", or percent-encoding)\n'
         return
     fi
     {

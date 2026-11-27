@@ -513,12 +513,13 @@ main() {
     parse_args "$@"
 
     log_info "=== pg_exporter Test Database Setup ==="
+    # Before anything is printed about the target: a rejected value is not echoed.
+    require_local_target
     if [ "$VERBOSE" = true ]; then
         log_debug "Connection: $(pg_connection_description "$PG_DATABASE")"
     fi
     echo ""
 
-    require_local_target
     check_postgres
     check_version
     verify_extension
