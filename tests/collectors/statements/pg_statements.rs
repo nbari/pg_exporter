@@ -235,6 +235,65 @@ async fn test_pg_statements_collector_skips_after_the_extension_is_dropped() -> 
     Ok(())
 }
 
+/// The column probes are cached, and the extension can be replaced under a running
+/// exporter by a version with other columns: `toplevel` only exists from 1.9 on. One
+/// collector must keep working across that change. It used to keep asking for
+/// `s.toplevel`, and every scrape failed with `column s.toplevel does not exist` until
+/// the exporter was restarted.
+#[tokio::test]
+async fn test_pg_statements_collector_follows_an_extension_version_change() -> Result<()> {
+    let Some(test_db) = setup_pg_statements_test_db().await? else {
+        println!("pg_stat_statements extension not installed, skipping test");
+        return Ok(());
+    };
+    let pool = test_db.pool();
+
+    // No query-text lookups, so no detached task outlives the test.
+    let collector = PgStatementsCollector::with_config(25, None);
+    let registry = Registry::new();
+    collector.register_metrics(&registry)?;
+
+    sqlx::query("SELECT 1").execute(pool).await?;
+    collector
+        .collect(pool)
+        .await
+        .context("collection with the current extension version failed")?;
+
+    // 1.8 has no `toplevel` column; every supported server can still install it.
+    sqlx::query("DROP EXTENSION pg_stat_statements")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE EXTENSION pg_stat_statements VERSION '1.8'")
+        .execute(pool)
+        .await?;
+    let has_toplevel: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM pg_attribute
+             WHERE attrelid = 'pg_stat_statements'::regclass AND attname = 'toplevel'
+         )",
+    )
+    .fetch_one(pool)
+    .await?;
+    sqlx::query("SELECT 1").execute(pool).await?;
+
+    // The exporter has not noticed anything: the extension is still cached as installed.
+    let after_replacement = collector.collect(pool).await;
+    let exported = exported_queryids(&registry);
+    test_db.cleanup().await?;
+
+    assert!(
+        !has_toplevel,
+        "version 1.8 should not have the toplevel column"
+    );
+    after_replacement
+        .context("an extension replaced by another version must not fail the scrape")?;
+    assert!(
+        !exported.is_empty(),
+        "statements should be exported again from the replaced extension"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_pg_statements_collector_excludes_own_query() -> Result<()> {
     let Some(test_db) = setup_pg_statements_test_db().await? else {

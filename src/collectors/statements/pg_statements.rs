@@ -1,6 +1,8 @@
 use crate::collectors::{Collected, Collector, i64_to_f64,
     config::DEFAULT_STATEMENTS_QUERY_TEXT_REFRESH,
-    util::{MS_TO_SEC, QueryFailure, TEMPLATE0, TEMPLATE1, classify_query_error},
+    util::{
+        MS_TO_SEC, QueryFailure, TEMPLATE0, TEMPLATE1, classify_query_error, is_undefined_column,
+    },
 };
 use anyhow::Result;
 use futures::future::BoxFuture;
@@ -876,6 +878,11 @@ impl PgStatementsCollector {
     }
 
     fn update_extension_state(&self, installed: bool) {
+        if !installed {
+            // Whatever comes back may not be what left: a different extension version,
+            // or another server altogether.
+            self.forget_schema_capabilities();
+        }
         let mut state = self.extension_state_lock();
         *state = if installed {
             ExtensionState::Installed
@@ -884,6 +891,21 @@ impl PgStatementsCollector {
                 last_checked: Instant::now(),
             }
         };
+    }
+
+    /// Forgets the cached column probes so the next scrape asks the catalog again.
+    ///
+    /// The probes are cached for the life of the process because the columns normally
+    /// only change with the server. They do change when the extension is dropped and
+    /// created again at another version (`toplevel` arrived in 1.9), and when the
+    /// exporter reaches a different server after a failover or an upgrade. Keeping a
+    /// stale "supported" then fails every scrape with `column s.toplevel does not
+    /// exist` until the exporter restarts.
+    fn forget_schema_capabilities(&self) {
+        self.query_id_state
+            .store(query_id_support::UNKNOWN, Ordering::Relaxed);
+        self.toplevel_state
+            .store(query_id_support::UNKNOWN, Ordering::Relaxed);
     }
 
     async fn pg_statements_available(&self, pool: &PgPool) -> Result<bool> {
@@ -1072,34 +1094,49 @@ impl Collector for PgStatementsCollector {
                     return Ok(Collected::Skipped);
                 }
 
-                let query = Self::build_pg_statements_query(
-                    self.supports_query_id(pool).await,
-                    self.supports_toplevel(pool).await,
-                );
                 let top_n = i64::try_from(self.top_n).unwrap_or(i64::MAX);
-                let rows: Vec<PgRow> = match sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
-                    .bind(self.self_queryids())
-                    .bind(top_n)
-                    .fetch_all(pool)
-                    .await
-                {
-                    Ok(rows) => rows,
+                let mut reprobed = false;
+                let rows: Vec<PgRow> = loop {
+                    let query = Self::build_pg_statements_query(
+                        self.supports_query_id(pool).await,
+                        self.supports_toplevel(pool).await,
+                    );
+                    match sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
+                        .bind(self.self_queryids())
+                        .bind(top_n)
+                        .fetch_all(pool)
+                        .await
+                    {
+                        Ok(rows) => break rows,
+                        // A column the cached probes promised is gone: the extension was
+                        // replaced by another version between two scrapes. Ask the
+                        // catalog again and retry once; a second failure is a real fault.
+                        Err(error) if !reprobed && is_undefined_column(&error) => {
+                            reprobed = true;
+                            self.forget_schema_capabilities();
+                            debug!(
+                                collector = "pg_statements",
+                                error = %error,
+                                "pg_stat_statements columns changed - probing them again"
+                            );
+                        }
                     // The extension was installed when last checked and is gone now: it
                     // was dropped, or the exporter now reaches a server that never had
                     // it. `Installed` is cached without a recheck, so without this the
                     // query would fail, and take the whole scrape with it, until the
                     // exporter restarts. Forget the cached state and skip instead; the
                     // extension is probed again after `MISSING_EXTENSION_RECHECK_AFTER`.
-                    Err(error) if classify_query_error(&error) == QueryFailure::Absent => {
-                        self.update_extension_state(false);
-                        warn!(
-                            collector = "pg_statements",
-                            error = %error,
-                            "pg_stat_statements is no longer available - skipping collection"
-                        );
-                        return Ok(Collected::Skipped);
+                        Err(error) if classify_query_error(&error) == QueryFailure::Absent => {
+                            self.update_extension_state(false);
+                            warn!(
+                                collector = "pg_statements",
+                                error = %error,
+                                "pg_stat_statements is no longer available - skipping collection"
+                            );
+                            return Ok(Collected::Skipped);
+                        }
+                        Err(error) => return Err(error.into()),
                     }
-                    Err(error) => return Err(error.into()),
                 };
 
                 // A row without a readable queryid cannot be labelled or cached, so it is
@@ -1615,6 +1652,36 @@ mod tests {
         assert_eq!(collector.text_cache_lock().texts.len(), 2);
     }
 
+
+    /// A capability probed against one extension version must not survive the
+    /// extension going away: it may come back as 1.8, which has no `toplevel`.
+    #[test]
+    fn test_a_missing_extension_forgets_the_cached_column_probes() {
+        let collector = PgStatementsCollector::with_top_n(25);
+        collector
+            .query_id_state
+            .store(query_id_support::SUPPORTED, Ordering::Relaxed);
+        collector
+            .toplevel_state
+            .store(query_id_support::SUPPORTED, Ordering::Relaxed);
+
+        collector.update_extension_state(true);
+        assert_eq!(
+            collector.toplevel_state.load(Ordering::Relaxed),
+            query_id_support::SUPPORTED,
+            "an installed extension keeps its probes"
+        );
+
+        collector.update_extension_state(false);
+        assert_eq!(
+            collector.toplevel_state.load(Ordering::Relaxed),
+            query_id_support::UNKNOWN
+        );
+        assert_eq!(
+            collector.query_id_state.load(Ordering::Relaxed),
+            query_id_support::UNKNOWN
+        );
+    }
 
     #[test]
     fn test_cached_extension_availability_uses_installed_cache() {

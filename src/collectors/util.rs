@@ -459,6 +459,8 @@ pub const UNDEFINED_TABLE: &str = "42P01";
 pub const UNDEFINED_FUNCTION: &str = "42883";
 /// `SQLSTATE` for a missing object, including an unrecognised configuration parameter.
 pub const UNDEFINED_OBJECT: &str = "42704";
+/// `SQLSTATE` for a column the relation does not have.
+pub const UNDEFINED_COLUMN: &str = "42703";
 /// `SQLSTATE` for a permission failure.
 pub const INSUFFICIENT_PRIVILEGE: &str = "42501";
 
@@ -479,6 +481,19 @@ pub fn classify_query_error(error: &sqlx::Error) -> QueryFailure {
         Some(INSUFFICIENT_PRIVILEGE) => QueryFailure::Denied,
         _ => QueryFailure::Fault,
     }
+}
+
+/// Whether a query failed because it named a column the relation does not have.
+///
+/// Kept apart from [`classify_query_error`] on purpose: a missing column is not "the
+/// feature is absent here". It means the query was built for another shape of the same
+/// relation, which only the caller knows how to rebuild.
+#[must_use]
+pub fn is_undefined_column(error: &sqlx::Error) -> bool {
+    matches!(
+        error,
+        sqlx::Error::Database(db_error) if db_error.code().as_deref() == Some(UNDEFINED_COLUMN)
+    )
 }
 
 /// Resolves `server_version_num`, preferring the value cached at startup and falling

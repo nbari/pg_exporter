@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The `statements` collector failed every scrape with `column s.toplevel does not
+  exist` (503) after `pg_stat_statements` was replaced under a running exporter by a
+  version with other columns, for example dropped and created again at 1.8, until the
+  exporter was restarted. The column probes were cached for the life of the process.
+  They are now forgotten when the extension disappears, and a query that hits a missing
+  column asks the catalog again and retries once.
+
 ### Changed
 
 - Update `sysinfo` to 0.40.4, which the `system` collector and the exporter's own
