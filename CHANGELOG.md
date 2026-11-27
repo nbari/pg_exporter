@@ -68,13 +68,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   had not looked at. The recipe also follows its own run by a request id, not "the
   newest run of this commit".
 - crates.io is asked before the image is pushed, and again right before the release is
-  created: a version that already exists there with other bytes stops the run while
-  nothing is public. After the upload the publish job compares the checksum crates.io
-  reports with the `.crate` in the GitHub release. Any registry answer other than "found"
-  or "not found" is an error, not "not published yet".
-- `scripts/setup-local-test-db.sh` no longer prints the DSN when it refuses a target;
-  a password in the query string or a keyword was shown in clear text. Connection
-  descriptions in its other messages mask a password wherever the DSN keeps it.
+  created: a version that already exists there with other bytes stops the run before
+  any tag or release exists. After the upload the publish job compares the checksum
+  crates.io reports with the `.crate` in the GitHub release. Any registry answer other
+  than "found" or "not found" is an error, not "not published yet".
+- `scripts/setup-local-test-db.sh` and the other helper scripts no longer print a DSN
+  in their messages; a password in the query string or a keyword was shown in clear
+  text. They name the destination host instead.
 - The test suite checks where its database connection really goes, in the Rust tests,
   in `scripts/setup-local-test-db.sh` and for the containers tests start themselves. The
   old guard looked for `localhost` anywhere in the DSN and did not see `PGHOSTADDR`, so

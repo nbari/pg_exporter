@@ -10,8 +10,9 @@
 #
 # This validates the index and the attestation manifests: which image each attestation
 # is declared for, and which statement types it declares. It does not open the statements
-# themselves, so it does not verify their contents or signatures; `gh attestation verify`
-# does that for a published image.
+# themselves, so it does not verify their contents. A release additionally signs build
+# provenance for the pushed index as a whole, which `gh attestation verify` checks; that
+# is a separate attestation and does not vouch for these embedded statements either.
 set -euo pipefail
 
 if [[ $# -ne 1 || ! -f "$1/index.json" ]]; then

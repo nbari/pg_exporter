@@ -136,11 +136,13 @@ again and fails on a version that is already tagged.)
   completed `CI OK` decides, for the guard and for the protected `main` alike.
 - **crates.io refuses the upload.** Trusted Publishing is probably not configured for
   `release.yml` (see [Settings](#settings)); fix it and re-run the failed job.
-- **crates.io already holds this version with other bytes.** The crate job checks that
-  before the image is pushed, and the release job again before it creates the release;
-  either stops the run with nothing public. Bump the version. If it only shows up after
-  the upload, in the publish job, the GitHub release is already public: a crate version
-  cannot be replaced, so yank it and release the next version.
+- **crates.io already holds this version with other bytes.** Three checks, and what is
+  public differs at each. The crate job checks before the image is pushed: nothing is
+  public. The release job checks again before it creates the release: the image is
+  already in the registry as `sha-<commit>`, with its attestation, but there is no tag,
+  no release and no version tag on the image. The publish job compares after the upload:
+  the GitHub release is public. In every case bump the version; in the last one also
+  yank the crate, since a crate version cannot be replaced.
 
 ## How the workflow is built
 
