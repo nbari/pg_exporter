@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Print the conclusion of the `CI OK` job of a commit: success, failure, cancelled,
-# skipped, or `missing`.
+# skipped, `conflict`, or `missing`.
 #
 #   scripts/ci-ok-status <owner/repo> <sha>
 #
@@ -9,9 +9,12 @@
 # a check that merely carries the name: any integration or workflow able to write checks
 # could publish its own `CI OK`.
 #
-# The commit is tested on the work branch and again on develop, so there can be several
-# runs. The most recently completed one decides, and an earlier success never outvotes a
-# later failure. A run that is still in progress is not waited for.
+# The commit is tested on the work branch and again on develop, and a run can be re-run,
+# so there can be several `CI OK` jobs. The one that completed last decides, wherever it
+# is: in another run, or in an earlier attempt of a run that is being re-run right now.
+# An earlier success never outvotes a later failure, and a job still in progress is not
+# waited for. Two jobs that completed in the same second with different conclusions are
+# reported as `conflict`, which is not success.
 #
 # Needs `gh` (GH_TOKEN with read access to Actions) and `jq`. Exits non-zero only when
 # GitHub cannot be asked; a failed or absent job is an answer, printed with exit 0.
@@ -28,18 +31,27 @@ if [[ ! "${sha}" =~ ^[0-9a-f]{40}$ ]]; then
     exit 2
 fi
 
-# A plain assignment, so a failing listing fails the script instead of reading as "no runs".
+# Plain assignments, so a failing call fails the script instead of reading as "no runs".
+# Runs in every state are listed: a run that is being re-run is "in progress" as a whole
+# while its previous attempt already holds a completed, possibly failed, `CI OK`.
 runs="$(gh api --paginate \
-    "repos/${repo}/actions/workflows/build.yml/runs?head_sha=${sha}&status=completed&per_page=100" \
+    "repos/${repo}/actions/workflows/build.yml/runs?head_sha=${sha}&per_page=100" \
     --jq '.workflow_runs[]')"
-run_id="$(jq -rs --arg sha "${sha}" '
-    [.[] | select(.head_sha == $sha and .path == ".github/workflows/build.yml")]
-    | sort_by(.updated_at) | last | .id // empty' <<<"${runs}")"
-if [[ -z "${run_id}" ]]; then
-    echo missing
-    exit 0
-fi
+run_ids="$(jq -rs --arg sha "${sha}" '
+    .[] | select(.head_sha == $sha and .path == ".github/workflows/build.yml") | .id' <<<"${runs}")"
 
-jobs="$(gh api --paginate "repos/${repo}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" \
-    --jq '.jobs[]')"
-jq -rs '[.[] | select(.name == "CI OK")] | last | .conclusion // "missing"' <<<"${jobs}"
+jobs=""
+for run_id in ${run_ids}; do
+    # filter=all: the jobs of every attempt, not only of the latest one.
+    run_jobs="$(gh api --paginate \
+        "repos/${repo}/actions/runs/${run_id}/jobs?filter=all&per_page=100" --jq '.jobs[]')"
+    jobs+="${run_jobs}"$'\n'
+done
+
+jq -rs '
+    [.[] | select(.name == "CI OK" and .status == "completed" and .completed_at != null)]
+    | if length == 0 then "missing"
+      else (map(.completed_at) | max) as $latest
+        | ([.[] | select(.completed_at == $latest) | .conclusion] | unique) as $verdicts
+        | if ($verdicts | length) == 1 then $verdicts[0] else "conflict" end
+      end' <<<"${jobs}"
