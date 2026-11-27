@@ -1040,6 +1040,7 @@ async fn threshold_ratios_after_delete(
     reloptions: &str,
     rows: i64,
     deleted: i64,
+    analyze_before_delete: bool,
 ) -> Result<(f64, f64)> {
     sqlx::query(sqlx::AssertSqlSafe(&*format!(
         "CREATE TABLE {table_name} (id bigint PRIMARY KEY, data text)
@@ -1052,14 +1053,25 @@ async fn threshold_ratios_after_delete(
     )))
     .execute(pool)
     .await?;
+    if analyze_before_delete {
+        // Sets `reltuples`, the size the server's trigger point is computed from.
+        sqlx::query(sqlx::AssertSqlSafe(&*format!("ANALYZE {table_name}")))
+            .execute(pool)
+            .await?;
+    }
     sqlx::query(sqlx::AssertSqlSafe(&*format!(
         "DELETE FROM {table_name} WHERE id <= {deleted}"
     )))
     .execute(pool)
     .await?;
 
-    let expected = (rows - deleted, deleted);
+    // The dead-tuple count is what both ratios are measured in. The live count is only
+    // predictable without an ANALYZE in between: ANALYZE overwrites it with an estimate,
+    // and statistics another pooled connection had not reported yet are added on top.
     let mut counts = (-1_i64, -1_i64);
+    let settled = |counts: (i64, i64)| {
+        counts.1 == deleted && (analyze_before_delete || counts.0 == rows - deleted)
+    };
     for _ in 0..100 {
         // Not available before PostgreSQL 15, where the statistics arrive on their own.
         let _ = sqlx::query("SELECT pg_stat_force_next_flush()")
@@ -1072,14 +1084,16 @@ async fn threshold_ratios_after_delete(
         .bind(table_name)
         .fetch_one(pool)
         .await?;
-        if counts == expected {
+        if settled(counts) {
             break;
         }
         tokio::time::sleep(StdDuration::from_millis(100)).await;
     }
     anyhow::ensure!(
-        counts == expected,
-        "table statistics never showed {expected:?} live and dead tuples, last saw {counts:?}"
+        settled(counts),
+        "table statistics never showed {deleted} dead tuples (and, without ANALYZE, {} live), \
+         last saw live and dead {counts:?}",
+        rows - deleted
     );
 
     let collector = StatUserTablesCollector::new();
@@ -1123,6 +1137,7 @@ async fn test_stat_user_tables_threshold_ratios_cover_a_fully_deleted_table() ->
          autovacuum_analyze_threshold = 50, autovacuum_analyze_scale_factor = 0.1",
         100,
         100,
+        false,
     )
     .await;
     drop_table(&pool, &table_name).await?;
@@ -1154,6 +1169,7 @@ async fn test_stat_user_tables_zero_threshold_ratio_covers_a_fully_deleted_table
          autovacuum_analyze_threshold = 0, autovacuum_analyze_scale_factor = 0",
         100,
         100,
+        false,
     )
     .await;
     drop_table(&pool, &table_name).await?;
@@ -1163,6 +1179,45 @@ async fn test_stat_user_tables_zero_threshold_ratio_covers_a_fully_deleted_table
     assert!(
         (vacuum_ratio - 100.0).abs() < 1e-9,
         "with a zero trigger point the ratio is the dead tuple count, got {vacuum_ratio}"
+    );
+    Ok(())
+}
+
+/// The scaled part of the trigger point follows `reltuples`, not the live-tuple counter.
+/// A table of 100 analyzed rows that is then emptied still has `reltuples = 100`, so with
+/// threshold 10 and scale factor 1 the server waits for 110 dead tuples: the 100 there
+/// are a ratio of 0.909, not the 10 that dividing by the bare threshold gives.
+#[tokio::test]
+async fn test_stat_user_tables_threshold_ratios_scale_with_reltuples() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+    let table_name = unique_table_name("test_ratio_reltuples");
+
+    let outcome = threshold_ratios_after_delete(
+        &pool,
+        &table_name,
+        "autovacuum_vacuum_threshold = 10, autovacuum_vacuum_scale_factor = 1,
+         autovacuum_analyze_threshold = 10, autovacuum_analyze_scale_factor = 1",
+        100,
+        100,
+        true,
+    )
+    .await;
+    drop_table(&pool, &table_name).await?;
+    pool.close().await;
+
+    let (vacuum_ratio, analyze_ratio) = outcome?;
+    let expected = 100.0 / 110.0;
+    assert!(
+        (vacuum_ratio - expected).abs() < 1e-6,
+        "100 dead tuples against 10 + 1 * 100 are a ratio of {expected}, got {vacuum_ratio}"
+    );
+    // The modification count depends on which statistics had been reported when ANALYZE
+    // ran, so only the divisor is pinned: 110, which makes the ratio a multiple of 1/110
+    // no smaller than the 100 deletes.
+    let modifications = analyze_ratio * 110.0;
+    assert!(
+        modifications >= 100.0 - 1e-6 && (modifications - modifications.round()).abs() < 1e-6,
+        "the analyze ratio should be a whole modification count over 110, got {analyze_ratio}"
     );
     Ok(())
 }
@@ -1191,6 +1246,7 @@ async fn test_stat_user_tables_vacuum_ratio_honours_the_max_threshold() -> Resul
          autovacuum_vacuum_max_threshold = 1",
         100,
         2,
+        false,
     )
     .await;
     drop_table(&pool, &table_name).await?;

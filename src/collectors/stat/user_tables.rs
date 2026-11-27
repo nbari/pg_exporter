@@ -178,10 +178,14 @@ impl StatUserTablesCollector {
 
 const USER_TABLE_LABELS: [&str; 3] = ["datname", "schemaname", "relname"];
 
-/// The two threshold ratios divide by a table's autovacuum trigger point,
-/// `threshold + scale_factor * n_live_tup`. They are computed for every table, including
-/// one with no live rows: after a mass delete the trigger point is the bare threshold,
-/// and that is exactly when the dead tuples are due. Reporting 0 there hid it.
+/// The two threshold ratios divide by a table's autovacuum trigger point, computed the
+/// way the autovacuum launcher does: `threshold + scale_factor * reltuples`, where
+/// `reltuples` is the planner's row estimate in `pg_class` as of the last `VACUUM` or
+/// `ANALYZE` (a table never analyzed has -1 there, which counts as 0). It is not the
+/// live-tuple counter: after a mass delete `n_live_tup` drops to 0 at once while
+/// `reltuples` keeps the old size until the table is vacuumed, and the server's trigger
+/// point stays where it was. They are computed for every table, including one with no
+/// live rows; reporting 0 there hid the tables most due for a vacuum.
 ///
 /// From `PostgreSQL` 18 the vacuum trigger point is capped by
 /// `autovacuum_vacuum_max_threshold` (a table reloption or the server setting; a negative
@@ -241,7 +245,7 @@ const STAT_USER_TABLES_QUERY: &str = r"
                         WHERE option_name = 'autovacuum_vacuum_scale_factor'
                     ),
                     current_setting('autovacuum_vacuum_scale_factor')::double precision
-                ) * s.n_live_tup::double precision,
+                ) * GREATEST(c.reltuples, 0)::double precision,
                 (
                     SELECT CASE WHEN cap.value >= 0 THEN cap.value END
                     FROM (
@@ -274,7 +278,7 @@ const STAT_USER_TABLES_QUERY: &str = r"
                     WHERE option_name = 'autovacuum_analyze_scale_factor'
                 ),
                 current_setting('autovacuum_analyze_scale_factor')::double precision
-            ) * s.n_live_tup::double precision
+            ) * GREATEST(c.reltuples, 0)::double precision
         , 0), 1) AS autoanalyze_threshold_ratio,
         COALESCE(io.heap_blks_read::bigint, 0) AS heap_blks_read,
         COALESCE(io.heap_blks_hit::bigint, 0) AS heap_blks_hit,
