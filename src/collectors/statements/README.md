@@ -321,10 +321,15 @@ recorded in the first place.
 
 The column arrived in `pg_stat_statements` 1.9 (PostgreSQL 14). The filter is written as
 a `NATURAL JOIN` with a one-row relation whose only column is `toplevel = true`, so it is
-decided by the columns the function call itself returns, in the same statement: on older
-extension versions there is no common column and every row is kept, since `track = all`
-there cannot produce the duplicate in the first place. No catalog probe is involved, so
-the monitoring role needs no access to `pg_proc` or `pg_attribute` for it.
+decided by the columns the function call itself returns, in the same statement. No
+catalog probe is involved, so the monitoring role needs no access to `pg_proc` or
+`pg_attribute` for it.
+
+On extension 1.8 there is no common column and every row is kept. Under `track = all`
+1.8 still records a statement run both directly and nested as two entries, but it has no
+column that tells them apart, so they collapse onto one series as described above. Update
+the extension (`ALTER EXTENSION pg_stat_statements UPDATE`) or keep the default
+`track = top` to avoid that.
 
 Convert temp blocks to bytes with `pg_settings_block_size_bytes` (from
 `--collector.default`):
