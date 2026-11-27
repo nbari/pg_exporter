@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exporter was restarted. The column probes were cached for the life of the process.
   They are now forgotten when the extension disappears, and a query that hits a missing
   column asks the catalog again and retries once.
+- `pg_stat_user_tables_autovacuum_threshold_ratio` and
+  `pg_stat_user_tables_autoanalyze_threshold_ratio` reported 0 for every table without
+  live rows. After a mass delete the trigger point is the bare threshold, so 100 dead
+  tuples against `autovacuum_vacuum_threshold = 50` are a ratio of 2, and that is when
+  autovacuum is due. Both ratios are now computed for such tables. This also makes the
+  0.22.3 note true for them: with a zero trigger point the ratio is the tuple count.
+  **An alert on these ratios can now fire for emptied tables that it used to miss.**
+- On PostgreSQL 18 and later the vacuum ratio honours `autovacuum_vacuum_max_threshold`
+  (the table reloption or the server setting). It was ignored, which under-reported how
+  due a table is once the cap is lower than `threshold + scale_factor * n_live_tup`.
 
 ### Changed
 

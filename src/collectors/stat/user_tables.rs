@@ -179,11 +179,20 @@ impl StatUserTablesCollector {
 const USER_TABLE_LABELS: [&str; 3] = ["datname", "schemaname", "relname"];
 
 /// The two threshold ratios divide by a table's autovacuum trigger point,
-/// `threshold + scale_factor * n_live_tup`. Reloptions can set both terms to 0, which
-/// tells `PostgreSQL` to treat any dead (or modified) tuple as due. The division is
-/// guarded for that case and falls back to a divisor of 1, so such a table reports its
-/// tuple count: any work at all reads as at or past the threshold. Unguarded, one such
-/// table raised `division by zero` and failed the whole query for its database.
+/// `threshold + scale_factor * n_live_tup`. They are computed for every table, including
+/// one with no live rows: after a mass delete the trigger point is the bare threshold,
+/// and that is exactly when the dead tuples are due. Reporting 0 there hid it.
+///
+/// From `PostgreSQL` 18 the vacuum trigger point is capped by
+/// `autovacuum_vacuum_max_threshold` (a table reloption or the server setting; a negative
+/// value disables the cap). `current_setting(..., true)` yields NULL on a server without
+/// the setting, and `LEAST` ignores a NULL, so older servers are unaffected.
+///
+/// Reloptions can set both terms to 0, which tells `PostgreSQL` to treat any dead (or
+/// modified) tuple as due. The division is guarded for that case and falls back to a
+/// divisor of 1, so such a table reports its tuple count: any work at all reads as at or
+/// past the threshold. Unguarded, one such table raised `division by zero` and failed the
+/// whole query for its database.
 const STAT_USER_TABLES_QUERY: &str = r"
     SELECT
         current_database() AS datname,
@@ -214,52 +223,59 @@ const STAT_USER_TABLES_QUERY: &str = r"
         EXTRACT(EPOCH FROM (now() - s.last_autoanalyze))::double precision AS last_autoanalyze_seconds_ago,
         CASE WHEN s.last_autovacuum IS NULL THEN 1 ELSE 0 END::bigint AS never_autovacuumed,
         CASE WHEN s.last_autoanalyze IS NULL THEN 1 ELSE 0 END::bigint AS never_autoanalyzed,
-        CASE
-            WHEN s.n_live_tup > 0 THEN
-                s.n_dead_tup::double precision /
-                COALESCE(NULLIF(
-                    COALESCE(
-                        (
-                            SELECT option_value::double precision
-                            FROM pg_options_to_table(c.reloptions)
-                            WHERE option_name = 'autovacuum_vacuum_threshold'
-                        ),
-                        current_setting('autovacuum_vacuum_threshold')::double precision
-                    ) +
-                    COALESCE(
-                        (
-                            SELECT option_value::double precision
-                            FROM pg_options_to_table(c.reloptions)
-                            WHERE option_name = 'autovacuum_vacuum_scale_factor'
-                        ),
-                        current_setting('autovacuum_vacuum_scale_factor')::double precision
-                    ) * s.n_live_tup::double precision
-                , 0), 1)
-            ELSE 0
-        END AS autovacuum_threshold_ratio,
-        CASE
-            WHEN s.n_live_tup > 0 THEN
-                s.n_mod_since_analyze::double precision /
-                COALESCE(NULLIF(
-                    COALESCE(
-                        (
-                            SELECT option_value::double precision
-                            FROM pg_options_to_table(c.reloptions)
-                            WHERE option_name = 'autovacuum_analyze_threshold'
-                        ),
-                        current_setting('autovacuum_analyze_threshold')::double precision
-                    ) +
-                    COALESCE(
-                        (
-                            SELECT option_value::double precision
-                            FROM pg_options_to_table(c.reloptions)
-                            WHERE option_name = 'autovacuum_analyze_scale_factor'
-                        ),
-                        current_setting('autovacuum_analyze_scale_factor')::double precision
-                    ) * s.n_live_tup::double precision
-                , 0), 1)
-            ELSE 0
-        END AS autoanalyze_threshold_ratio,
+        s.n_dead_tup::double precision /
+        COALESCE(NULLIF(
+            LEAST(
+                COALESCE(
+                    (
+                        SELECT option_value::double precision
+                        FROM pg_options_to_table(c.reloptions)
+                        WHERE option_name = 'autovacuum_vacuum_threshold'
+                    ),
+                    current_setting('autovacuum_vacuum_threshold')::double precision
+                ) +
+                COALESCE(
+                    (
+                        SELECT option_value::double precision
+                        FROM pg_options_to_table(c.reloptions)
+                        WHERE option_name = 'autovacuum_vacuum_scale_factor'
+                    ),
+                    current_setting('autovacuum_vacuum_scale_factor')::double precision
+                ) * s.n_live_tup::double precision,
+                (
+                    SELECT CASE WHEN cap.value >= 0 THEN cap.value END
+                    FROM (
+                        SELECT COALESCE(
+                            (
+                                SELECT option_value::double precision
+                                FROM pg_options_to_table(c.reloptions)
+                                WHERE option_name = 'autovacuum_vacuum_max_threshold'
+                            ),
+                            current_setting('autovacuum_vacuum_max_threshold', true)::double precision
+                        ) AS value
+                    ) AS cap
+                )
+            )
+        , 0), 1) AS autovacuum_threshold_ratio,
+        s.n_mod_since_analyze::double precision /
+        COALESCE(NULLIF(
+            COALESCE(
+                (
+                    SELECT option_value::double precision
+                    FROM pg_options_to_table(c.reloptions)
+                    WHERE option_name = 'autovacuum_analyze_threshold'
+                ),
+                current_setting('autovacuum_analyze_threshold')::double precision
+            ) +
+            COALESCE(
+                (
+                    SELECT option_value::double precision
+                    FROM pg_options_to_table(c.reloptions)
+                    WHERE option_name = 'autovacuum_analyze_scale_factor'
+                ),
+                current_setting('autovacuum_analyze_scale_factor')::double precision
+            ) * s.n_live_tup::double precision
+        , 0), 1) AS autoanalyze_threshold_ratio,
         COALESCE(io.heap_blks_read::bigint, 0) AS heap_blks_read,
         COALESCE(io.heap_blks_hit::bigint, 0) AS heap_blks_hit,
         COALESCE(io.idx_blks_read::bigint, 0) AS idx_blks_read,

@@ -1031,6 +1031,179 @@ async fn test_stat_user_tables_collector_survives_zero_autovacuum_threshold() ->
     Ok(())
 }
 
+/// Creates `table_name` with `reloptions` (autovacuum itself is switched off so the
+/// counts stay put), inserts `rows` rows, deletes the first `deleted`, and returns the
+/// exported vacuum and analyze threshold ratios once the statistics show those counts.
+async fn threshold_ratios_after_delete(
+    pool: &sqlx::PgPool,
+    table_name: &str,
+    reloptions: &str,
+    rows: i64,
+    deleted: i64,
+) -> Result<(f64, f64)> {
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "CREATE TABLE {table_name} (id bigint PRIMARY KEY, data text)
+         WITH (autovacuum_enabled = false, {reloptions})"
+    )))
+    .execute(pool)
+    .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "INSERT INTO {table_name} SELECT g, 'row' FROM generate_series(1, {rows}) g"
+    )))
+    .execute(pool)
+    .await?;
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "DELETE FROM {table_name} WHERE id <= {deleted}"
+    )))
+    .execute(pool)
+    .await?;
+
+    let expected = (rows - deleted, deleted);
+    let mut counts = (-1_i64, -1_i64);
+    for _ in 0..100 {
+        // Not available before PostgreSQL 15, where the statistics arrive on their own.
+        let _ = sqlx::query("SELECT pg_stat_force_next_flush()")
+            .execute(pool)
+            .await;
+        counts = sqlx::query_as(
+            "SELECT n_live_tup::bigint, n_dead_tup::bigint
+             FROM pg_stat_user_tables WHERE relname = $1",
+        )
+        .bind(table_name)
+        .fetch_one(pool)
+        .await?;
+        if counts == expected {
+            break;
+        }
+        tokio::time::sleep(StdDuration::from_millis(100)).await;
+    }
+    anyhow::ensure!(
+        counts == expected,
+        "table statistics never showed {expected:?} live and dead tuples, last saw {counts:?}"
+    );
+
+    let collector = StatUserTablesCollector::new();
+    let registry = Registry::new();
+    collector.register_metrics(&registry)?;
+    collector.collect(pool).await?;
+    let metric_families = registry.gather();
+
+    let ratio = |metric_name: &str| {
+        find_metric_for_table(&metric_families, metric_name, table_name)
+            .map(|metric| metric.get_gauge().value())
+            .ok_or_else(|| anyhow::anyhow!("{metric_name} missing for {table_name}"))
+    };
+    Ok((
+        ratio("pg_stat_user_tables_autovacuum_threshold_ratio")?,
+        ratio("pg_stat_user_tables_autoanalyze_threshold_ratio")?,
+    ))
+}
+
+async fn drop_table(pool: &sqlx::PgPool, table_name: &str) -> Result<()> {
+    sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "DROP TABLE IF EXISTS {table_name}"
+    )))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// A table whose rows were all deleted has no live tuples, so its trigger point is the
+/// bare threshold, and its dead tuples are due as soon as they exceed it. Both ratios
+/// used to be forced to 0 for such a table, which hid the one moment they matter most.
+#[tokio::test]
+async fn test_stat_user_tables_threshold_ratios_cover_a_fully_deleted_table() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+    let table_name = unique_table_name("test_ratio_all_deleted");
+
+    let outcome = threshold_ratios_after_delete(
+        &pool,
+        &table_name,
+        "autovacuum_vacuum_threshold = 50, autovacuum_vacuum_scale_factor = 0.2,
+         autovacuum_analyze_threshold = 50, autovacuum_analyze_scale_factor = 0.1",
+        100,
+        100,
+    )
+    .await;
+    drop_table(&pool, &table_name).await?;
+    pool.close().await;
+
+    let (vacuum_ratio, analyze_ratio) = outcome?;
+    assert!(
+        (vacuum_ratio - 2.0).abs() < 1e-9,
+        "100 dead tuples against a threshold of 50 are a ratio of 2, got {vacuum_ratio}"
+    );
+    assert!(
+        analyze_ratio >= 2.0,
+        "at least 100 modifications against a threshold of 50, got {analyze_ratio}"
+    );
+    Ok(())
+}
+
+/// The zero-trigger-point convention holds without live rows too: the ratio is the dead
+/// tuple count, not 0.
+#[tokio::test]
+async fn test_stat_user_tables_zero_threshold_ratio_covers_a_fully_deleted_table() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+    let table_name = unique_table_name("test_ratio_zero_all_deleted");
+
+    let outcome = threshold_ratios_after_delete(
+        &pool,
+        &table_name,
+        "autovacuum_vacuum_threshold = 0, autovacuum_vacuum_scale_factor = 0,
+         autovacuum_analyze_threshold = 0, autovacuum_analyze_scale_factor = 0",
+        100,
+        100,
+    )
+    .await;
+    drop_table(&pool, &table_name).await?;
+    pool.close().await;
+
+    let (vacuum_ratio, _) = outcome?;
+    assert!(
+        (vacuum_ratio - 100.0).abs() < 1e-9,
+        "with a zero trigger point the ratio is the dead tuple count, got {vacuum_ratio}"
+    );
+    Ok(())
+}
+
+/// `PostgreSQL` 18 caps the vacuum trigger point with `autovacuum_vacuum_max_threshold`.
+/// Ignoring the cap under-reports how due a table is: 2 dead tuples against a threshold
+/// of 50 capped at 1 are a ratio of 2, not 0.04.
+#[tokio::test]
+async fn test_stat_user_tables_vacuum_ratio_honours_the_max_threshold() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+    let server_version: i32 =
+        sqlx::query_scalar("SELECT current_setting('server_version_num')::int4")
+            .fetch_one(&pool)
+            .await?;
+    if server_version < 180_000 {
+        println!("autovacuum_vacuum_max_threshold needs PostgreSQL 18, skipping test");
+        pool.close().await;
+        return Ok(());
+    }
+    let table_name = unique_table_name("test_ratio_max_threshold");
+
+    let outcome = threshold_ratios_after_delete(
+        &pool,
+        &table_name,
+        "autovacuum_vacuum_threshold = 50, autovacuum_vacuum_scale_factor = 0,
+         autovacuum_vacuum_max_threshold = 1",
+        100,
+        2,
+    )
+    .await;
+    drop_table(&pool, &table_name).await?;
+    pool.close().await;
+
+    let (vacuum_ratio, _) = outcome?;
+    assert!(
+        (vacuum_ratio - 2.0).abs() < 1e-9,
+        "2 dead tuples against a trigger point capped at 1 are a ratio of 2, got {vacuum_ratio}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_stat_user_tables_collector_marks_never_autovacuumed_tables() -> Result<()> {
     let pool = common::create_test_pool().await?;
