@@ -75,17 +75,14 @@ async fn container_endpoint(container: &ContainerAsync<GenericImage>) -> Result<
 /// trusted-compose guard still applies). Returns `Ok(None)` when the test should skip.
 async fn resolve_admin_server(
     test_name: &str,
-) -> Result<Option<(PgConnectOptions, Option<ContainerAsync<GenericImage>>)>> {
+) -> Result<Option<(String, Option<ContainerAsync<GenericImage>>)>> {
     if common::container_runtime_available() {
         match start_postgres().await {
             Ok(container) => {
                 let (host, port) = container_endpoint(&container).await?;
                 let admin_dsn = format!("postgresql://postgres:postgres@{host}:{port}/postgres");
                 common::test_dsn::ensure_local(&admin_dsn);
-                return Ok(Some((
-                    PgConnectOptions::from_str(&admin_dsn)?,
-                    Some(container),
-                )));
+                return Ok(Some((admin_dsn, Some(container))));
             }
             Err(error) => {
                 if common::should_require_container_runtime() {
@@ -101,7 +98,7 @@ async fn resolve_admin_server(
         eprintln!(
             "{test_name}: no container runtime; using existing PostgreSQL from PG_EXPORTER_DSN"
         );
-        return Ok(Some((PgConnectOptions::from_str(&dsn)?, None)));
+        return Ok(Some((dsn, None)));
     }
 
     if common::should_require_container_runtime() {
@@ -422,15 +419,16 @@ async fn hold_access_exclusive_locks(
 async fn limited_pg_monitor_role_runs_all_collectors_and_stays_within_five_connections()
 -> Result<()> {
     let test_name = "limited_pg_monitor_role_runs_all_collectors_and_stays_within_five_connections";
-    let Some((admin_options, _container)) = resolve_admin_server(test_name).await? else {
+    let Some((admin_dsn, _container)) = resolve_admin_server(test_name).await? else {
         return Ok(());
     };
+    let admin_options = PgConnectOptions::from_str(&admin_dsn)?;
     let mut admin = connect_with_retry(&admin_options).await?;
 
     // Idempotent: clear residue from any earlier aborted run on a shared server.
     cleanup_budget_state(&mut admin).await?;
 
-    let scenario = run_budget_scenario(&mut admin, &admin_options).await;
+    let scenario = run_budget_scenario(&mut admin, &admin_dsn, &admin_options).await;
     let cleanup = cleanup_budget_state(&mut admin).await;
     admin.close().await?;
     scenario?;
@@ -478,17 +476,45 @@ async fn assert_abort_was_recorded(client: &reqwest::Client, metrics_url: &str) 
     Ok(())
 }
 
+/// The exporter role's DSN: the admin's own DSN with another user and database.
+///
+/// Rebuilding it from host and port alone dropped whatever else selected the server, a
+/// socket directory or a `hostaddr`, so on a machine with more than one cluster the role
+/// could be checked against another server than the one it was created on.
+fn role_dsn_from(admin_dsn: &str) -> Result<String> {
+    let mut url = url::Url::parse(admin_dsn)?;
+    // A DSN without an authority (a socket named by `host=`) has no user info to set;
+    // the role then goes into the query string, where `SQLx` reads it as well.
+    let role_in_user_info =
+        url.set_username(EXPORTER_ROLE).is_ok() && url.set_password(None).is_ok();
+    url.set_path("/postgres");
+    // Parameters that would override the role or database, or that are set below.
+    let kept: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| !matches!(key.as_ref(), "dbname" | "user" | "password" | "sslmode"))
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    {
+        let mut query = url.query_pairs_mut();
+        query.clear().extend_pairs(kept);
+        if !role_in_user_info {
+            query.append_pair("user", EXPORTER_ROLE);
+        }
+        query.append_pair("sslmode", "disable");
+    }
+    Ok(url.to_string())
+}
+
 async fn run_budget_scenario(
     admin: &mut PgConnection,
+    admin_dsn: &str,
     admin_options: &PgConnectOptions,
 ) -> Result<()> {
-    // The role connects to the same server as the admin, but through a DSN rebuilt from
-    // host and port alone. Check it before anything is created, and as an error, so the
-    // caller's cleanup still runs: the admin server may be a container or, without a
-    // container runtime, the server `PG_EXPORTER_DSN` names.
-    let host = admin_options.get_host();
-    let port = admin_options.get_port();
-    let role_dsn = format!("postgresql://{EXPORTER_ROLE}@{host}:{port}/postgres?sslmode=disable");
+    // The role connects to the same server as the admin. Check its DSN before anything
+    // is created, and as an error, so the caller's cleanup still runs: the admin server
+    // may be a container or, without a container runtime, the server `PG_EXPORTER_DSN`
+    // names.
+    let role_dsn = role_dsn_from(admin_dsn)?;
     anyhow::ensure!(
         common::test_dsn::target_is_allowed(&role_dsn),
         "the exporter role's DSN does not resolve to the test server (is PGHOSTADDR set?)"
@@ -601,5 +627,45 @@ async fn run_budget_scenario(
     );
 
     exporter.abort();
+    Ok(())
+}
+
+/// The role DSN keeps what selects the admin's server and changes only who connects.
+#[test]
+fn role_dsn_keeps_the_admin_transport() -> Result<()> {
+    for (admin, expected_host, expected_port) in [
+        (
+            "postgresql://postgres:postgres@127.0.0.1:32768/postgres",
+            "127.0.0.1",
+            32768,
+        ),
+        (
+            "postgresql://postgres:postgres@localhost:5432/app?dbname=app&user=postgres",
+            "localhost",
+            5432,
+        ),
+    ] {
+        let options = PgConnectOptions::from_str(&role_dsn_from(admin)?)?;
+        assert_eq!(options.get_username(), EXPORTER_ROLE, "{admin}");
+        assert_eq!(options.get_database(), Some("postgres"), "{admin}");
+        assert_eq!(options.get_host(), expected_host, "{admin}");
+        assert_eq!(options.get_port(), expected_port, "{admin}");
+    }
+
+    let over_a_socket =
+        role_dsn_from("postgresql:///postgres?host=/var/run/postgresql&user=postgres")?;
+    let options = PgConnectOptions::from_str(&over_a_socket)?;
+    assert_eq!(options.get_username(), EXPORTER_ROLE, "{over_a_socket}");
+    assert!(
+        options.get_socket().is_some() || options.get_host().starts_with('/'),
+        "a socket directory must survive, got {over_a_socket}"
+    );
+    let with_hostaddr =
+        role_dsn_from("postgresql://postgres@db.local/postgres?hostaddr=127.0.0.2")?;
+    assert!(
+        with_hostaddr.contains("hostaddr=127.0.0.2"),
+        "a hostaddr must survive, got {with_hostaddr}"
+    );
+    assert!(with_hostaddr.contains("sslmode=disable"));
     Ok(())
 }
