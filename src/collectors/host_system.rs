@@ -64,8 +64,18 @@ mod tests {
     use super::LazySystem;
     use sysinfo::System;
 
+    /// A `System`, or `None` on a host where `sysinfo` has no backend. The tests that
+    /// need a real handle skip there: a correct fallback must not fail the suite.
+    fn real_system() -> Option<System> {
+        System::new().ok()
+    }
+
     #[test]
     fn creates_the_handle_once_and_reuses_it() {
+        if real_system().is_none() {
+            println!("sysinfo has no backend on this host, skipping");
+            return;
+        }
         let mut lazy = LazySystem::new();
         let mut created = 0;
 
@@ -78,30 +88,49 @@ mod tests {
         }
 
         assert_eq!(created, 1, "the handle is created on first use only");
-    }
-
-    #[test]
-    fn a_failed_creation_yields_nothing_and_is_retried() {
-        let mut lazy = LazySystem::new();
-
-        let first = lazy.get_or_create("test", || Err(sysinfo::Error::Unsupported));
-        assert!(first.is_none(), "no handle while creation fails");
-        assert!(lazy.warned, "the failure is reported");
-
-        let second = lazy.get_or_create("test", || Err(sysinfo::Error::Unsupported));
-        assert!(second.is_none(), "still no handle on a repeated failure");
-
-        let third = lazy.get_or_create("test", System::new);
-        assert!(
-            third.is_some(),
-            "a later scrape recovers once creation works"
-        );
-    }
-
-    #[test]
-    fn the_real_constructor_works_on_this_platform() {
-        let mut lazy = LazySystem::new();
-        assert!(lazy.get("test").is_some());
         assert!(!lazy.warned);
+    }
+
+    #[test]
+    fn a_failed_creation_yields_nothing_and_is_tried_again() {
+        let mut lazy = LazySystem::new();
+        let mut attempts = 0;
+
+        for _ in 0..3 {
+            let handle = lazy.get_or_create("test", || {
+                attempts += 1;
+                Err(sysinfo::Error::Unsupported)
+            });
+            assert!(handle.is_none(), "no handle while creation fails");
+            assert!(lazy.warned, "the failure is reported");
+        }
+
+        assert_eq!(attempts, 3, "every scrape tries again");
+    }
+
+    #[test]
+    fn a_later_scrape_recovers_once_creation_works() {
+        let Some(system) = real_system() else {
+            println!("sysinfo has no backend on this host, skipping");
+            return;
+        };
+        let mut lazy = LazySystem::new();
+
+        assert!(
+            lazy.get_or_create("test", || Err(sysinfo::Error::Unsupported))
+                .is_none()
+        );
+        assert!(lazy.get_or_create("test", || Ok(system)).is_some());
+    }
+
+    /// The constructor the collectors really use behaves like the injected one: a
+    /// handle where `sysinfo` has a backend, nothing and one warning where it has none.
+    #[test]
+    fn the_real_constructor_matches_this_platform() {
+        let supported = real_system().is_some();
+        let mut lazy = LazySystem::new();
+
+        assert_eq!(lazy.get("test").is_some(), supported);
+        assert_eq!(lazy.warned, !supported);
     }
 }

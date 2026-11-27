@@ -3,7 +3,10 @@ use anyhow::Result;
 use pg_exporter::collectors::{
     Collector,
     config::CollectorConfig,
-    system::{ProcessMemorySource, SystemCollector},
+    system::{
+        ProcessMemorySource, SystemCollector, cpu::CpuCollector, memory::MemoryCollector,
+        process::ProcessGroupCollector,
+    },
 };
 use prometheus::Registry;
 use std::sync::Arc;
@@ -240,17 +243,42 @@ async fn test_system_metrics_have_no_database_label() -> Result<()> {
 /// another task ran while `collect` was awaited is a race: on a busy host the offloaded
 /// reads can finish before `collect` is first suspended, and a correct collector then
 /// completes without ever yielding.
+///
+/// Each sub-collector is checked on its own. Driving them together through
+/// `SystemCollector` proves nothing about any one of them: a single sub-collector reading
+/// inline still lets the umbrella yield, through the two that offload.
 #[test]
 fn test_system_collect_does_not_monopolise_the_runtime_worker() -> Result<()> {
+    let cases: [(&str, Arc<dyn Collector + Send + Sync>); 3] = [
+        ("system.cpu", Arc::new(CpuCollector::new())),
+        ("system.memory", Arc::new(MemoryCollector::new())),
+        ("system.process", Arc::new(ProcessGroupCollector::new())),
+    ];
+
+    for (name, collector) in cases {
+        assert!(
+            yields_while_the_blocking_thread_is_held(collector.as_ref())?,
+            "{name} finished without ever yielding the runtime worker: its blocking OS reads \
+             are executing on a runtime worker instead of the blocking pool, which starves \
+             every concurrent collector (issue #35)"
+        );
+    }
+    Ok(())
+}
+
+/// Collects once on a runtime with one worker and one blocking thread while that blocking
+/// thread is held, and reports whether another task ran during the collection.
+fn yields_while_the_blocking_thread_is_held(
+    collector: &(dyn Collector + Send + Sync),
+) -> Result<bool> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .max_blocking_threads(1)
         .build()?;
 
-    let ran_during_collect = runtime.block_on(async {
+    runtime.block_on(async {
         // Connect first: resolving the host name needs the blocking thread too.
         let pool = common::create_test_pool().await?;
-        let collector = SystemCollector::new();
 
         let (release, held) = std::sync::mpsc::channel::<()>();
         let (started, running) = tokio::sync::oneshot::channel::<()>();
@@ -288,16 +316,8 @@ fn test_system_collect_does_not_monopolise_the_runtime_worker() -> Result<()> {
         pool.close().await;
         collected?;
 
-        Result::<bool>::Ok(observed.load(Ordering::Relaxed))
-    })?;
-
-    assert!(
-        ran_during_collect,
-        "the system collector finished without ever yielding the runtime worker: its \
-         blocking /proc reads are executing on a runtime worker instead of the blocking \
-         pool, which starves every concurrent collector (issue #35)"
-    );
-    Ok(())
+        Ok(observed.load(Ordering::Relaxed))
+    })
 }
 
 /// The expensive `smaps_rollup` PSS walk must be opt-in, and the CLI value must reach the
