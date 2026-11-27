@@ -59,11 +59,11 @@ Memory and swap are reported in **bytes** as gauges.
 - `pg_system_swap_used_bytes`
 - `pg_system_swap_free_bytes`
 
-> **FreeBSD memory caveat:** on FreeBSD (and Windows) `sysinfo` reports
-> `available == free`, which understates reclaimable memory (it excludes cache
-> that could be evicted under pressure). The raw building blocks are exported so
-> dashboards can compute a memory-used ratio as `(total - available) / total`,
-> which is accurate on Linux.
+> **FreeBSD memory note:** on FreeBSD `available` is the free pages plus the inactive
+> and cache pages and the buffer space. Releases up to 0.22.3 reported
+> `available == free` there, which understated reclaimable memory, so the series rises
+> on FreeBSD with the upgrade. The raw building blocks are exported so dashboards can
+> compute a memory-used ratio as `(total - available) / total` on both platforms.
 
 ### `PostgreSQL` process group
 

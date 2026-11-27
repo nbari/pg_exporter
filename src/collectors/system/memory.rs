@@ -14,9 +14,9 @@
 //!
 //! On Linux, `available` is the kernel's `MemAvailable` (an estimate of memory
 //! obtainable without swapping, so it counts reclaimable page cache). On FreeBSD
-//! (and Windows) `sysinfo` reports `available == free`, which understates truly
-//! reclaimable memory; there, prefer `used`/`free` and treat the `available`
-//! series as a conservative floor.
+//! `sysinfo` (0.40 and later) adds the inactive and cache pages and the buffer space to
+//! the free pages; before 0.40 it reported `available == free`, which understated what
+//! could be reclaimed.
 
 use crate::collectors::{Collected, Collector, blocking, host_system::LazySystem};
 use anyhow::Result;
@@ -83,7 +83,7 @@ impl MemoryCollector {
         let available = IntGauge::with_opts(Opts::new(
             "pg_system_memory_available_bytes",
             "Memory available for new allocations without swapping in bytes \
-             (equals free memory on FreeBSD/Windows)",
+             (free plus reclaimable memory)",
         ))
         .expect("pg_system_memory_available_bytes");
 

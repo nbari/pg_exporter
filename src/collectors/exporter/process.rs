@@ -186,8 +186,9 @@ impl ProcessCollector {
             return;
         }
 
-        // Refresh only the exporter process. This avoids caching many `/proc/*/stat`
-        // file descriptors for unrelated PIDs on Linux.
+        // Refresh only the exporter process, so no state is kept for unrelated PIDs.
+        // `sysinfo` 0.40 holds no `/proc/<pid>/stat` descriptor open between refreshes;
+        // earlier versions could keep one per indexed process on Linux.
         system.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[self.pid]),
             true,

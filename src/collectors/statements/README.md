@@ -260,15 +260,25 @@ can be exposed the same way when the secret falls within the first 80 characters
 
 This needs a secret-bearing statement to rank in the top-N by total execution time, which
 is unlikely on a busy server and realistic on a quiet one or shortly after a statistics
-reset. To rule it out, use any of:
+reset.
 
-- `--statements.query-text-refresh=0`: the exporter never reads query texts;
-  `query_short` stays `<unknown>` and statements are identified by `queryid`.
-- `pg_stat_statements.track_utility = off` on the server: utility statements are not
-  recorded at all, so their statistics are lost too.
-- Set passwords with psql's `\password`, which sends an already hashed verifier.
+The one control that rules it out is `--statements.query-text-refresh=0`: the exporter
+never reads query texts, `query_short` stays `<unknown>` and statements are identified by
+`queryid`.
 
-In all cases restrict who can reach `/metrics` and the Prometheus server.
+Two server-side measures reduce it, each within limits:
+
+- `pg_stat_statements.track_utility = off` stops utility statements from being recorded
+  from then on, and loses their statistics. It does not remove entries recorded before
+  the change; they stay until `pg_stat_statements_reset()` or eviction, and the exporter
+  can still read their text.
+- psql's `\password` sends an already hashed verifier, so that one command carries no
+  clear-text password. It does nothing for the other statements above, or for a password
+  set any other way.
+
+None of these reaches into the past: a label that was already scraped stays in
+Prometheus for its retention period. In all cases restrict who can reach `/metrics` and
+the Prometheus server.
 
 ### Statement Selection and Cardinality
 

@@ -34,7 +34,11 @@ Labels: `application_name`, `client_addr`, `state`
 
 Labels: `slot_name`, `slot_type`, `database`
 
-- `pg_replication_slots_pg_wal_lsn_diff` - Replication slot lag in bytes
+- `pg_replication_slots_pg_wal_lsn_diff` - WAL in bytes between the slot's `restart_lsn`
+  and the server's current position. On a primary that position is
+  `pg_current_wal_lsn()`. On a standby it is `pg_last_wal_receive_lsn()`, the last WAL
+  received **by streaming**: a standby fed only from the WAL archive has no streaming
+  position, and its slots report 0 here whatever they retain.
 - `pg_replication_slots_active` - Whether slot is active (1) or inactive (0)
 
 ### pg_stat_replication_slots (PostgreSQL 14+)

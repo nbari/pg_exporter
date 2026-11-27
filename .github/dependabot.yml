@@ -1,8 +1,14 @@
 version: 2
-# Dependabot proposes updates as pull requests into sandbox, where work lands; from there
-# they reach develop and a release like any other change. main only ever holds released
-# commits, so no update targets it. Action updates arrive as one weekly pull request:
-# the workflows pin every action to a commit, and this is what moves those pins.
+# Dependabot proposes version updates as pull requests into sandbox, where work lands;
+# from there they reach develop and a release like any other change. main only ever
+# holds released commits, so no version update targets it. Action updates arrive as one
+# weekly pull request: the workflows pin every action to a commit, and this is what
+# moves those pins.
+#
+# `target-branch` does not apply to Dependabot *security* updates: GitHub always opens
+# those against the default branch, main. Such a pull request cannot be merged there
+# (main only fast-forwards to a released commit), so apply the fix on sandbox and close
+# it; see RELEASING.md.
 updates:
   - package-ecosystem: "cargo"
     directory: "/"
