@@ -194,7 +194,7 @@ require_local_target() {
         return
     fi
     log_error "Refusing to set up a test database on another machine."
-    log_error "  target: $(pg_connection_description "$PG_DATABASE")"
+    log_error "  target: $(pg_connection_target_summary "$PG_HOST")"
     if [[ -n "${PGHOSTADDR:-}" ]]; then
         log_error "  PGHOSTADDR=${PGHOSTADDR} overrides the host name."
     fi
@@ -335,6 +335,15 @@ generate_pgbench_data() {
     if [ "$db_exists" = "" ]; then
         log_debug "Creating pgbench_test database..."
         run_psql -c "CREATE DATABASE pgbench_test;" >/dev/null
+    fi
+
+    # pgbench drops and creates its tables wherever this connection lands. Make sure
+    # that is pgbench_test before anything is initialized there.
+    local landed
+    landed=$(run_psql_db pgbench_test -t -A -c "SELECT current_database();")
+    if [[ "${landed}" != pgbench_test ]]; then
+        log_error "The connection for pgbench_test landed in '${landed}'; not initializing pgbench there."
+        exit 1
     fi
 
     # Ensure pg_stat_statements extension exists in pgbench_test

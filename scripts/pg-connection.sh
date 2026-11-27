@@ -1,12 +1,28 @@
 #!/usr/bin/env bash
 
-# Prints where libpq would really connect for the current settings, as two lines: the
-# host and the hostaddr (either may be empty). `PG_EXPORTER_DSN` wins when set, as it
-# does for every command below; otherwise the host is `$1`. `PGHOSTADDR` is the
-# fallback address in both cases, because libpq reads it whatever the host says.
+# Whether `$1` is a loopback host or address: `localhost`, a 127.0.0.0/8 literal, or ::1.
+# A name that merely starts with "127." is a DNS name, not an address.
+pg_connection_is_loopback() {
+    local value="${1,,}"
+    [[ "${value}" == localhost || "${value}" == ::1 ]] && return 0
+    [[ "${value}" =~ ^127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]
+}
+
+# Prints where libpq would connect for the current settings, as two lines: the host and
+# the hostaddr (either may be empty), or fails when the settings are in a form this
+# cannot read with certainty. `PG_EXPORTER_DSN` wins when set, as it does for every
+# command below; otherwise the host is `$1`. `PGHOSTADDR` is the fallback address in both
+# cases, because libpq reads it whatever the host says.
+#
+# This is deliberately narrower than libpq. It refuses, instead of guessing at, a service
+# file entry (`service=`, PGSERVICE), a list of hosts, quoting or backslashes in a
+# keyword string, and any percent-encoding other than %2F (the slash of a socket path):
+# each of those can name a host this function would not see.
 pg_connection_effective_target() {
     local host="$1" hostaddr="${PGHOSTADDR:-}"
     local dsn="${PG_EXPORTER_DSN:-}"
+
+    [[ -z "${PGSERVICE:-}" && -z "${PGSERVICEFILE:-}" ]] || return 1
 
     if [[ -n "${dsn}" ]]; then
         dsn="${dsn%%#*}"
@@ -26,20 +42,30 @@ pg_connection_effective_target() {
             for pair in "${pairs[@]}"; do
                 key="${pair%%=*}"
                 value="${pair#*=}"
-                value="${value//%2F//}"
-                value="${value//%2f//}"
+                # An encoded key could spell `host` without looking like it.
+                [[ "${key}" != *%* ]] || return 1
+                case "${key,,}" in
+                    host | hostaddr | service) [[ "${key}" == "${key,,}" ]] || return 1 ;;
+                esac
                 case "${key}" in
                     host) host="${value}" ;;
                     hostaddr) hostaddr="${value}" ;;
+                    service) return 1 ;;
                 esac
             done
         else
-            local token
+            local token keyword
+            [[ "${dsn}" != *[\'\\]* ]] || return 1
             host=""
             for token in ${dsn}; do
+                keyword="${token%%=*}"
+                case "${keyword,,}" in
+                    host | hostaddr | service) [[ "${keyword}" == "${keyword,,}" ]] || return 1 ;;
+                esac
                 case "${token}" in
                     host=*) host="${token#host=}" ;;
                     hostaddr=*) hostaddr="${token#hostaddr=}" ;;
+                    service=*) return 1 ;;
                 esac
             done
         fi
@@ -47,31 +73,56 @@ pg_connection_effective_target() {
         [[ -n "${host}" ]] || host="${PGHOST:-/}"
     fi
 
+    host="${host//%2F//}"
+    host="${host//%2f//}"
+    [[ "${host}" != *%* && "${hostaddr}" != *%* ]] || return 1
+    [[ "${host}" != *,* && "${hostaddr}" != *,* ]] || return 1
+
     printf '%s\n%s\n' "${host}" "${hostaddr}"
 }
 
 # Succeeds when the settings connect to this machine: a socket, a loopback address, or
-# a loopback host name with no address overriding it. With
-# PG_EXPORTER_TEST_ALLOW_NONLOCAL=1 the devcontainer's compose service, host `postgres`
-# with no address override, is admitted too. `$1` is the host used without a DSN.
+# a loopback host with no address overriding it. With PG_EXPORTER_TEST_ALLOW_NONLOCAL=1
+# the devcontainer's compose service, host `postgres` with no address override, is
+# admitted too. Settings that cannot be read with certainty are not local. `$1` is the
+# host used without a DSN.
 pg_connection_is_local() {
-    local host hostaddr
+    local target host hostaddr
+    target="$(pg_connection_effective_target "$1")" || return 1
     {
         IFS= read -r host
         IFS= read -r hostaddr
-    } < <(pg_connection_effective_target "$1")
+    } <<<"${target}"
 
     if [[ -n "${hostaddr}" ]]; then
-        [[ "${hostaddr}" == 127.* || "${hostaddr}" == ::1 ]]
+        pg_connection_is_loopback "${hostaddr}" && [[ "${hostaddr,,}" != localhost ]]
         return
     fi
-    case "${host}" in
-        /* | localhost | LOCALHOST | 127.* | ::1) return 0 ;;
-    esac
+    [[ "${host}" == /* ]] && return 0
+    pg_connection_is_loopback "${host}" && return 0
     case "${PG_EXPORTER_TEST_ALLOW_NONLOCAL:-}" in
         1 | true | TRUE) [[ "${host}" == postgres ]] && return 0 ;;
     esac
     return 1
+}
+
+# Prints the host and, when there is one, the address a refusal should name. Never the
+# DSN: it can carry a password in its user info, its query string or a keyword.
+pg_connection_target_summary() {
+    local target host hostaddr
+    if ! target="$(pg_connection_effective_target "$1")"; then
+        printf 'settings this script cannot read with certainty (a service, several hosts, quoting or percent-encoding)\n'
+        return
+    fi
+    {
+        IFS= read -r host
+        IFS= read -r hostaddr
+    } <<<"${target}"
+    if [[ -n "${hostaddr}" ]]; then
+        printf 'host %s, address %s\n' "${host:-<none>}" "${hostaddr}"
+    else
+        printf 'host %s\n' "${host:-<none>}"
+    fi
 }
 
 pg_connection_target_for_db() {
@@ -93,6 +144,19 @@ pg_connection_target_for_db() {
         fi
 
         if [[ "${dsn}" == *://* ]]; then
+            # libpq lets a `dbname` query parameter override the path, so one left in
+            # place would keep the "derived" target in the original database.
+            if [[ -n "${query}" ]]; then
+                local kept="" pair
+                local -a pairs=()
+                IFS='&' read -ra pairs <<<"${query#\?}"
+                for pair in "${pairs[@]}"; do
+                    [[ "${pair%%=*}" == dbname || -z "${pair}" ]] && continue
+                    kept+="${kept:+&}${pair}"
+                done
+                query="${kept:+?${kept}}"
+            fi
+
             local scheme="${dsn%%://*}"
             local rest="${dsn#*://}"
 
@@ -184,7 +248,8 @@ pg_connection_description() {
             fi
         fi
 
-        printf '%s\n' "${target}"
+        # A password can also sit in the query string or in a keyword.
+        printf '%s\n' "${target}" | sed -E 's/(password=)[^&[:space:]]*/\1****/g'
     else
         printf '%s@%s:%s/%s\n' \
             "${PG_USER:-postgres}" \
