@@ -26,32 +26,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (the table reloption or the server setting). It was ignored, which under-reported how
   due a table is once the cap is lower than `threshold + scale_factor * n_live_tup`.
 
+### Security
+
+- A release no longer pushes the container image before every build has succeeded.
+  The image job waited for the binaries only, so `sha-<commit>` could be public while
+  the crate build was still running, and it was pushed before it had been run. It now
+  waits for the crate too and runs the image before pushing it.
+- The release guard and `just release` take `CI OK` from the Test & Build workflow's own
+  runs. They used to accept the latest check named `CI OK` on the commit, whoever
+  published it.
+- `just release` tells the workflow which commit it means, and the guard refuses any
+  other. `develop` moving between the two could otherwise release a commit the operator
+  had not looked at.
+- The publish job compares the checksum crates.io reports with the `.crate` in the
+  GitHub release, on a fresh upload and on a retry, and treats any registry answer other
+  than "found" or "not found" as an error instead of as "not published yet".
+- The test suite checks where its database connection really goes. The old guard
+  looked for `localhost` anywhere in the DSN and did not see `PGHOSTADDR`, so the suite,
+  which drops databases and terminates backends, could be pointed at another server
+  while the DSN looked local.
+
 ### Changed
 
 - Update `sysinfo` to 0.40.4, which the `system` collector and the exporter's own
-  process metrics are built on. That release fixes cgroup memory retrieval on Linux and
-  free and available memory on FreeBSD. It also makes creating its system handle and
-  reading the load average fallible, so the collectors now create the handle on first
-  use and handle both failures instead of assuming success:
+  process metrics are built on. It makes creating its system handle and reading the load
+  average fallible, so the collectors now create the handle on first use and handle
+  both failures instead of assuming success:
   - When the load average cannot be read, `pg_system_load1`, `pg_system_load5` and
-    `pg_system_load15` keep their last values and a warning is logged, instead of
-    reporting 0.
+    `pg_system_load15` keep their last values (0 if it never could be read) and a
+    warning is logged. A platform without load averages is skipped silently.
   - On a platform `sysinfo` does not support, the affected metrics are not updated and
-    one warning says so.
+    each affected collector logs one warning.
 
-  Metric names, labels and values on Linux are unchanged.
+  Metric names and labels are unchanged, and so are the values on Linux, with one
+  possible exception: `sysinfo` 0.40 keeps no `/proc/<pid>/stat` descriptor open for
+  the exporter's own process, so `pg_exporter_process_open_fds` may read one lower.
+  **On FreeBSD
+  `pg_system_memory_available_bytes` rises**: it now includes inactive and cache pages
+  and buffer space, where it used to equal free memory.
+- Drop the unused `ipnetwork` and `uuid` features of SQLx. Nothing decoded those types,
+  and the features kept SQLx's MySQL and SQLite drivers in the lockfile.
 - Update `built` to 0.9.0. It only runs at build time and still records the commit
   hash that `--version` and `/health` report.
 - Remove the `nix` development dependency; nothing used it.
 
 ### Tests
 
+- CI now exports the two-platform image as an OCI archive, checks that its index holds
+  both platforms with an attestation for each, and runs the amd64 image out of that
+  archive. It used to leave the two-platform build in the build cache and run a second,
+  separate build.
+- The vacuum-progress test always cancels its throttled `VACUUM` and drops its database,
+  also when a scrape fails; the issue 35 test checks each `system` sub-collector on its
+  own; the standby reply-time test identifies the reply by its timestamp; and the
+  `LazySystem` tests pass on a host without a `sysinfo` backend.
 - Make the issue 35 regression test deterministic. It checked that another task ran
   while the `system` collector was collecting, which is a race: on a busy host the
   offloaded reads can finish before the collector is first suspended, and a correct
   collector then never yields. Under full CPU load it failed about 1 run in 30, and now
   that `CI OK` gates a release, that blocks releases. The test now holds the runtime's
   only blocking thread, so an offloading collector must yield and an inline one cannot.
+
+### Documentation
+
+- Replication: `pg_replication_slots_pg_wal_lsn_diff` on a standby is measured against
+  the last WAL received by streaming, so an archive-fed standby reports 0.
+- Statements: of the measures against secrets in `query_short`, only
+  `--statements.query-text-refresh=0` rules exposure out; the two server-side ones are
+  prospective and partial, and nothing removes a label Prometheus already stored.
+- Releasing: Dependabot security updates target `main` whatever the configuration says,
+  and have to be applied on `sandbox`.
 
 ## [0.22.3] - 2026-11-25
 

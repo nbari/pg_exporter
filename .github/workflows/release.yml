@@ -10,6 +10,13 @@ name: Release
 # is released before every build job has succeeded. See RELEASING.md.
 on:
   workflow_dispatch:
+    inputs:
+      sha:
+        description: >-
+          The commit the operator means to release. `just release` passes develop's tip
+          as it saw it; the guard refuses to release anything else. Empty skips the check.
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -32,7 +39,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      checks: read
+      actions: read
     outputs:
       version: ${{ steps.check.outputs.version }}
       package: ${{ steps.check.outputs.package }}
@@ -72,10 +79,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           INFO_NAME: ${{ steps.info.outputs.name }}
           INFO_VERSION: ${{ steps.info.outputs.version }}
+          EXPECTED_SHA: ${{ inputs.sha }}
         run: |
           set -euo pipefail
           if [[ "${GITHUB_REF}" != refs/heads/develop ]]; then
             echo "::error::Run the release on develop (got ${GITHUB_REF})."
+            exit 1
+          fi
+          # `develop` can move between the operator looking at it and this run starting.
+          if [[ -n "${EXPECTED_SHA}" && "${EXPECTED_SHA}" != "${GITHUB_SHA}" ]]; then
+            echo "::error::develop is at ${GITHUB_SHA}, but ${EXPECTED_SHA} was asked for; nothing was released."
             exit 1
           fi
           version="${INFO_VERSION}"
@@ -99,14 +112,11 @@ jobs:
           fi
           # `CI OK` is Test & Build's aggregate of every gating job; it must have
           # succeeded on exactly this commit (a non-gating job, such as coverage, failing
-          # does not block the release). The commit is tested on the work branch and again
-          # on develop, so there can be several: the most recently completed one decides,
-          # as it does for the protected `main`, and an earlier success never outvotes a
-          # later failure. A run still in progress is not waited for.
-          ci_ok="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs?check_name=CI%20OK&status=completed&per_page=100" \
-            --jq '[.check_runs[]] | sort_by(.completed_at) | last | .conclusion // "missing"')"
+          # does not block the release). The script asks the Test & Build workflow itself
+          # and goes by its most recently completed run; see scripts/ci-ok-status.
+          ci_ok="$(scripts/ci-ok-status "${GITHUB_REPOSITORY}" "${GITHUB_SHA}")"
           if [[ "${ci_ok}" != success ]]; then
-            echo "::error::The latest completed CI OK check on ${GITHUB_SHA} is '${ci_ok}'; wait for Test & Build to pass, or re-run its failed jobs."
+            echo "::error::CI OK is '${ci_ok}' in the latest completed Test & Build run of ${GITHUB_SHA}; wait for it to pass, or re-run its failed jobs."
             exit 1
           fi
           {
@@ -194,7 +204,9 @@ jobs:
   # The image is made from the two binaries built above (the `prebuilt` stage of the
   # Containerfile only copies one in), so it holds exactly what is in the archives and
   # nothing is compiled under emulation. It is pushed under one tag, sha-<commit>; the
-  # version tags are added to this digest only after the release exists.
+  # version tags are added to this digest only after the release exists. That push is
+  # the first thing anyone outside can see, so it waits for every build, the crate
+  # included, and the image is run before it is pushed.
   image:
     name: Container image
     runs-on: ubuntu-latest
@@ -202,6 +214,7 @@ jobs:
     needs:
       - guard
       - build
+      - crate
     permissions:
       contents: read
       packages: write
@@ -265,6 +278,32 @@ jobs:
             org.opencontainers.image.version=${{ needs.guard.outputs.version }}
           annotations: |
             org.opencontainers.image.version=${{ needs.guard.outputs.version }}
+
+      # Nothing leaves the runner unless the image runs and reports this version. The
+      # layers are reused by the push below.
+      - name: Build the amd64 image locally
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: image-context
+          file: ./Containerfile
+          target: prebuilt
+          platforms: linux/amd64
+          load: true
+          tags: ${{ needs.guard.outputs.package }}:candidate
+          build-args: |
+            SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
+          provenance: false
+
+      - name: Smoke test before pushing
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$(docker run --rm "${PACKAGE}:candidate" --version)"
+          echo "${out}"
+          if [[ "${out}" != *"${VERSION}"* ]]; then
+            echo "::error::The image does not report version ${VERSION}; nothing was pushed."
+            exit 1
+          fi
 
       - name: Build and push the image
         id: build
@@ -525,14 +564,26 @@ jobs:
         with:
           toolchain: ${{ needs.guard.outputs.rust }}
 
+      # Only a 404 means "not published yet". Anything else that is not a 200 is the
+      # registry failing, and publishing on a guess could not be undone.
       - name: Is it already on crates.io
         id: exists
         shell: bash
         run: |
-          if curl -sf -A "${PACKAGE}-release" "https://crates.io/api/v1/crates/${PACKAGE}/${VERSION}" >/dev/null; then
-            echo "${PACKAGE} ${VERSION} is already on crates.io."
-            echo "published=true" >> "$GITHUB_OUTPUT"
-          fi
+          set -euo pipefail
+          status="$(curl -s -o /dev/null -w '%{http_code}' -A "${PACKAGE}-release" \
+            "https://crates.io/api/v1/crates/${PACKAGE}/${VERSION}")"
+          case "${status}" in
+            200)
+              echo "${PACKAGE} ${VERSION} is already on crates.io."
+              echo "published=true" >> "$GITHUB_OUTPUT"
+              ;;
+            404) echo "${PACKAGE} ${VERSION} is not on crates.io yet." ;;
+            *)
+              echo "::error::crates.io answered HTTP ${status} for ${PACKAGE} ${VERSION}; re-run this job when it is reachable."
+              exit 1
+              ;;
+          esac
 
       # Short-lived token from crates.io Trusted Publishing; no registry secret is stored.
       - name: Get a crates.io token
@@ -545,6 +596,36 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: cargo publish --locked --no-verify
+
+      - name: Download the crate this run released
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: dist-crate
+          path: ${{ runner.temp }}/crate
+
+      # The .crate in the GitHub release and the one crates.io serves must be the same
+      # bytes, whether this run uploaded it just now or an earlier attempt did.
+      - name: Check crates.io holds the released crate
+        shell: bash
+        run: |
+          set -euo pipefail
+          built="$(sha256sum "${RUNNER_TEMP}/crate/${PACKAGE}-${VERSION}.crate" | cut -d' ' -f1)"
+          published=""
+          for _ in $(seq 30); do
+            published="$(curl -sf -A "${PACKAGE}-release" \
+              "https://crates.io/api/v1/crates/${PACKAGE}/${VERSION}" | jq -r '.version.checksum // empty' || true)"
+            [[ -z "${published}" ]] || break
+            sleep 10
+          done
+          if [[ -z "${published}" ]]; then
+            echo "::error::crates.io did not report a checksum for ${PACKAGE} ${VERSION}."
+            exit 1
+          fi
+          if [[ "${published}" != "${built}" ]]; then
+            echo "::error::crates.io holds ${published}, but this release built ${built}."
+            exit 1
+          fi
+          echo "crates.io holds the released crate (${built})."
 
   # The version tags are added to the digest the image job pushed and tested; nothing is
   # rebuilt. The floating tags (`X.Y`, `X`, `latest`) only move when this release is the

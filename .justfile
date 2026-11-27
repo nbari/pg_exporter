@@ -244,7 +244,9 @@ release:
     git fetch --quiet origin develop
     sha="$(git rev-parse origin/develop)"
     last="$(gh run list --workflow release.yml --branch develop --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId // 0')"
-    gh workflow run release.yml --ref develop
+    # The run is told which commit is meant: if develop moved in the meantime, its guard
+    # refuses instead of releasing something else.
+    gh workflow run release.yml --ref develop -f sha="${sha}"
     # The dispatched run is the first new one for this commit; never just "the latest".
     run=""
     for _ in $(seq 30); do
@@ -267,7 +269,7 @@ release:
     # so wait for it to finish and then ask for the check itself, the one `main` requires.
     gh run watch "${ci}" > /dev/null || true
     [[ "$(gh run view "${ci}" --json status --jq .status)" == completed ]] || { echo "Test & Build (run ${ci}) has not finished; when CI OK passed: git push origin ${sha}:refs/heads/main" >&2; exit 1; }
-    ci_ok="$(gh api "repos/{owner}/{repo}/commits/${sha}/check-runs?check_name=CI%20OK&status=completed&per_page=100" --jq '[.check_runs[]] | sort_by(.completed_at) | last | .conclusion // "missing"')"
+    ci_ok="$(scripts/ci-ok-status "$(gh repo view --json nameWithOwner --jq .nameWithOwner)" "${sha}")"
     [[ "${ci_ok}" == success ]] || { echo "CI OK is '${ci_ok}' on ${sha}; re-run the failed jobs of Test & Build, then: git push origin ${sha}:refs/heads/main" >&2; exit 1; }
     git push origin "${sha}:refs/heads/main"
 

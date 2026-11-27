@@ -22,10 +22,11 @@ the whole release is one workflow, [`release.yml`](.github/workflows/release.yml
 ## Release contract
 
 1. **Exact commit.** The release builds the commit `develop` points at, and the guard
-   refuses it unless the latest completed `CI OK` check on that exact SHA succeeded.
-   `CI OK` covers formatting, Clippy, the test suite on every supported PostgreSQL major,
-   both feature builds, both architectures, the Linux packages, the container image and
-   the crate.
+   refuses it unless `CI OK` succeeded in the latest completed Test & Build run of that
+   exact SHA. `CI OK` covers formatting, Clippy, the test suite on every supported
+   PostgreSQL major, both feature builds, both architectures, the Linux packages, the
+   container image and the crate. `just release` tells the run which commit it means, so
+   a `develop` that moved in the meantime is refused, not released.
 2. **Tag last.** The `X.Y.Z` tag is created by publishing the GitHub release, after every
    build succeeded. There is never a tag to delete or move.
 3. **Versions only go up.** The version must be untagged and above the latest release.
@@ -71,6 +72,10 @@ The workflow never pushes `main` itself: a protected `main` refuses every update
 operator's machine. It asks for `CI OK` itself, not for the whole run: coverage is
 reported, not a gate, so a failed coverage job does not keep `main` back.
 
+The guard and the recipe both get that answer from
+[`scripts/ci-ok-status`](scripts/ci-ok-status), which reads the `CI OK` job of the Test & Build workflow's own runs. A check that only
+carries the name, published by another workflow or integration, does not count.
+
 ## What a release publishes
 
 For version `X.Y.Z`:
@@ -96,13 +101,16 @@ back to the commit subjects since the previous release.
 Fix the cause and use **Re-run failed jobs** on the run. Every step is safe to repeat:
 finished jobs are not run again, the Rust version stays the one the guard resolved, a
 draft release left by a failed run is replaced, an already published release is kept (and
-re-checked), a version crates.io already has is skipped, and tagging the image again
-points the tags at the same digest. (Re-running the whole run, or the guard alone,
-resolves Rust again and fails on a version that is already tagged.)
+re-checked), a version crates.io already has is not uploaded again but its checksum is
+still compared with the crate this run released, and tagging the image again points the
+tags at the same digest. (Re-running the whole run, or the guard alone, resolves Rust
+again and fails on a version that is already tagged.)
 
 - **Before the tag exists** nothing is released. Re-run, or fix the code on `sandbox`,
-  advance `develop` and run `just release` again. An image tagged `sha-<commit>` may be
-  left in the registry; no version tag points at it.
+  advance `develop` and run `just release` again. The image is pushed as `sha-<commit>`
+  only after both binaries and the crate were built and the image itself was run, so
+  what can be left in the registry by a later failure is a tested image that no version
+  tag points at.
 - **After the tag exists** the release is public, and the crates.io and image-tagging
   jobs can still fail. Transient failures are fixed by re-running. A failure that needs a
   code change is released as the next version; never move the tag.
@@ -110,47 +118,64 @@ resolves Rust again and fails on a version that is already tagged.)
   Test & Build is done: `git push origin <released-sha>:refs/heads/main`.
 - **The guard refuses** when the version is already tagged (you forgot to bump) or below
   the latest release, when `develop` does not contain `main`, when the run is not on
-  `develop`, or when the latest completed `CI OK` on the commit did not succeed. The
+  `develop`, when `develop` is no longer at the commit `just release` asked for, or when
+  `CI OK` did not succeed in the latest completed Test & Build run of the commit. The
   message says which.
+- **`just release` says "The dispatched release run did not appear".** Look at the
+  Actions page before doing anything else: the run may exist under another commit if
+  `develop` moved, and its guard will have refused it.
 - **CI is flaky.** Re-run the failed jobs in Test & Build until `CI OK` is green on the
   commit. The commit is tested on `sandbox` and again on `develop`; the most recently
   completed `CI OK` decides, for the guard and for the protected `main` alike.
 - **crates.io refuses the upload.** Trusted Publishing is probably not configured for
   `release.yml` (see [Settings](#settings)); fix it and re-run the failed job.
+- **crates.io holds another checksum.** The publish job found the version on crates.io
+  with bytes that differ from the `.crate` in the GitHub release. A crate version cannot
+  be replaced: yank it and release the next version.
 
 ## How the workflow is built
 
 ```
 Release workflow (workflow_dispatch on develop)
- guard          develop only; the version is X.Y.Z, above the latest tag and untagged;
-                main is an ancestor; the `CI OK` check succeeded on this exact commit;
+ guard          develop only, and at the commit `just release` asked for; the version is
+                X.Y.Z, above the latest tag and untagged; main is an ancestor; `CI OK`
+                succeeded in the latest completed Test & Build run of this exact commit;
                 Rust `stable` is resolved to an exact version, used by every Rust job
  build          x86_64 and aarch64, each on a native runner: the binary (run once,
                 --version must report the crate's version), the .deb (checked for its
                 version, binary and architecture), the .rpm (checked by its file name)
                 and the archive
  crate          cargo package and a publish dry run; the .crate is a release file
- image          a multi-platform image made from the two binaries (the `prebuilt` stage of
-                the Containerfile), pushed as sha-<commit>, run once, attested
+ image          after build and crate: a multi-platform image made from the two binaries
+                (the `prebuilt` stage of the Containerfile), run before it is pushed as
+                sha-<commit>, run again from the registry, attested
  release        the exact file set is checked, SHA256SUMS, a build-provenance attestation,
                 a draft GitHub release, then publish (this creates the tag at the tested
                 commit; it is marked Latest only when it is the highest version), then a
                 check that the tag is right and the published files, downloaded again,
                 equal the built ones
- publish        crates.io (Trusted Publishing, no stored token)
+ publish        crates.io (Trusted Publishing, no stored token), then a check that the
+                checksum crates.io reports is that of the released .crate
  image-publish  the version tags are added to the image's digest; `X.Y`, `X` and `latest`
                 only when this is the highest release of that line
 ```
 
 Test & Build runs the same local actions on every push, on the same two runners: both
 binaries are built and run, the packages and archives are made, the two-platform
-`prebuilt` image is built (not pushed) and run, and the crate goes through `cargo package`
-and a publish dry run. A break in any of them fails `CI OK` on the commit, before a
-release can start. What only a release does is publish: push the image, attest, create
-the GitHub release, upload to crates.io and move the image tags.
+`prebuilt` image is built and exported (not pushed), its index is checked and its amd64
+image run, and the crate goes through `cargo package` and a publish dry run. A break in
+any of them fails `CI OK` on the commit, before a release can start. What only a release
+does is publish: push the image, attest, create the GitHub release, upload to crates.io
+and move the image tags.
 
 Every action in the workflows is pinned to a commit. [Dependabot](.github/dependabot.yml)
-proposes the updates as pull requests into `sandbox`.
+proposes version updates as pull requests into `sandbox`. Only the tests run on those
+pull requests; the full Test & Build, with `CI OK`, runs once the change is on `sandbox`.
+
+Dependabot **security** updates are different: GitHub opens them against the default
+branch, `main`, whatever the configuration says. `main` only ever fast-forwards to a
+released commit, so such a pull request cannot be merged. Apply the same update on
+`sandbox`, release it the normal way, and close the pull request.
 
 ## Settings
 
