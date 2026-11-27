@@ -54,43 +54,70 @@ async fn test_create_index_progress_collect_succeeds_on_idle_database() -> Resul
     Ok(())
 }
 
+/// An idle `pg_stat_progress_create_index` must produce no series.
+///
+/// The view is cluster-wide and other tests build indexes concurrently, so an index
+/// build can start and finish between two checks of the view and still be seen by the
+/// scrape between them. An attempt counts only when the view is empty before and after
+/// it; a collector that publishes series for an idle view fails every attempt, while a
+/// concurrent build only spoils one.
 #[tokio::test]
 async fn test_create_index_progress_no_progress_leaves_no_series() -> Result<()> {
+    const ATTEMPTS: usize = 20;
     let pool = common::create_test_pool().await?;
     if server_version_num(&pool).await? < 120_000 {
         pool.close().await;
         return Ok(());
     }
 
-    let before_count: i64 =
-        sqlx::query_scalar("SELECT count(*)::bigint FROM pg_stat_progress_create_index")
-            .fetch_one(&pool)
-            .await?;
+    let mut idle_attempts = 0;
+    let mut series_while_idle = Vec::new();
+    for _ in 0..ATTEMPTS {
+        let before_count = create_index_progress_rows(&pool).await?;
 
-    let collector = CreateIndexProgressCollector::new();
-    let registry = Registry::new();
-    collector.register_metrics(&registry)?;
-    collector.collect(&pool).await?;
+        let collector = CreateIndexProgressCollector::new();
+        let registry = Registry::new();
+        collector.register_metrics(&registry)?;
+        collector.collect(&pool).await?;
 
-    let after_count: i64 =
-        sqlx::query_scalar("SELECT count(*)::bigint FROM pg_stat_progress_create_index")
-            .fetch_one(&pool)
-            .await?;
-
-    if before_count == 0 && after_count == 0 {
-        let families = registry.gather();
-        for metric_name in CREATE_INDEX_PROGRESS_METRICS {
-            let sample_count =
-                metric_family(&families, metric_name).map_or(0, |family| family.get_metric().len());
-            assert_eq!(
-                sample_count, 0,
-                "idle pg_stat_progress_create_index should not leave stale {metric_name} series"
-            );
+        if before_count != 0 || create_index_progress_rows(&pool).await? != 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            continue;
         }
+        idle_attempts += 1;
+        let families = registry.gather();
+        let published: Vec<(&str, usize)> = CREATE_INDEX_PROGRESS_METRICS
+            .iter()
+            .map(|name| {
+                (
+                    *name,
+                    metric_family(&families, name).map_or(0, |family| family.get_metric().len()),
+                )
+            })
+            .filter(|(_, samples)| *samples > 0)
+            .collect();
+        if published.is_empty() {
+            pool.close().await;
+            return Ok(());
+        }
+        series_while_idle.push(format!("{published:?}"));
     }
-
     pool.close().await;
+
+    assert!(
+        idle_attempts == 0,
+        "idle pg_stat_progress_create_index left series in all {idle_attempts} idle attempts: {series_while_idle:?}"
+    );
+    println!("the view was never idle in {ATTEMPTS} attempts, nothing to check");
     Ok(())
+}
+
+async fn create_index_progress_rows(pool: &sqlx::PgPool) -> Result<i64> {
+    Ok(
+        sqlx::query_scalar("SELECT count(*)::bigint FROM pg_stat_progress_create_index")
+            .fetch_one(pool)
+            .await?,
+    )
 }
 
 #[tokio::test]
