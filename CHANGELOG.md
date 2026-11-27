@@ -29,8 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `database` collector failed whenever a scrape overlapped a `DROP DATABASE`.
   `pg_database_size` raises an error for a database that was dropped after the statement
   had listed it, and that error failed the collector for the scrape. When that happens
-  the databases are now read one by one, so only the one that vanished is left out. The
-  normal case is still a single statement.
+  the databases are now read one by one, so only the one that vanished is left out. Where
+  PostgreSQL answers NULL for it instead (14, and a superuser up to 17), the catalog is
+  asked whether it still exists. The normal case is still a single statement.
 - The same collector asked for each size by database *name*, which PostgreSQL looks up
   a second time. A database dropped and created again under its name in between was
   reported with the old connection limit and the new size. Sizes are now asked for by

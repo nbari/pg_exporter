@@ -62,6 +62,7 @@ impl DatabaseSubCollector {
 /// One row of the catalog snapshot.
 #[derive(Debug)]
 struct DatabaseRow {
+    oid: Oid,
     name: String,
     connection_limit: i32,
     /// `None` when `PostgreSQL` reported no size for the database.
@@ -89,10 +90,10 @@ fn query_span(statement: &'static str) -> tracing::Span {
 
 /// Whether a size could not be read because the database no longer exists.
 ///
-/// Asked by OID, `PostgreSQL` answers a missing database with `undefined_object` on
-/// current versions and with `invalid_catalog_name` on older ones. The first code is
-/// shared with other missing objects, so the caller confirms that the database is gone
-/// before it acts on it.
+/// Asked by OID, `PostgreSQL` answers a missing database with `undefined_object` or
+/// `invalid_catalog_name`, depending on the version and the role, or with NULL (see
+/// [`leave_out_vanished`]). `undefined_object` is shared with other missing objects, so
+/// the caller confirms that the database is gone before it acts on it.
 fn database_may_be_gone(error: &sqlx::Error) -> bool {
     is_undefined_database(error)
         || matches!(
@@ -108,7 +109,8 @@ fn database_may_be_gone(error: &sqlx::Error) -> bool {
 /// is looked up a second time, and a database dropped and created again under the same
 /// name in between would be reported with the old connection limit and the new size.
 /// The statement fails as a whole when a listed database is dropped before its size is
-/// read.
+/// read, except where `PostgreSQL` answers NULL for it; [`leave_out_vanished`] handles
+/// that case.
 async fn read_all_at_once(
     pool: &PgPool,
     excluded: &[String],
@@ -116,6 +118,7 @@ async fn read_all_at_once(
     let rows = sqlx::query(
         r"
         SELECT
+            oid,
             datname,
             datconnlimit,
             pg_database_size(oid)::bigint AS size
@@ -127,7 +130,7 @@ async fn read_all_at_once(
     .bind(excluded)
     .fetch_all(pool)
     .instrument(query_span(
-        "SELECT datname, datconnlimit, pg_database_size(oid) FROM pg_database WHERE NOT (datname = ANY($1))",
+        "SELECT oid, datname, datconnlimit, pg_database_size(oid) FROM pg_database WHERE NOT (datname = ANY($1))",
     ))
     .await?;
 
@@ -140,6 +143,7 @@ async fn read_all_at_once(
             continue;
         };
         databases.push(DatabaseRow {
+            oid: row.try_get::<Oid, _>("oid")?,
             name,
             connection_limit: row
                 .try_get::<Option<i32>, _>("datconnlimit")?
@@ -191,6 +195,25 @@ async fn database_exists(pool: &PgPool, oid: Oid) -> Result<bool> {
     )
 }
 
+/// Leaves out the databases without a size that turn out to be gone.
+///
+/// Some servers answer NULL instead of an error when the database behind an OID was
+/// dropped after the statement listed it (`PostgreSQL` 14, and a superuser up to 17).
+/// The single statement then succeeds with that row in it, and its connection limit
+/// would be published one last time. Only rows without a size are checked, so the
+/// normal case costs nothing extra.
+async fn leave_out_vanished(pool: &PgPool, databases: Vec<DatabaseRow>) -> Result<Vec<DatabaseRow>> {
+    let mut kept = Vec::with_capacity(databases.len());
+    for database in databases {
+        if database.size_bytes.is_none() && !database_exists(pool, database.oid).await? {
+            debug!(datname = %database.name, "database was dropped during the scrape - left out");
+            continue;
+        }
+        kept.push(database);
+    }
+    Ok(kept)
+}
+
 /// The snapshot read with one statement per database, for a scrape that overlaps a
 /// `DROP DATABASE`. Each size is asked for by the OID that was listed, so it belongs to
 /// the database whose name and connection limit are reported with it. A database that
@@ -228,6 +251,7 @@ async fn read_each(pool: &PgPool, listed: &[ListedDatabase]) -> Result<Vec<Datab
             Err(error) => return Err(error.into()),
         };
         databases.push(DatabaseRow {
+            oid: database.oid,
             name: database.name.clone(),
             connection_limit: database.connection_limit,
             size_bytes,
@@ -261,9 +285,9 @@ impl Collector for DatabaseSubCollector {
             // One round trip in the normal case. `pg_database_size` raises an error for a
             // database that was dropped after the scan listed it, and that fails the
             // whole statement; then the databases are read one by one instead, so only the
-            // one that vanished is lost.
+            // one that vanished is lost. Where it answers NULL instead, the row is checked.
             let databases = match read_all_at_once(pool, &excluded).await {
-                Ok(databases) => databases,
+                Ok(databases) => leave_out_vanished(pool, databases).await?,
                 Err(error) if database_may_be_gone(&error) => {
                     debug!(
                         error = %error,
@@ -319,7 +343,10 @@ impl Collector for DatabaseSubCollector {
 
 #[cfg(test)]
 mod tests {
-    use super::{ListedDatabase, database_may_be_gone, list_databases, read_all_at_once, read_each};
+    use super::{
+        DatabaseRow, ListedDatabase, database_may_be_gone, leave_out_vanished, list_databases,
+        read_all_at_once, read_each,
+    };
     use anyhow::Result;
     use sqlx::postgres::types::Oid;
 
@@ -359,6 +386,44 @@ mod tests {
         assert!(
             matches!(reported, Some((name, 37, Some(size))) if name == current && size > 0),
             "the existing database keeps its name, limit and size: {databases:?}"
+        );
+        Ok(())
+    }
+
+    /// Where the single statement answers NULL for a database dropped under it, that
+    /// row must not be published either. A row with an OID no database has stands in for
+    /// it; a database that exists keeps its row even without a size.
+    #[tokio::test]
+    async fn the_single_read_leaves_out_a_database_without_size_that_is_gone() -> Result<()> {
+        let pool = sqlx::PgPool::connect(&crate::test_dsn::test_dsn()).await?;
+        let (current_oid, current): (Oid, String) = sqlx::query_as(
+            "SELECT oid, datname::text FROM pg_database WHERE datname = current_database()",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let rows = vec![
+            DatabaseRow {
+                oid: Oid(4_294_967_294),
+                name: "dropped_during_the_scrape".to_owned(),
+                connection_limit: -2,
+                size_bytes: None,
+            },
+            DatabaseRow {
+                oid: current_oid,
+                name: current.clone(),
+                connection_limit: 37,
+                size_bytes: None,
+            },
+        ];
+        let kept = leave_out_vanished(&pool, rows).await;
+        pool.close().await;
+        let kept = kept?;
+
+        let names: Vec<&str> = kept.iter().map(|row| row.name.as_str()).collect();
+        assert_eq!(names, [current.as_str()]);
+        assert!(
+            kept.iter().all(|row| row.size_bytes.is_none()),
+            "an unknown size stays unknown"
         );
         Ok(())
     }
