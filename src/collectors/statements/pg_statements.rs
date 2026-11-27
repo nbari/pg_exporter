@@ -139,10 +139,9 @@ impl Drop for TextLookupInFlightGuard {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ExtensionState {
     Unknown,
-    /// `version` is the extension version the cached column probes were made against, as
-    /// the scrape query last reported it; see
-    /// [`PgStatementsCollector::extension_version_changed`]. `None` until a scrape
-    /// returned a row.
+    /// `version` is the extension version the cached column probes were made against,
+    /// recorded by the probe itself; see
+    /// [`PgStatementsCollector::rows_match_probed_version`]. `None` until a probe ran.
     Installed {
         version: Option<String>,
     },
@@ -682,25 +681,31 @@ impl PgStatementsCollector {
             _ => {}
         }
 
-        let supported: Option<bool> = sqlx::query_scalar(
+        // The extension version is read in the same statement, so the answer and the
+        // version it holds for cannot come apart.
+        let probed: Option<(bool, Option<String>)> = sqlx::query_as(
             "SELECT EXISTS (
                  SELECT 1
                  FROM pg_attribute
                  WHERE attrelid = 'pg_stat_statements'::regclass
                    AND attname = 'toplevel'
                    AND NOT attisdropped
-             )",
+             ),
+             (SELECT e.extversion FROM pg_extension e WHERE e.extname = 'pg_stat_statements')",
         )
         .fetch_optional(pool)
         .await
-        .unwrap_or_default()
-        .flatten();
+        .unwrap_or_default();
 
-        let Some(supported) = supported else {
+        let Some((supported, version)) = probed else {
             debug!("could not probe pg_stat_statements.toplevel, retrying next scrape");
             return false;
         };
 
+        if let ExtensionState::Installed { version: probed_for } = &mut *self.extension_state_lock()
+        {
+            *probed_for = version;
+        }
         self.toplevel_state.store(
             if supported {
                 query_id_support::SUPPORTED
@@ -921,34 +926,106 @@ impl PgStatementsCollector {
             .store(query_id_support::UNKNOWN, Ordering::Relaxed);
     }
 
-    /// Records the extension version `rows` were read from and reports whether it differs
-    /// from the one the cached column probes belong to.
+    /// Whether `rows` were read from the extension version the column probes were made
+    /// against.
     ///
     /// A missing column announces itself, because the query fails. A column that
     /// *appeared* does not: after `ALTER EXTENSION pg_stat_statements UPDATE` from 1.8 the
     /// query without the `toplevel` filter is still valid, and keeps letting a nested
     /// entry overwrite the top-level one that shares its labels. The scrape query
-    /// therefore carries `extversion` on every row, at no extra round trip, and a change
-    /// makes the caller probe again. The first version seen is only recorded: the probes
-    /// were made moments earlier on the same scrape. No rows, no answer, and nothing
-    /// exported that could be wrong.
-    fn extension_version_changed(&self, rows: &[PgRow]) -> bool {
-        let Some(current) = rows
+    /// therefore carries `extversion` on every row, at no extra round trip, and the probe
+    /// records the version it looked at, in the same statement as its answer. Rows from
+    /// another version must not be published. Without rows there is nothing to publish,
+    /// and nothing to compare.
+    fn rows_match_probed_version(&self, rows: &[PgRow]) -> bool {
+        let Some(read_from) = rows
             .first()
             .and_then(|row| row.try_get::<Option<String>, _>("extversion").ok())
             .flatten()
         else {
-            return false;
+            return true;
         };
-        let mut state = self.extension_state_lock();
-        let ExtensionState::Installed { version } = &mut *state else {
-            return false;
-        };
-        let changed = version
-            .as_deref()
-            .is_some_and(|previous| previous != current);
-        *version = Some(current);
-        changed
+        match &*self.extension_state_lock() {
+            ExtensionState::Installed {
+                version: Some(probed_for),
+            } => *probed_for == read_from,
+            // No probe has recorded a version: nothing to contradict.
+            _ => true,
+        }
+    }
+
+    /// Reads the statements to publish, or `None` when this scrape has to be skipped.
+    ///
+    /// The query is built from the cached column probes, and every result is checked
+    /// against them. Two things can show the probes to be stale, and each gets one new
+    /// probe and one more read: the query fails on a column that is gone, or its rows
+    /// come from another extension version than the probes were made against.
+    async fn read_statements(&self, pool: &PgPool) -> Result<Option<Vec<PgRow>>> {
+        let top_n = i64::try_from(self.top_n).unwrap_or(i64::MAX);
+        let mut reprobed = false;
+        loop {
+            let query = Self::build_pg_statements_query(
+                self.supports_query_id(pool).await,
+                self.supports_toplevel(pool).await,
+            );
+            match sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
+                .bind(self.self_queryids())
+                .bind(top_n)
+                .fetch_all(pool)
+                .await
+            {
+                Ok(rows) if self.rows_match_probed_version(&rows) => return Ok(Some(rows)),
+                // The rows came from another extension version than the one the probes
+                // were made against: probe again and read once more, so not even this
+                // scrape is built on the old answers.
+                Ok(_) if !reprobed => {
+                    reprobed = true;
+                    self.forget_schema_capabilities();
+                    debug!(
+                        collector = "pg_statements",
+                        "pg_stat_statements version changed - probing its columns again"
+                    );
+                }
+                // It changed again between the new probe and the second read. Rows that
+                // fit no probe are not published; the next scrape starts over.
+                Ok(_) => {
+                    self.forget_schema_capabilities();
+                    warn!(
+                        collector = "pg_statements",
+                        "pg_stat_statements keeps changing version - skipping collection"
+                    );
+                    return Ok(None);
+                }
+                // A column the cached probes promised is gone: the extension was replaced
+                // by another version between two scrapes. Ask the catalog again and retry
+                // once; a second failure is a real fault.
+                Err(error) if !reprobed && is_undefined_column(&error) => {
+                    reprobed = true;
+                    self.forget_schema_capabilities();
+                    debug!(
+                        collector = "pg_statements",
+                        error = %error,
+                        "pg_stat_statements columns changed - probing them again"
+                    );
+                }
+                // The extension was installed when last checked and is gone now: it was
+                // dropped, or the exporter now reaches a server that never had it.
+                // `Installed` is cached without a recheck, so without this the query
+                // would fail, and take the whole scrape with it, until the exporter
+                // restarts. Forget the cached state and skip instead; the extension is
+                // probed again after `MISSING_EXTENSION_RECHECK_AFTER`.
+                Err(error) if classify_query_error(&error) == QueryFailure::Absent => {
+                    self.update_extension_state(false);
+                    warn!(
+                        collector = "pg_statements",
+                        error = %error,
+                        "pg_stat_statements is no longer available - skipping collection"
+                    );
+                    return Ok(None);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 
     async fn pg_statements_available(&self, pool: &PgPool) -> Result<bool> {
@@ -1137,60 +1214,8 @@ impl Collector for PgStatementsCollector {
                     return Ok(Collected::Skipped);
                 }
 
-                let top_n = i64::try_from(self.top_n).unwrap_or(i64::MAX);
-                let mut reprobed = false;
-                let rows: Vec<PgRow> = loop {
-                    let query = Self::build_pg_statements_query(
-                        self.supports_query_id(pool).await,
-                        self.supports_toplevel(pool).await,
-                    );
-                    match sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
-                        .bind(self.self_queryids())
-                        .bind(top_n)
-                        .fetch_all(pool)
-                        .await
-                    {
-                        // The rows came from another extension version than the one
-                        // the probes were made against: probe again and read once more,
-                        // so not even this scrape is built on the old answers.
-                        Ok(rows) if !reprobed && self.extension_version_changed(&rows) => {
-                            reprobed = true;
-                            self.forget_schema_capabilities();
-                            debug!(
-                                collector = "pg_statements",
-                                "pg_stat_statements version changed - probing its columns again"
-                            );
-                        }
-                        Ok(rows) => break rows,
-                        // A column the cached probes promised is gone: the extension was
-                        // replaced by another version between two scrapes. Ask the
-                        // catalog again and retry once; a second failure is a real fault.
-                        Err(error) if !reprobed && is_undefined_column(&error) => {
-                            reprobed = true;
-                            self.forget_schema_capabilities();
-                            debug!(
-                                collector = "pg_statements",
-                                error = %error,
-                                "pg_stat_statements columns changed - probing them again"
-                            );
-                        }
-                    // The extension was installed when last checked and is gone now: it
-                    // was dropped, or the exporter now reaches a server that never had
-                    // it. `Installed` is cached without a recheck, so without this the
-                    // query would fail, and take the whole scrape with it, until the
-                    // exporter restarts. Forget the cached state and skip instead; the
-                    // extension is probed again after `MISSING_EXTENSION_RECHECK_AFTER`.
-                        Err(error) if classify_query_error(&error) == QueryFailure::Absent => {
-                            self.update_extension_state(false);
-                            warn!(
-                                collector = "pg_statements",
-                                error = %error,
-                                "pg_stat_statements is no longer available - skipping collection"
-                            );
-                            return Ok(Collected::Skipped);
-                        }
-                        Err(error) => return Err(error.into()),
-                    }
+                let Some(rows) = self.read_statements(pool).await? else {
+                    return Ok(Collected::Skipped);
                 };
 
                 // A row without a readable queryid cannot be labelled or cached, so it is
@@ -1761,6 +1786,37 @@ mod tests {
             *collector.extension_state_lock(),
             ExtensionState::Installed { version: None }
         );
+    }
+
+    /// The probe itself records the version it looked at. Learning it from the rows of
+    /// a scrape was not enough: a first scrape without rows left it unknown, and an
+    /// update that followed went unnoticed.
+    #[tokio::test]
+    async fn test_the_column_probe_records_the_extension_version() -> Result<()> {
+        let pool = sqlx::PgPool::connect(&crate::test_dsn::test_dsn()).await?;
+        let installed: Option<String> = sqlx::query_scalar(
+            "SELECT extversion FROM pg_extension WHERE extname = 'pg_stat_statements'",
+        )
+        .fetch_optional(&pool)
+        .await?;
+        let Some(installed) = installed else {
+            println!("pg_stat_statements extension not installed, skipping test");
+            return Ok(());
+        };
+
+        let collector = PgStatementsCollector::with_top_n(25);
+        collector.update_extension_state(true);
+        let _ = collector.supports_toplevel(&pool).await;
+        let recorded = collector.extension_state_lock().clone();
+        pool.close().await;
+
+        assert_eq!(
+            recorded,
+            ExtensionState::Installed {
+                version: Some(installed)
+            }
+        );
+        Ok(())
     }
 
     #[test]

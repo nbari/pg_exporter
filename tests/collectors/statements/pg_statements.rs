@@ -308,7 +308,34 @@ async fn test_pg_statements_collector_follows_an_in_place_extension_update() -> 
     };
     let pool = test_db.pool();
 
-    let outcome = nested_statement_exported_after_update(pool).await;
+    let outcome = nested_statement_exported_after_update(pool, false).await;
+    test_db.cleanup().await?;
+
+    let (exported_before, exported_after) = outcome?;
+    assert!(
+        exported_before,
+        "on 1.8, which cannot tell nested from top-level, the nested statement is exported"
+    );
+    assert!(
+        !exported_after,
+        "after the in-place update the nested-only statement must be filtered out again"
+    );
+    Ok(())
+}
+
+/// The same update, reached the long way round: the collector first sees the current
+/// version, then a downgrade to 1.8, which it only notices because its query fails, and
+/// then the update. The retry after the failed query used to leave the version of the
+/// rows it then read unrecorded, so the update that followed went unnoticed.
+#[tokio::test]
+async fn test_pg_statements_collector_follows_a_downgrade_and_then_an_update() -> Result<()> {
+    let Some(test_db) = setup_pg_statements_test_db().await? else {
+        println!("pg_stat_statements extension not installed, skipping test");
+        return Ok(());
+    };
+    let pool = test_db.pool();
+
+    let outcome = nested_statement_exported_after_update(pool, true).await;
     test_db.cleanup().await?;
 
     let (exported_before, exported_after) = outcome?;
@@ -326,7 +353,23 @@ async fn test_pg_statements_collector_follows_an_in_place_extension_update() -> 
 /// Installs 1.8, runs a statement that only executes inside a function under
 /// `track = all`, scrapes, updates the extension in place, runs it again and scrapes
 /// with the same collector. Returns whether the nested statement was exported each time.
-async fn nested_statement_exported_after_update(pool: &sqlx::PgPool) -> Result<(bool, bool)> {
+/// With `warm_on_current` the collector scrapes the installed version first, so that it
+/// meets 1.8 as a downgrade.
+async fn nested_statement_exported_after_update(
+    pool: &sqlx::PgPool,
+    warm_on_current: bool,
+) -> Result<(bool, bool)> {
+    // `pg_stat_statements` is cluster-wide and the collector exports the top N of all of
+    // it. N has to exceed everything the rest of the suite has recorded, or whether the
+    // witness is exported depends on what ran before this test.
+    let collector = PgStatementsCollector::with_config(100_000, None);
+    let registry = Registry::new();
+    collector.register_metrics(&registry)?;
+    if warm_on_current {
+        sqlx::query("SELECT 1").execute(pool).await?;
+        collector.collect(pool).await?;
+    }
+
     sqlx::query("DROP EXTENSION pg_stat_statements")
         .execute(pool)
         .await?;
@@ -354,10 +397,6 @@ async fn nested_statement_exported_after_update(pool: &sqlx::PgPool) -> Result<(
     sqlx::query("SET pg_stat_statements.track = 'all'")
         .execute(&mut *conn)
         .await?;
-
-    let collector = PgStatementsCollector::with_config(1000, None);
-    let registry = Registry::new();
-    collector.register_metrics(&registry)?;
 
     sqlx::query("SELECT touch_nested_witness()")
         .execute(&mut *conn)
