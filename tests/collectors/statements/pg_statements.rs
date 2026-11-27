@@ -439,57 +439,143 @@ async fn nested_witness_queryids(pool: &sqlx::PgPool) -> Result<Vec<String>> {
     Ok(ids.iter().map(ToString::to_string).collect())
 }
 
-/// The collector decides how to read `pg_stat_statements` from a probe of its columns.
-/// When the probe itself cannot be made, it must not guess: it used to read as if the
-/// `toplevel` column were absent, and published nested entries on top of top-level ones.
-/// Here the view the probe looks at is renamed, while the function the scrape reads
-/// still works; nothing may be published until the probe can be made again.
+/// The probe must ask about the function the scrape reads, not about the view of the
+/// same name: they are different objects. With the view renamed the function is still
+/// there and still has `toplevel`, so statements are exported and a nested-only one is
+/// filtered out. Probing the view gave no answer here, and nothing was exported.
 #[tokio::test]
-async fn test_pg_statements_collector_publishes_nothing_without_a_column_probe() -> Result<()> {
+async fn test_pg_statements_collector_probes_the_function_not_the_view() -> Result<()> {
     let Some(test_db) = setup_pg_statements_test_db().await? else {
         println!("pg_stat_statements extension not installed, skipping test");
         return Ok(());
     };
     let pool = test_db.pool();
 
-    let outcome = exported_with_and_without_the_probed_view(pool).await;
+    let outcome = async {
+        sqlx::query("ALTER VIEW pg_stat_statements RENAME TO pg_stat_statements_renamed")
+            .execute(pool)
+            .await?;
+        scrape_with_nested_witness(pool, pool).await
+    }
+    .await;
     test_db.cleanup().await?;
 
-    let (without_view, with_view_again) = outcome?;
+    let (any_exported, nested_exported) = outcome?;
     assert!(
-        without_view.is_empty(),
-        "nothing may be published while the columns cannot be probed, got: {without_view:?}"
+        any_exported,
+        "statements must still be exported when only the view is gone"
     );
     assert!(
-        !with_view_again.is_empty(),
-        "statements should be exported again once the probe works"
+        !nested_exported,
+        "the function has toplevel, so the nested-only statement must be filtered out"
     );
     Ok(())
 }
 
-/// Scrapes with a fresh collector while the `pg_stat_statements` view is renamed, then
-/// again after it is restored, and returns what was exported each time.
-async fn exported_with_and_without_the_probed_view(
-    pool: &sqlx::PgPool,
-) -> Result<(Vec<String>, Vec<String>)> {
+/// A relation named `pg_stat_statements` earlier in `search_path` is not the extension.
+/// It must not decide how the extension's function is read: a reporting view without a
+/// `toplevel` column used to switch the filter off.
+#[tokio::test]
+async fn test_pg_statements_collector_ignores_a_view_that_shadows_the_extension() -> Result<()> {
+    let Some(test_db) = setup_pg_statements_test_db().await? else {
+        println!("pg_stat_statements extension not installed, skipping test");
+        return Ok(());
+    };
+    let pool = test_db.pool();
+
+    let outcome = async {
+        sqlx::query("CREATE SCHEMA shadow").execute(pool).await?;
+        sqlx::query("CREATE VIEW shadow.pg_stat_statements AS SELECT 1 AS not_the_extension")
+            .execute(pool)
+            .await?;
+        sqlx::query(sqlx::AssertSqlSafe(&*format!(
+            "ALTER DATABASE {} SET search_path = shadow, public",
+            test_db.database_name()
+        )))
+        .execute(pool)
+        .await?;
+        // New connections pick the setting up; the setup pool keeps the default.
+        let shadowed = sqlx::PgPool::connect(&common::dsn_for_database(
+            &common::get_test_dsn(),
+            test_db.database_name(),
+        )?)
+        .await?;
+        let scraped = scrape_with_nested_witness(pool, &shadowed).await;
+        shadowed.close().await;
+        scraped
+    }
+    .await;
+    test_db.cleanup().await?;
+
+    let (any_exported, nested_exported) = outcome?;
+    assert!(any_exported, "statements must be exported");
+    assert!(
+        !nested_exported,
+        "the shadowing view has no say: the nested-only statement must be filtered out"
+    );
+    Ok(())
+}
+
+/// Records a nested-only statement under `track = all` through `setup_pool`, scrapes once
+/// with a fresh collector over `scrape_pool`, and returns whether anything was exported
+/// and whether the nested statement was.
+async fn scrape_with_nested_witness(
+    setup_pool: &sqlx::PgPool,
+    scrape_pool: &sqlx::PgPool,
+) -> Result<(bool, bool)> {
+    create_nested_witness(setup_pool).await?;
+    let mut conn = setup_pool.acquire().await?;
+    sqlx::query("SET pg_stat_statements.track = 'all'")
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("SELECT public.touch_nested_witness()")
+        .execute(&mut *conn)
+        .await?;
+
+    // Read through the function: the view may be renamed or shadowed in these tests.
+    let nested: Vec<i64> = sqlx::query_scalar(
+        "SELECT queryid FROM public.pg_stat_statements(true)
+         WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+           AND query ILIKE '%count(*)%FROM public.nested_witness%'
+           AND query NOT ILIKE '%CREATE %'
+           AND query NOT ILIKE '%pg_stat_statements%'",
+    )
+    .fetch_all(setup_pool)
+    .await?;
+    anyhow::ensure!(
+        !nested.is_empty(),
+        "the nested statement was not recorded; is pg_stat_statements.track settable?"
+    );
+
     let collector = PgStatementsCollector::with_config(100_000, None);
     let registry = Registry::new();
     collector.register_metrics(&registry)?;
-    sqlx::query("SELECT 1").execute(pool).await?;
+    collector.collect(scrape_pool).await?;
+    let exported = exported_queryids(&registry);
+    let nested_exported = nested.iter().any(|id| exported.contains(&id.to_string()));
+    Ok((!exported.is_empty(), nested_exported))
+}
 
-    sqlx::query("ALTER VIEW pg_stat_statements RENAME TO pg_stat_statements_renamed")
-        .execute(pool)
-        .await?;
-    let scraped = collector.collect(pool).await;
-    let without_view = exported_queryids(&registry);
-    sqlx::query("ALTER VIEW pg_stat_statements_renamed RENAME TO pg_stat_statements")
-        .execute(pool)
-        .await?;
-    scraped.context("an unprobeable extension must be a skip, not a failed scrape")?;
-
-    sqlx::query("SELECT 1").execute(pool).await?;
-    collector.collect(pool).await?;
-    Ok((without_view, exported_queryids(&registry)))
+/// A table and a function whose body reads it, so the read only ever runs nested.
+async fn create_nested_witness(pool: &sqlx::PgPool) -> Result<()> {
+    // Enough rows for the nested count to take measurable time: the collector skips
+    // statements whose total execution time is zero.
+    sqlx::query(
+        "CREATE TABLE public.nested_witness AS SELECT g AS id FROM generate_series(1, 50000) g",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE FUNCTION public.touch_nested_witness() RETURNS bigint LANGUAGE plpgsql AS $$
+         DECLARE total bigint;
+         BEGIN
+             SELECT count(*) INTO total FROM public.nested_witness;
+             RETURN total;
+         END $$",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 #[tokio::test]

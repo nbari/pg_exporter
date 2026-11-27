@@ -22,14 +22,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other. The column probes now record the extension version they looked at, the scrape
   query reports the version with its rows, and rows from another version make the
   collector probe again and read once more within the same scrape.
-- When that column probe cannot be made at all, the `statements` collector publishes
-  nothing for the scrape and logs a warning. It used to read as if the column were
-  absent, which could publish nested statements on top of top-level ones.
+- The `statements` collector decided how to read `pg_stat_statements` by looking at the
+  *view* of that name, while it reads the *function*. A relation called
+  `pg_stat_statements` earlier in `search_path` answered for the extension and could
+  switch the top-level filter off, and a failed lookup was taken to mean "no such
+  column", either of which could publish nested statements on top of top-level ones.
+  The probe now inspects the output columns of the function the scrape calls. A probe
+  that fails is an error for that scrape instead of a guess.
 - The `database` collector failed whenever a scrape overlapped a `DROP DATABASE`.
-  `pg_database_size` raises `database "..." does not exist` for a database that was
-  dropped after the statement had listed it, and that error failed the collector for
-  the scrape. When that happens the databases are now read one by one, so only the one
-  that vanished is left out. The normal case is still a single statement.
+  `pg_database_size` raises an error for a database that was dropped after the statement
+  had listed it, and that error failed the collector for the scrape. When that happens
+  the databases are now read one by one, so only the one that vanished is left out. The
+  normal case is still a single statement.
+- The same collector asked for each size by database *name*, which PostgreSQL looks up
+  a second time. A database dropped and created again under its name in between was
+  reported with the old connection limit and the new size. Sizes are now asked for by
+  the OID of the row that was listed, so both values always describe one database.
 - `pg_database_size_bytes` reported 0 for a database whose size PostgreSQL answered as
   NULL. An unknown size is no longer published as 0 bytes; the series is absent for
   that scrape.
@@ -74,7 +82,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   than "found" or "not found" is an error, not "not published yet".
 - `scripts/setup-local-test-db.sh` and the other helper scripts no longer print a DSN
   in their messages; a password in the query string or a keyword was shown in clear
-  text. They name the destination host instead.
+  text. They name the destination host instead, and the setup script validates its
+  target before it prints anything about it.
 - The test suite checks where its database connection really goes, in the Rust tests,
   in `scripts/setup-local-test-db.sh` and for the containers tests start themselves. The
   old guard looked for `localhost` anywhere in the DSN and did not see `PGHOSTADDR`, so

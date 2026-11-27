@@ -4,7 +4,7 @@ use crate::collectors::{Collected, Collector, i64_to_f64,
         MS_TO_SEC, QueryFailure, TEMPLATE0, TEMPLATE1, classify_query_error, is_undefined_column,
     },
 };
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use futures::future::BoxFuture;
 use prometheus::{GaugeVec, IntGaugeVec, Opts, Registry};
 use sqlx::{postgres::PgRow, PgPool, Row};
@@ -668,41 +668,40 @@ impl PgStatementsCollector {
     /// function is no longer exported. Under the default `track = top` nothing changes,
     /// because nested statements are never recorded in the first place.
     ///
-    /// The catalog is asked directly instead of comparing the server version, for the
-    /// same reason as [`Self::supports_query_id`]: the version global is initialised by
-    /// the exporter/registry and would be unset when a collector is driven on its own.
-    /// The view is defined as `SELECT * FROM pg_stat_statements(true)`, so its columns
-    /// mirror the function the scrape query actually reads.
+    /// The probe asks about the **function** the scrape query reads,
+    /// `pg_stat_statements(boolean)`, resolved the way that query resolves it, and looks
+    /// for `toplevel` among its output columns. It used to look at the view of the same
+    /// name, which is another object: a view earlier in `search_path` answered for the
+    /// extension, and a role that could call the function but not read `pg_attribute`
+    /// got no answer at all. The server version is not compared, for the same reason as
+    /// in [`Self::supports_query_id`].
     ///
-    /// `None` means the probe itself failed. That is not "unsupported": reading without
-    /// the filter on a guess would publish nested entries on top of top-level ones, so
-    /// the caller publishes nothing for this scrape and the probe runs again on the next.
-    async fn supports_toplevel(&self, pool: &PgPool) -> Option<bool> {
+    /// A probe that fails is an error for this scrape: reading on a guess could publish
+    /// nested entries on top of top-level ones. When the function cannot be resolved the
+    /// answer is `false` and nothing is cached; the scrape query then fails as well, and
+    /// that is handled as a missing extension.
+    async fn supports_toplevel(&self, pool: &PgPool) -> Result<bool> {
         match self.toplevel_state.load(Ordering::Relaxed) {
-            query_id_support::SUPPORTED => return Some(true),
-            query_id_support::UNSUPPORTED => return Some(false),
+            query_id_support::SUPPORTED => return Ok(true),
+            query_id_support::UNSUPPORTED => return Ok(false),
             _ => {}
         }
 
         // The extension version is read in the same statement, so the answer and the
         // version it holds for cannot come apart.
         let probed: Option<(bool, Option<String>)> = sqlx::query_as(
-            "SELECT EXISTS (
-                 SELECT 1
-                 FROM pg_attribute
-                 WHERE attrelid = 'pg_stat_statements'::regclass
-                   AND attname = 'toplevel'
-                   AND NOT attisdropped
-             ),
-             (SELECT e.extversion FROM pg_extension e WHERE e.extname = 'pg_stat_statements')",
+            "SELECT COALESCE('toplevel' = ANY(p.proargnames), false),
+                    (SELECT e.extversion FROM pg_extension e WHERE e.extname = 'pg_stat_statements')
+             FROM pg_proc p
+             WHERE p.oid = to_regprocedure('pg_stat_statements(boolean)')",
         )
         .fetch_optional(pool)
         .await
-        .unwrap_or_default();
+        .context("could not probe the columns of pg_stat_statements(boolean)")?;
 
         let Some((supported, version)) = probed else {
-            debug!("could not probe pg_stat_statements.toplevel, retrying next scrape");
-            return None;
+            debug!("pg_stat_statements(boolean) is not resolvable, retrying next scrape");
+            return Ok(false);
         };
 
         if let ExtensionState::Installed { version: probed_for } = &mut *self.extension_state_lock()
@@ -717,7 +716,7 @@ impl PgStatementsCollector {
             },
             Ordering::Relaxed,
         );
-        Some(supported)
+        Ok(supported)
     }
 
     /// Decides whether a looked-up query text is worth caching.
@@ -963,20 +962,13 @@ impl PgStatementsCollector {
     /// against them. Two things can show the probes to be stale, and each gets one new
     /// probe and one more read: the query fails on a column that is gone, or its rows
     /// come from another extension version than the probes were made against. A probe
-    /// that cannot be made at all skips the scrape: rows are only published when it is
-    /// known which columns they were read with.
+    /// that fails is an error for the scrape: rows are only published when it is known
+    /// which columns they were read with.
     async fn read_statements(&self, pool: &PgPool) -> Result<Option<Vec<PgRow>>> {
         let top_n = i64::try_from(self.top_n).unwrap_or(i64::MAX);
         let mut reprobed = false;
         loop {
-            let Some(supports_toplevel) = self.supports_toplevel(pool).await else {
-                warn!(
-                    collector = "pg_statements",
-                    "could not tell whether pg_stat_statements has the toplevel column - \
-                     skipping collection"
-                );
-                return Ok(None);
-            };
+            let supports_toplevel = self.supports_toplevel(pool).await?;
             let query = Self::build_pg_statements_query(
                 self.supports_query_id(pool).await,
                 supports_toplevel,
@@ -1819,9 +1811,10 @@ mod tests {
 
         let collector = PgStatementsCollector::with_top_n(25);
         collector.update_extension_state(true);
-        let _ = collector.supports_toplevel(&pool).await;
+        let probed = collector.supports_toplevel(&pool).await;
         let recorded = collector.extension_state_lock().clone();
         pool.close().await;
+        probed?;
 
         assert_eq!(
             recorded,
