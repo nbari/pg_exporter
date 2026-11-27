@@ -168,3 +168,53 @@ async fn test_database_collector_runs_both_subcollectors() -> Result<()> {
     pool.close().await;
     Ok(())
 }
+
+/// A database can be dropped while the collector is reading the catalog. That must not
+/// cost the scrape: `pg_database_size` raises `database "..." does not exist` for a row
+/// the scan had already listed, and the whole collector used to fail with it. Asking by
+/// OID does not help; that overload raises an error for a missing database too.
+#[tokio::test]
+async fn test_database_catalog_survives_databases_dropped_during_collection() -> Result<()> {
+    let pool = common::create_test_pool().await?;
+    let prefix = format!("test_catalog_churn_{}", std::process::id());
+
+    let churn_pool = pool.clone();
+    let churn_prefix = prefix.clone();
+    let churn = tokio::spawn(async move {
+        for round in 0..60 {
+            let name = format!("{churn_prefix}_{round}");
+            sqlx::query(sqlx::AssertSqlSafe(&*format!(
+                "CREATE DATABASE {name} TEMPLATE template0"
+            )))
+            .execute(&churn_pool)
+            .await?;
+            sqlx::query(sqlx::AssertSqlSafe(&*format!("DROP DATABASE {name}")))
+                .execute(&churn_pool)
+                .await?;
+        }
+        Result::<()>::Ok(())
+    });
+
+    let collector = DatabaseSubCollector::new();
+    let registry = Registry::new();
+    collector.register_metrics(&registry)?;
+
+    let mut scrapes = 0_u32;
+    let mut first_failure = None;
+    while !churn.is_finished() {
+        scrapes += 1;
+        if let Err(error) = collector.collect(&pool).await {
+            first_failure.get_or_insert(format!("scrape {scrapes}: {error:#}"));
+        }
+    }
+    let churned = churn.await;
+    pool.close().await;
+    churned??;
+
+    assert!(
+        first_failure.is_none(),
+        "the catalog collector failed while databases were being dropped: {first_failure:?}"
+    );
+    assert!(scrapes > 0);
+    Ok(())
+}

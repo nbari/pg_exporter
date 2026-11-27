@@ -461,6 +461,8 @@ pub const UNDEFINED_FUNCTION: &str = "42883";
 pub const UNDEFINED_OBJECT: &str = "42704";
 /// `SQLSTATE` for a column the relation does not have.
 pub const UNDEFINED_COLUMN: &str = "42703";
+/// `SQLSTATE` for a database that does not exist (`invalid_catalog_name`).
+pub const UNDEFINED_DATABASE: &str = "3D000";
 /// `SQLSTATE` for a permission failure.
 pub const INSUFFICIENT_PRIVILEGE: &str = "42501";
 
@@ -493,6 +495,19 @@ pub fn is_undefined_column(error: &sqlx::Error) -> bool {
     matches!(
         error,
         sqlx::Error::Database(db_error) if db_error.code().as_deref() == Some(UNDEFINED_COLUMN)
+    )
+}
+
+/// Whether a query failed because it named a database that does not exist.
+///
+/// A statement that lists `pg_database` and then calls a function per database, such as
+/// `pg_database_size(datname)`, gets this when a database is dropped between the two: the
+/// row was visible to the scan and the database is gone by the time the function runs.
+#[must_use]
+pub fn is_undefined_database(error: &sqlx::Error) -> bool {
+    matches!(
+        error,
+        sqlx::Error::Database(db_error) if db_error.code().as_deref() == Some(UNDEFINED_DATABASE)
     )
 }
 
