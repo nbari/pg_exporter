@@ -3,9 +3,13 @@
 # Whether `$1` is a loopback host or address: `localhost`, a 127.0.0.0/8 literal, or ::1.
 # A name that merely starts with "127." is a DNS name, not an address.
 pg_connection_is_loopback() {
-    local value="${1,,}"
+    local value="${1,,}" octet
     [[ "${value}" == localhost || "${value}" == ::1 ]] && return 0
-    [[ "${value}" =~ ^127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]
+    [[ "${value}" =~ ^127\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+    # 127.299.0.1 is not an address; libpq would look it up as a name.
+    for octet in "${BASH_REMATCH[@]:1}"; do
+        ((10#${octet} <= 255)) || return 1
+    done
 }
 
 # Prints where libpq would connect for the current settings, as two lines: the host and
@@ -15,9 +19,9 @@ pg_connection_is_loopback() {
 # cases, because libpq reads it whatever the host says.
 #
 # This is deliberately narrower than libpq. It refuses, instead of guessing at, a service
-# file entry (`service=`, PGSERVICE), a list of hosts, quoting or backslashes in a
-# keyword string, and any percent-encoding other than %2F (the slash of a socket path):
-# each of those can name a host this function would not see.
+# file entry (`service=`, PGSERVICE), a list of hosts, quoting, backslashes or spaces
+# around "=" in a keyword string, and any percent-encoding other than %2F (the slash of
+# a socket path): each of those can name a host this function would not see.
 pg_connection_effective_target() {
     local host="$1" hostaddr="${PGHOSTADDR:-}"
     local dsn="${PG_EXPORTER_DSN:-}"
@@ -29,6 +33,8 @@ pg_connection_effective_target() {
         if [[ "${dsn}" == *://* ]]; then
             local rest="${dsn#*://}" query="" pair key value
             local authority="${rest%%[/?]*}"
+            # A list of hosts, with or without ports: every entry would have to be local.
+            [[ "${authority}" != *,* ]] || return 1
             local hostport="${authority##*@}"
             if [[ "${hostport}" == \[* ]]; then
                 host="${hostport#\[}"
@@ -56,6 +62,8 @@ pg_connection_effective_target() {
         else
             local token keyword
             [[ "${dsn}" != *[\'\\]* ]] || return 1
+            # libpq accepts "host = name"; split on spaces that is three tokens and no host.
+            [[ ! "${dsn}" =~ [[:space:]]=|=[[:space:]] ]] || return 1
             host=""
             for token in ${dsn}; do
                 keyword="${token%%=*}"
@@ -111,7 +119,7 @@ pg_connection_is_local() {
 pg_connection_target_summary() {
     local target host hostaddr
     if ! target="$(pg_connection_effective_target "$1")"; then
-        printf 'settings this script cannot read with certainty (a service, several hosts, quoting or percent-encoding)\n'
+        printf 'settings this script cannot read with certainty (a service, several hosts, quoting, spaces around "=", or percent-encoding)\n'
         return
     fi
     {
@@ -167,15 +175,11 @@ pg_connection_target_for_db() {
                 printf '%s/%s%s%s\n' "${dsn}" "${db}" "${query}" "${fragment}"
             fi
         else
-            local replaced="${dsn}"
-
-            if [[ "${replaced}" == *dbname=* ]]; then
-                replaced="$(printf '%s\n' "${replaced}" | sed -E "s/(^|[[:space:]])dbname=([^[:space:]]*)/\1dbname=${db}/")"
-            else
-                replaced="${replaced} dbname=${db}"
-            fi
-
-            printf '%s\n' "${replaced}"
+            # libpq uses the last `dbname` it is given, so every existing one is removed
+            # and the requested database is appended.
+            local replaced
+            replaced="$(printf '%s\n' "${dsn}" | sed -E 's/(^|[[:space:]])dbname=[^[:space:]]*//g')"
+            printf '%s dbname=%s\n' "${replaced}" "${db}"
         fi
 
         return
@@ -234,22 +238,11 @@ pg_connection_description() {
     local db="$1"
 
     if [[ -n "${PG_EXPORTER_DSN:-}" ]]; then
-        local target
-        target="$(pg_connection_target_for_db "${db}")"
-
-        if [[ "${target}" == *://*@* ]]; then
-            local scheme="${target%%://*}"
-            local rest="${target#*://}"
-            local userinfo="${rest%%@*}"
-            local after_userinfo="${rest#*@}"
-
-            if [[ "${userinfo}" == *:* ]]; then
-                target="${scheme}://${userinfo%%:*}:****@${after_userinfo}"
-            fi
-        fi
-
-        # A password can also sit in the query string or in a keyword.
-        printf '%s\n' "${target}" | sed -E 's/(password=)[^&[:space:]]*/\1****/g'
+        # Never the DSN itself: a password can sit in its user info, in its query string
+        # or in a keyword, quoted or not, and masking every spelling is not something to
+        # get right by hand. The destination is all a message needs.
+        printf 'PG_EXPORTER_DSN (%s), database %s\n' \
+            "$(pg_connection_target_summary "${PG_HOST:-localhost}")" "${db}"
     else
         printf '%s@%s:%s/%s\n' \
             "${PG_USER:-postgres}" \

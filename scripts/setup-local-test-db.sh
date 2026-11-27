@@ -190,6 +190,12 @@ run_pgbench_db() {
 # so it only ever runs against a disposable local server. The check is on where libpq
 # would really connect: PGHOSTADDR redirects a connection whatever the host name says.
 require_local_target() {
+    # psql and pgbench treat a database argument that contains "=" or "://" as a whole
+    # connection string, which could name another host behind this check.
+    if [[ ! "${PG_DATABASE}" =~ ^[A-Za-z_][A-Za-z0-9_$-]*$ ]]; then
+        log_error "PG_DATABASE must be a plain database name."
+        exit 1
+    fi
     if pg_connection_is_local "$PG_HOST"; then
         return
     fi
