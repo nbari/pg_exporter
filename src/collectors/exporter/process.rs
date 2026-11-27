@@ -108,8 +108,8 @@ impl ProcessCollector {
         .expect("pg_exporter_process_start_time_seconds");
 
         // The handle starts empty and is created on first use. Do not pre-load all
-        // processes: on Linux, sysinfo keeps /proc/*/stat file descriptors open for
-        // indexed processes, so `new_all` would permanently inflate exporter FD usage.
+        // processes: only this process is ever refreshed, so nothing is read or kept for
+        // the rest of the host.
         let system = LazySystem::new();
         let num_cpus = std::thread::available_parallelism()
             .map_or(1, std::num::NonZeroUsize::get);

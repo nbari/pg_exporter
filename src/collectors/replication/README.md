@@ -38,7 +38,9 @@ Labels: `slot_name`, `slot_type`, `database`
   and the server's current position. On a primary that position is
   `pg_current_wal_lsn()`. On a standby it is `pg_last_wal_receive_lsn()`, the last WAL
   received **by streaming**: a standby fed only from the WAL archive has no streaming
-  position, and its slots report 0 here whatever they retain.
+  position, and its slots report 0 here whatever they retain. One that streamed earlier
+  and then switched to the archive keeps its last streamed position, so the value stops
+  following the WAL it replays.
 - `pg_replication_slots_active` - Whether slot is active (1) or inactive (0)
 
 ### pg_stat_replication_slots (PostgreSQL 14+)

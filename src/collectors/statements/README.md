@@ -62,23 +62,23 @@ PG_EXPORTER_STATEMENTS_TOP_N=50 pg_exporter --dsn postgresql://... --collector.s
 ## Key Metrics
 
 ### Execution Time
-- `pg_stat_statements_total_exec_time_seconds` - Total time spent in this query
-- `pg_stat_statements_mean_exec_time_seconds` - Average time per execution
-- `pg_stat_statements_max_exec_time_seconds` - Slowest execution
-- `pg_stat_statements_stddev_exec_time_seconds` - Execution time variance
+- `postgres_pg_stat_statements_total_exec_time_seconds` - Total time spent in this query
+- `postgres_pg_stat_statements_mean_exec_time_seconds` - Average time per execution
+- `postgres_pg_stat_statements_max_exec_time_seconds` - Slowest execution
+- `postgres_pg_stat_statements_stddev_exec_time_seconds` - Execution time variance
 
 ### Frequency
-- `pg_stat_statements_calls_total` - How many times the query was executed
-- `pg_stat_statements_rows_total` - Total rows returned/affected
+- `postgres_pg_stat_statements_calls_total` - How many times the query was executed
+- `postgres_pg_stat_statements_rows_total` - Total rows returned/affected
 
 ### I/O Metrics
-- `pg_stat_statements_shared_blks_hit_total` - Cache hits (fast)
-- `pg_stat_statements_shared_blks_read_total` - Disk reads (slow)
-- `pg_stat_statements_temp_blks_written_total` - Queries spilling to disk
-- `pg_stat_statements_cache_hit_ratio` - Query cache effectiveness (0.0-1.0)
+- `postgres_pg_stat_statements_shared_blks_hit_total` - Cache hits (fast)
+- `postgres_pg_stat_statements_shared_blks_read_total` - Disk reads (slow)
+- `postgres_pg_stat_statements_temp_blks_written_total` - Queries spilling to disk
+- `postgres_pg_stat_statements_cache_hit_ratio` - Query cache effectiveness (0.0-1.0)
 
 ### Resource Usage
-- `pg_stat_statements_wal_bytes_total` - WAL generation
+- `postgres_pg_stat_statements_wal_bytes_total` - WAL generation
 
 ## Use Cases
 
@@ -88,7 +88,7 @@ PromQL query to find queries with highest total time:
 
 ```promql
 topk(10, 
-  pg_stat_statements_total_exec_time_seconds
+  postgres_pg_stat_statements_total_exec_time_seconds
 )
 ```
 
@@ -97,9 +97,9 @@ topk(10,
 Queries executed many times with low row counts:
 
 ```promql
-pg_stat_statements_calls_total > 1000
+postgres_pg_stat_statements_calls_total > 1000
 and
-pg_stat_statements_rows_total / pg_stat_statements_calls_total < 10
+postgres_pg_stat_statements_rows_total / postgres_pg_stat_statements_calls_total < 10
 ```
 
 ### 3. Cache Miss Detection
@@ -107,9 +107,9 @@ pg_stat_statements_rows_total / pg_stat_statements_calls_total < 10
 Queries with poor cache hit ratios:
 
 ```promql
-pg_stat_statements_cache_hit_ratio < 0.9
+postgres_pg_stat_statements_cache_hit_ratio < 0.9
 and
-pg_stat_statements_calls_total > 100
+postgres_pg_stat_statements_calls_total > 100
 ```
 
 ### 4. Temp File Usage
@@ -117,7 +117,7 @@ pg_stat_statements_calls_total > 100
 Queries writing to disk (needs more work_mem):
 
 ```promql
-rate(pg_stat_statements_temp_blks_written_total[5m]) > 0
+rate(postgres_pg_stat_statements_temp_blks_written_total[5m]) > 0
 ```
 
 ### 5. Performance Regression Detection
@@ -125,7 +125,7 @@ rate(pg_stat_statements_temp_blks_written_total[5m]) > 0
 Alert on queries getting slower:
 
 ```promql
-increase(pg_stat_statements_mean_exec_time_seconds[1h]) > 0.5
+increase(postgres_pg_stat_statements_mean_exec_time_seconds[1h]) > 0.5
 ```
 
 ## Labels
@@ -417,17 +417,17 @@ Track your slowest queries:
 
 ```promql
 # Panel 1: Top 10 Slowest Queries (by total time)
-topk(10, pg_stat_statements_total_exec_time_seconds)
+topk(10, postgres_pg_stat_statements_total_exec_time_seconds)
 
 # Panel 2: Most Called Queries
-topk(10, rate(pg_stat_statements_calls_total[5m]))
+topk(10, rate(postgres_pg_stat_statements_calls_total[5m]))
 
 # Panel 3: Cache Hit Ratio Heatmap
-pg_stat_statements_cache_hit_ratio
+postgres_pg_stat_statements_cache_hit_ratio
 
 # Panel 4: Queries Writing Temp Files
 sum by (query_short) (
-  rate(pg_stat_statements_temp_blks_written_total[5m])
+  rate(postgres_pg_stat_statements_temp_blks_written_total[5m])
 )
 ```
 
