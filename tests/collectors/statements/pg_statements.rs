@@ -294,6 +294,112 @@ async fn test_pg_statements_collector_follows_an_extension_version_change() -> R
     Ok(())
 }
 
+/// The other direction: the extension is updated in place and gains `toplevel`. Nothing
+/// fails then, so nothing announced the change, and the collector kept reading without
+/// the top-level filter until it was restarted. Under `track = all` a statement that
+/// only ever runs inside a function was exported, and one that runs both ways had its
+/// two entries overwrite each other. The witness here is such a nested-only statement:
+/// it must not be exported once the extension has the column.
+#[tokio::test]
+async fn test_pg_statements_collector_follows_an_in_place_extension_update() -> Result<()> {
+    let Some(test_db) = setup_pg_statements_test_db().await? else {
+        println!("pg_stat_statements extension not installed, skipping test");
+        return Ok(());
+    };
+    let pool = test_db.pool();
+
+    let outcome = nested_statement_exported_after_update(pool).await;
+    test_db.cleanup().await?;
+
+    let (exported_before, exported_after) = outcome?;
+    assert!(
+        exported_before,
+        "on 1.8, which cannot tell nested from top-level, the nested statement is exported"
+    );
+    assert!(
+        !exported_after,
+        "after the in-place update the nested-only statement must be filtered out again"
+    );
+    Ok(())
+}
+
+/// Installs 1.8, runs a statement that only executes inside a function under
+/// `track = all`, scrapes, updates the extension in place, runs it again and scrapes
+/// with the same collector. Returns whether the nested statement was exported each time.
+async fn nested_statement_exported_after_update(pool: &sqlx::PgPool) -> Result<(bool, bool)> {
+    sqlx::query("DROP EXTENSION pg_stat_statements")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE EXTENSION pg_stat_statements VERSION '1.8'")
+        .execute(pool)
+        .await?;
+    // Enough rows for the nested count to take measurable time: the collector skips
+    // statements whose total execution time is zero.
+    sqlx::query("CREATE TABLE nested_witness AS SELECT g AS id FROM generate_series(1, 50000) g")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "CREATE FUNCTION touch_nested_witness() RETURNS bigint LANGUAGE plpgsql AS $$
+         DECLARE total bigint;
+         BEGIN
+             SELECT count(*) INTO total FROM nested_witness;
+             RETURN total;
+         END $$",
+    )
+    .execute(pool)
+    .await?;
+
+    // One connection, so the session setting and the calls share a backend.
+    let mut conn = pool.acquire().await?;
+    sqlx::query("SET pg_stat_statements.track = 'all'")
+        .execute(&mut *conn)
+        .await?;
+
+    let collector = PgStatementsCollector::with_config(1000, None);
+    let registry = Registry::new();
+    collector.register_metrics(&registry)?;
+
+    sqlx::query("SELECT touch_nested_witness()")
+        .execute(&mut *conn)
+        .await?;
+    let nested = nested_witness_queryids(pool).await?;
+    anyhow::ensure!(
+        !nested.is_empty(),
+        "the nested statement was not recorded; is pg_stat_statements.track settable?"
+    );
+    collector.collect(pool).await?;
+    let before = exported_queryids(&registry);
+    let exported_before = nested.iter().any(|id| before.contains(id));
+
+    sqlx::query("ALTER EXTENSION pg_stat_statements UPDATE")
+        .execute(pool)
+        .await?;
+    sqlx::query("SELECT touch_nested_witness()")
+        .execute(&mut *conn)
+        .await?;
+    let nested = nested_witness_queryids(pool).await?;
+    collector.collect(pool).await?;
+    let after = exported_queryids(&registry);
+    let exported_after = nested.iter().any(|id| after.contains(id));
+
+    Ok((exported_before, exported_after))
+}
+
+/// The query ids of the statements the witness function runs internally: every entry
+/// that reads `nested_witness` except the top-level call itself.
+async fn nested_witness_queryids(pool: &sqlx::PgPool) -> Result<Vec<String>> {
+    let ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT queryid FROM pg_stat_statements
+         WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+           AND query ILIKE '%FROM nested_witness%'
+           AND query NOT ILIKE '%touch_nested_witness()%'
+           AND query NOT ILIKE '%pg_stat_statements%'",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(ids.iter().map(ToString::to_string).collect())
+}
+
 #[tokio::test]
 async fn test_pg_statements_collector_excludes_own_query() -> Result<()> {
     let Some(test_db) = setup_pg_statements_test_db().await? else {

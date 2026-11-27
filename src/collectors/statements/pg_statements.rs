@@ -136,11 +136,19 @@ impl Drop for TextLookupInFlightGuard {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum ExtensionState {
     Unknown,
-    Installed,
-    Missing { last_checked: Instant },
+    /// `version` is the extension version the cached column probes were made against, as
+    /// the scrape query last reported it; see
+    /// [`PgStatementsCollector::extension_version_changed`]. `None` until a scrape
+    /// returned a row.
+    Installed {
+        version: Option<String>,
+    },
+    Missing {
+        last_checked: Instant,
+    },
 }
 
 const MISSING_EXTENSION_RECHECK_AFTER: Duration = Duration::from_mins(1);
@@ -444,7 +452,11 @@ impl PgStatementsCollector {
                 sel.local_blks_written,
                 sel.temp_blks_read,
                 sel.temp_blks_written,
-                sel.wal_bytes
+                sel.wal_bytes,
+                (
+                    SELECT e.extversion FROM pg_extension e
+                    WHERE e.extname = 'pg_stat_statements'
+                ) AS extversion
             FROM selected sel
             LEFT JOIN pg_roles r ON r.oid = sel.userid
             "
@@ -867,7 +879,7 @@ impl PgStatementsCollector {
 
     fn cached_extension_availability(&self) -> Option<bool> {
         match *self.extension_state_lock() {
-            ExtensionState::Installed => Some(true),
+            ExtensionState::Installed { .. } => Some(true),
             ExtensionState::Missing { last_checked }
                 if last_checked.elapsed() < MISSING_EXTENSION_RECHECK_AFTER =>
             {
@@ -884,12 +896,13 @@ impl PgStatementsCollector {
             self.forget_schema_capabilities();
         }
         let mut state = self.extension_state_lock();
-        *state = if installed {
-            ExtensionState::Installed
-        } else {
-            ExtensionState::Missing {
+        *state = match (installed, &*state) {
+            // Still installed: keep the version the probes were made against.
+            (true, ExtensionState::Installed { .. }) => return,
+            (true, _) => ExtensionState::Installed { version: None },
+            (false, _) => ExtensionState::Missing {
                 last_checked: Instant::now(),
-            }
+            },
         };
     }
 
@@ -906,6 +919,36 @@ impl PgStatementsCollector {
             .store(query_id_support::UNKNOWN, Ordering::Relaxed);
         self.toplevel_state
             .store(query_id_support::UNKNOWN, Ordering::Relaxed);
+    }
+
+    /// Records the extension version `rows` were read from and reports whether it differs
+    /// from the one the cached column probes belong to.
+    ///
+    /// A missing column announces itself, because the query fails. A column that
+    /// *appeared* does not: after `ALTER EXTENSION pg_stat_statements UPDATE` from 1.8 the
+    /// query without the `toplevel` filter is still valid, and keeps letting a nested
+    /// entry overwrite the top-level one that shares its labels. The scrape query
+    /// therefore carries `extversion` on every row, at no extra round trip, and a change
+    /// makes the caller probe again. The first version seen is only recorded: the probes
+    /// were made moments earlier on the same scrape. No rows, no answer, and nothing
+    /// exported that could be wrong.
+    fn extension_version_changed(&self, rows: &[PgRow]) -> bool {
+        let Some(current) = rows
+            .first()
+            .and_then(|row| row.try_get::<Option<String>, _>("extversion").ok())
+            .flatten()
+        else {
+            return false;
+        };
+        let mut state = self.extension_state_lock();
+        let ExtensionState::Installed { version } = &mut *state else {
+            return false;
+        };
+        let changed = version
+            .as_deref()
+            .is_some_and(|previous| previous != current);
+        *version = Some(current);
+        changed
     }
 
     async fn pg_statements_available(&self, pool: &PgPool) -> Result<bool> {
@@ -1107,6 +1150,17 @@ impl Collector for PgStatementsCollector {
                         .fetch_all(pool)
                         .await
                     {
+                        // The rows came from another extension version than the one
+                        // the probes were made against: probe again and read once more,
+                        // so not even this scrape is built on the old answers.
+                        Ok(rows) if !reprobed && self.extension_version_changed(&rows) => {
+                            reprobed = true;
+                            self.forget_schema_capabilities();
+                            debug!(
+                                collector = "pg_statements",
+                                "pg_stat_statements version changed - probing its columns again"
+                            );
+                        }
                         Ok(rows) => break rows,
                         // A column the cached probes promised is gone: the extension was
                         // replaced by another version between two scrapes. Ask the
@@ -1680,6 +1734,32 @@ mod tests {
         assert_eq!(
             collector.query_id_state.load(Ordering::Relaxed),
             query_id_support::UNKNOWN
+        );
+    }
+
+    /// Staying installed must not lose the version the probes belong to, and a version
+    /// is only held while the extension is installed.
+    #[test]
+    fn test_the_extension_version_lives_and_dies_with_the_installed_state() {
+        let collector = PgStatementsCollector::with_top_n(25);
+        collector.update_extension_state(true);
+        *collector.extension_state_lock() = ExtensionState::Installed {
+            version: Some("1.8".to_owned()),
+        };
+
+        collector.update_extension_state(true);
+        assert_eq!(
+            *collector.extension_state_lock(),
+            ExtensionState::Installed {
+                version: Some("1.8".to_owned())
+            }
+        );
+
+        collector.update_extension_state(false);
+        collector.update_extension_state(true);
+        assert_eq!(
+            *collector.extension_state_lock(),
+            ExtensionState::Installed { version: None }
         );
     }
 
