@@ -331,8 +331,80 @@ async fn start_throttled_vacuum(
     sqlx::query("SET vacuum_cost_limit = 1")
         .execute(&mut *conn)
         .await?;
+    // A backstop: if a test dies before it cancels the VACUUM, the server ends it.
+    sqlx::query("SET statement_timeout = '60s'")
+        .execute(&mut *conn)
+        .await?;
     let task = tokio::spawn(async move { sqlx::query(vacuum_sql).execute(&mut *conn).await });
     Ok((pid, task))
+}
+
+/// What the collector reported while a `VACUUM` of one table was running.
+struct VacuumObservation {
+    /// The `database:table` label pair was exported.
+    resolved: bool,
+    /// Every `database:table` pair seen, for the failure message.
+    labels: Vec<String>,
+    /// A table label in the watched database that is a bare relation OID.
+    numeric_label: Option<String>,
+}
+
+/// Scrapes until the collector reports `table_label` in `dbname`, the `VACUUM` ends, or
+/// 20 seconds pass. It returns instead of asserting, so the caller can always stop the
+/// `VACUUM` and drop the database first.
+async fn observe_vacuum<T>(
+    pool: &PgPool,
+    dbname: &str,
+    table_label: &str,
+    vacuum_task: &JoinHandle<T>,
+) -> Result<VacuumObservation> {
+    let collector = VacuumProgressCollector::new();
+    let registry = Registry::new();
+    collector.register_metrics(&registry)?;
+
+    let mut observation = VacuumObservation {
+        resolved: false,
+        labels: Vec::new(),
+        numeric_label: None,
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+
+    while Instant::now() < deadline {
+        collector.collect(pool).await?;
+
+        for family in registry.gather() {
+            if family.name() != "pg_vacuum_in_progress" {
+                continue;
+            }
+            for metric in family.get_metric() {
+                let label = |name: &str| {
+                    metric
+                        .get_label()
+                        .iter()
+                        .find(|label| label.name() == name)
+                        .map(|label| label.value().to_owned())
+                };
+                let (Some(database), Some(table)) = (label("database"), label("table")) else {
+                    continue;
+                };
+                observation.labels.push(format!("{database}:{table}"));
+
+                if database == dbname && table == table_label {
+                    observation.resolved = true;
+                } else if database == dbname && table.chars().all(|ch| ch.is_ascii_digit()) {
+                    observation.numeric_label = Some(table);
+                }
+            }
+        }
+
+        if observation.resolved || observation.numeric_label.is_some() || vacuum_task.is_finished()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    Ok(observation)
 }
 
 #[tokio::test]
@@ -361,8 +433,9 @@ async fn test_vacuum_progress_resolves_table_name_in_other_database() -> Result<
         .execute(test_db.pool())
         .await?;
 
-    // Throttled, this VACUUM would run for minutes, so it is cancelled below once the
-    // collector has seen it.
+    // Throttled, this VACUUM would run for minutes, so it is cancelled once the collector
+    // has seen it. Everything from here to the cleanup runs whatever the observation
+    // returned: an early return would leave the backend vacuuming and the database behind.
     let (vacuum_pid, vacuum_task) = start_throttled_vacuum(
         test_db.pool(),
         "VACUUM (VERBOSE) public.test_vacuum_progress_cross_db",
@@ -370,85 +443,42 @@ async fn test_vacuum_progress_resolves_table_name_in_other_database() -> Result<
     .await?;
 
     let pool = common::create_test_pool().await?;
-    let collector = VacuumProgressCollector::new();
-    let registry = Registry::new();
-    collector.register_metrics(&registry)?;
+    let observation = observe_vacuum(&pool, &dbname, &table_label, &vacuum_task).await;
 
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let mut observed_labels = Vec::new();
-    let mut resolved = false;
-
-    while Instant::now() < deadline {
-        collector.collect(&pool).await?;
-        let metric_families = registry.gather();
-
-        if let Some(metric_family) = metric_families
-            .iter()
-            .find(|family| family.name() == "pg_vacuum_in_progress")
-        {
-            for metric in metric_family.get_metric() {
-                let database = metric
-                    .get_label()
-                    .iter()
-                    .find(|label| label.name() == "database")
-                    .map(prometheus::proto::LabelPair::value);
-                let table = metric
-                    .get_label()
-                    .iter()
-                    .find(|label| label.name() == "table")
-                    .map(prometheus::proto::LabelPair::value);
-
-                if let (Some(database), Some(table)) = (database, table) {
-                    observed_labels.push(format!("{database}:{table}"));
-
-                    if database == dbname && table == table_label {
-                        resolved = true;
-                        break;
-                    }
-
-                    assert!(
-                        database != dbname || !table.chars().all(|ch| ch.is_ascii_digit()),
-                        "vacuum_progress should resolve the table label in {dbname}, got numeric relid label {table}"
-                    );
-                }
-            }
-        }
-
-        if resolved {
-            break;
-        }
-
-        if vacuum_task.is_finished() {
-            break;
-        }
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-
-    // Stop the throttled VACUUM. A cancelled statement (57014) is the expected outcome;
-    // any other failure, or a VACUUM that ended on its own before it was seen, is not.
-    sqlx::query("SELECT pg_cancel_backend($1)")
+    let cancel = sqlx::query("SELECT pg_cancel_backend($1)")
         .bind(vacuum_pid)
         .execute(&pool)
-        .await?;
-    let vacuum_outcome = vacuum_task
-        .await
-        .map_err(|error| anyhow!("vacuum task failed to join: {error}"))?;
-    let vacuum_was_cancelled = matches!(
-        &vacuum_outcome,
-        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("57014")
-    );
-
+        .await;
+    let vacuum_outcome = tokio::time::timeout(Duration::from_secs(30), vacuum_task).await;
     pool.close().await;
     test_db.cleanup().await?;
 
+    cancel?;
+    let vacuum_outcome = vacuum_outcome
+        .map_err(|_| anyhow!("the VACUUM did not stop within 30 s of being cancelled"))?
+        .map_err(|error| anyhow!("vacuum task failed to join: {error}"))?;
+    // Cancelled (57014) is the usual outcome. A VACUUM that finished by itself after it
+    // was seen is fine too; any other failure is not.
+    let vacuum_ended_cleanly = match &vacuum_outcome {
+        Ok(_) => true,
+        Err(sqlx::Error::Database(error)) => error.code().as_deref() == Some("57014"),
+        Err(_) => false,
+    };
+
+    let observation = observation?;
     assert!(
-        resolved,
-        "expected active vacuum metric for {dbname}:{table_label}; observed labels: {observed_labels:?}"
+        observation.numeric_label.is_none(),
+        "vacuum_progress should resolve the table label in {dbname}, got numeric relid label {:?}",
+        observation.numeric_label
     );
     assert!(
-        vacuum_was_cancelled,
-        "the throttled VACUUM should still have been running when it was cancelled, got: {vacuum_outcome:?}"
+        observation.resolved,
+        "expected active vacuum metric for {dbname}:{table_label}; observed labels: {:?}",
+        observation.labels
+    );
+    assert!(
+        vacuum_ended_cleanly,
+        "the VACUUM should have been cancelled or have finished, got: {vacuum_outcome:?}"
     );
 
     Ok(())
