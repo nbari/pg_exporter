@@ -7,6 +7,11 @@
 # CI runs this on the image it builds the way a release does. Counting entries is not
 # enough: two attestations that both describe the amd64 image, or one that holds an SBOM
 # and no provenance, would add up to the same numbers.
+#
+# This validates the index and the attestation manifests: which image each attestation
+# is declared for, and which statement types it declares. It does not open the statements
+# themselves, so it does not verify their contents or signatures; `gh attestation verify`
+# does that for a published image.
 set -euo pipefail
 
 if [[ $# -ne 1 || ! -f "$1/index.json" ]]; then

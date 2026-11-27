@@ -19,8 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ALTER EXTENSION pg_stat_statements UPDATE` from a version older than 1.9, until it was
   restarted. Under `pg_stat_statements.track = all` a statement that only runs inside a
   function was exported, and one that runs both ways had its two entries overwrite each
-  other. The scrape query now reports the extension version with its rows, and a change
-  makes the collector probe the columns again within the same scrape.
+  other. The column probes now record the extension version they looked at, the scrape
+  query reports the version with its rows, and rows from another version make the
+  collector probe again and read once more within the same scrape.
 - The `database` collector failed whenever a scrape overlapped a `DROP DATABASE`.
   `pg_database_size` raises `database "..." does not exist` for a database that was
   dropped after the statement had listed it, and that error failed the collector for
@@ -44,7 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to miss.**
 - On PostgreSQL 18 and later the vacuum ratio honours `autovacuum_vacuum_max_threshold`
   (the table reloption or the server setting). It was ignored, which under-reported how
-  due a table is once the cap is lower than `threshold + scale_factor * n_live_tup`.
+  due a table is once the cap is lower than `threshold + scale_factor * reltuples`.
 
 ### Security
 
@@ -60,11 +61,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other. `develop` moving between the two could otherwise release a commit the operator
   had not looked at. The recipe also follows its own run by a request id, not "the
   newest run of this commit".
-- crates.io is asked before anything is published: a version that already exists there
-  with other bytes stops the release while nothing is public. After the upload the
-  publish job compares the checksum crates.io reports with the `.crate` in the GitHub
-  release. Any registry answer other than "found" or "not found" is an error, not "not
-  published yet".
+- crates.io is asked before the image is pushed, and again right before the release is
+  created: a version that already exists there with other bytes stops the run while
+  nothing is public. After the upload the publish job compares the checksum crates.io
+  reports with the `.crate` in the GitHub release. Any registry answer other than "found"
+  or "not found" is an error, not "not published yet".
+- `scripts/setup-local-test-db.sh` no longer prints the DSN when it refuses a target;
+  a password in the query string or a keyword was shown in clear text. Connection
+  descriptions in its other messages mask a password wherever the DSN keeps it.
 - The test suite checks where its database connection really goes, in the Rust tests,
   in `scripts/setup-local-test-db.sh` and for the containers tests start themselves. The
   old guard looked for `localhost` anywhere in the DSN and did not see `PGHOSTADDR`, so

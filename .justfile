@@ -246,16 +246,17 @@ release:
     # The run is told which commit is meant: if develop moved in the meantime, its guard
     # refuses instead of releasing something else. It also carries a request id, shown in
     # its title, so the run followed below is the one dispatched here and never somebody
-    # else's run of the same commit, or simply "the latest".
+    # else's run of the same commit, or simply "the latest". The run must carry exactly
+    # that title, on develop, for this commit, and be the only one that does.
     request="$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM}"
     gh workflow run release.yml --ref develop -f sha="${sha}" -f request="${request}"
     run=""
     for _ in $(seq 30); do
-        run="$(gh run list --workflow release.yml --event workflow_dispatch --limit 20 --json databaseId,displayTitle --jq "[.[] | select(.displayTitle | contains(\"${request}\"))][0].databaseId // empty")"
+        run="$(gh run list --workflow release.yml --branch develop --event workflow_dispatch --limit 20 --json databaseId,displayTitle,headSha --jq "[.[] | select(.displayTitle == \"Release (${request})\" and .headSha == \"${sha}\")] | if length == 1 then .[0].databaseId else empty end")"
         [[ -z "${run}" ]] || break
         sleep 2
     done
-    [[ -n "${run}" ]] || { echo "The dispatched release run did not appear." >&2; exit 1; }
+    [[ -n "${run}" ]] || { echo "No single release run titled 'Release (${request})' appeared for ${sha}; look at the Actions page before trying again." >&2; exit 1; }
     gh run watch "${run}" --exit-status
     # develop's own Test & Build must have finished, and passed, before main can move.
     ci=""

@@ -72,7 +72,7 @@ pub struct StatUserTablesCollector {
     never_autoanalyzed: IntGaugeVec,         // 1 when the table has never been autoanalyzed
 
     // GOLD METRICS - Predict autovacuum triggers BEFORE they happen
-    // Ratio: n_dead_tup / (threshold + scale_factor * n_live_tup)
+    // Ratio: n_dead_tup / (threshold + scale_factor * reltuples), reltuples clamped at 0
     // Values: 0.0=clean, 0.8=warning, 1.0=trigger point, >1.0=overdue
     // Use these to prevent transaction ID wraparound emergencies!
     autovacuum_threshold_ratio: GaugeVec,    // THE critical metric for autovacuum monitoring

@@ -127,19 +127,20 @@ again and fails on a version that is already tagged.)
   `develop`, when `develop` is no longer at the commit `just release` asked for, or when
   the `CI OK` job that completed last for the commit did not succeed. The
   message says which.
-- **`just release` says "The dispatched release run did not appear".** Look at the
-  Actions page before doing anything else. The recipe looks for a run titled with the
-  request id it sent; a run it could not find may still exist, and if `develop` had
-  moved, its guard will have refused it.
+- **`just release` says no single release run appeared.** Look at the Actions page
+  before doing anything else. The recipe only follows a run that carries exactly the
+  title it asked for, on `develop`, for the commit it read; a run it could not match may
+  still exist, and if `develop` had moved, its guard will have refused it.
 - **CI is flaky.** Re-run the failed jobs in Test & Build until `CI OK` is green on the
   commit. The commit is tested on `sandbox` and again on `develop`; the most recently
   completed `CI OK` decides, for the guard and for the protected `main` alike.
 - **crates.io refuses the upload.** Trusted Publishing is probably not configured for
   `release.yml` (see [Settings](#settings)); fix it and re-run the failed job.
-- **crates.io already holds this version with other bytes.** The release job checks
-  that before it publishes anything and stops; bump the version. If it only shows up
-  after the upload, in the publish job, the GitHub release is already public: a crate
-  version cannot be replaced, so yank it and release the next version.
+- **crates.io already holds this version with other bytes.** The crate job checks that
+  before the image is pushed, and the release job again before it creates the release;
+  either stops the run with nothing public. Bump the version. If it only shows up after
+  the upload, in the publish job, the GitHub release is already public: a crate version
+  cannot be replaced, so yank it and release the next version.
 
 ## How the workflow is built
 
@@ -153,12 +154,13 @@ Release workflow (workflow_dispatch on develop)
                 --version must report the crate's version), the .deb (checked for its
                 version, binary and architecture), the .rpm (checked by its file name)
                 and the archive
- crate          cargo package and a publish dry run; the .crate is a release file
+ crate          cargo package and a publish dry run; crates.io must not already hold this
+                version with other bytes; the .crate is a release file
  image          after build and crate: a multi-platform image made from the two binaries
                 (the `prebuilt` stage of the Containerfile), run before it is pushed as
                 sha-<commit>, run again from the registry, attested
- release        the exact file set is checked; crates.io must not already hold this
-                version with other bytes; SHA256SUMS, a build-provenance attestation,
+ release        the exact file set is checked; crates.io is asked once more; SHA256SUMS,
+                a build-provenance attestation,
                 a draft GitHub release, then publish (this creates the tag at the tested
                 commit; it is marked Latest only when it is the highest version), then a
                 check that the tag is right and the published files, downloaded again,

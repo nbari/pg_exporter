@@ -204,6 +204,28 @@ jobs:
       - name: Check crates.io would accept it
         run: cargo publish --dry-run --locked
 
+      # A crate version can never be replaced. If crates.io already holds this version
+      # with other bytes, the run must stop before anything leaves it: the image job needs
+      # this job, so its push, the first thing anyone outside can see, waits for this.
+      # The same version with the same bytes is a re-run of this release and passes.
+      - name: Check crates.io can take this version
+        shell: bash
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+          PACKAGE: ${{ needs.guard.outputs.package }}
+        run: |
+          set -euo pipefail
+          built="$(sha256sum "target/package/${PACKAGE}-${VERSION}.crate" | cut -d' ' -f1)"
+          held="$(scripts/crates-io-checksum "${PACKAGE}" "${VERSION}")"
+          if [[ "${held}" == absent ]]; then
+            echo "${PACKAGE} ${VERSION} is not on crates.io yet."
+          elif [[ "${held}" == "${built}" ]]; then
+            echo "crates.io already holds this exact crate (${built})."
+          else
+            echo "::error::crates.io already holds ${PACKAGE} ${VERSION} as ${held}, but this run built ${built}; nothing was pushed or released. Bump the version."
+            exit 1
+          fi
+
       - name: Upload the crate
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
@@ -429,11 +451,10 @@ jobs:
             exit 1
           fi
 
-      # A crate version can never be replaced. If crates.io already holds this version
-      # with other bytes, the release must stop here, while nothing is public yet: after
-      # the tag exists it could only be discovered, not repaired. The same version with
-      # the same bytes is a re-run of this release and passes.
-      - name: Check crates.io can take this version
+      # The crate job asked this before the image was pushed. It is asked again here,
+      # right before the tag is created, because the builds in between take minutes and
+      # somebody else may have published the version meanwhile.
+      - name: Check crates.io can still take this version
         shell: bash
         run: |
           set -euo pipefail
@@ -444,7 +465,7 @@ jobs:
           elif [[ "${held}" == "${built}" ]]; then
             echo "crates.io already holds this exact crate (${built})."
           else
-            echo "::error::crates.io already holds ${PACKAGE} ${VERSION} as ${held}, but this run built ${built}; nothing was released. Bump the version."
+            echo "::error::crates.io now holds ${PACKAGE} ${VERSION} as ${held}, but this run built ${built}; no release or tag was created. Bump the version."
             exit 1
           fi
 
