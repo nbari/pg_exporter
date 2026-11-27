@@ -482,13 +482,20 @@ async fn run_budget_scenario(
     admin: &mut PgConnection,
     admin_options: &PgConnectOptions,
 ) -> Result<()> {
-    prepare_exporter_role_and_databases(&mut *admin, admin_options).await?;
-    assert_role_is_limited_monitor(&mut *admin).await?;
-
+    // The role connects to the same server as the admin, but through a DSN rebuilt from
+    // host and port alone. Check it before anything is created, and as an error, so the
+    // caller's cleanup still runs: the admin server may be a container or, without a
+    // container runtime, the server `PG_EXPORTER_DSN` names.
     let host = admin_options.get_host();
     let port = admin_options.get_port();
     let role_dsn = format!("postgresql://{EXPORTER_ROLE}@{host}:{port}/postgres?sslmode=disable");
-    common::test_dsn::ensure_local(&role_dsn);
+    anyhow::ensure!(
+        common::test_dsn::target_is_allowed(&role_dsn),
+        "the exporter role's DSN does not resolve to the test server (is PGHOSTADDR set?)"
+    );
+
+    prepare_exporter_role_and_databases(&mut *admin, admin_options).await?;
+    assert_role_is_limited_monitor(&mut *admin).await?;
 
     let role_options = PgConnectOptions::from_str(&role_dsn)?;
     assert_role_limit_is_immediate(&role_options).await?;

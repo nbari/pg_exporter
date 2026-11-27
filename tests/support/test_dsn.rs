@@ -36,21 +36,17 @@ pub fn test_dsn() -> String {
     // `temp_env`, in this same process. Reading under `temp_env`'s lock sees the real
     // environment, not that value.
     let no_changes: [(&str, Option<&str>); 0] = [];
-    let (dsn, allow_nonlocal, env_hostaddr) = temp_env::with_vars(no_changes, || {
+    let (dsn, hostaddr_is_set) = temp_env::with_vars(no_changes, || {
         (
             env::var("PG_EXPORTER_DSN").unwrap_or_else(|_| DEFAULT_TEST_DSN.to_owned()),
-            env::var("PG_EXPORTER_TEST_ALLOW_NONLOCAL")
-                .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE")),
-            env::var("PGHOSTADDR").ok(),
+            env::var("PGHOSTADDR").is_ok(),
         )
     });
 
-    let allowed = target_is_local(&dsn, env_hostaddr.as_deref())
-        || (allow_nonlocal && target_is_compose_service(&dsn, env_hostaddr.as_deref()));
-    if !allowed {
+    if !target_is_allowed(&dsn) {
         eprintln!("WARNING: the test database is not on this machine!");
         eprintln!("DSN: {}", dsn.replace(char::is_alphanumeric, "*"));
-        if env_hostaddr.is_some() {
+        if hostaddr_is_set {
             eprintln!("PGHOSTADDR is set and overrides the host name in the DSN.");
         }
         eprintln!("Tests should run against localhost only.");
@@ -63,6 +59,25 @@ pub fn test_dsn() -> String {
     }
 
     dsn
+}
+
+/// Whether the suite may connect to `dsn`: this machine, or, with the devcontainer
+/// opt-in, its compose service. This is the rule [`test_dsn`] applies to
+/// `PG_EXPORTER_DSN`; a test that derives another DSN from it (another role, other
+/// options) checks the result with this before it connects, because a `hostaddr` kept by
+/// the original and lost in the copy lets `PGHOSTADDR` decide again.
+#[must_use]
+pub fn target_is_allowed(dsn: &str) -> bool {
+    let no_changes: [(&str, Option<&str>); 0] = [];
+    let (allow_nonlocal, env_hostaddr) = temp_env::with_vars(no_changes, || {
+        (
+            env::var("PG_EXPORTER_TEST_ALLOW_NONLOCAL")
+                .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE")),
+            env::var("PGHOSTADDR").ok(),
+        )
+    });
+    target_is_local(dsn, env_hostaddr.as_deref())
+        || (allow_nonlocal && target_is_compose_service(dsn, env_hostaddr.as_deref()))
 }
 
 /// Refuses, by panicking, a DSN a test built itself (for a container it started) when a

@@ -407,6 +407,30 @@ async fn observe_vacuum<T>(
     Ok(observation)
 }
 
+/// Creates the table the cross-database test vacuums: large enough, and with enough
+/// dead rows, for a throttled `VACUUM` to stay observable.
+async fn prepare_vacuum_table(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        "CREATE TABLE test_vacuum_progress_cross_db (
+            id bigint PRIMARY KEY,
+            data text
+        )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO test_vacuum_progress_cross_db (id, data)
+         SELECT g, repeat('x', 200)
+         FROM generate_series(1, 250000) g",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("DELETE FROM test_vacuum_progress_cross_db WHERE id % 3 = 0")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_vacuum_progress_resolves_table_name_in_other_database() -> Result<()> {
     // The pool that observes and cancels comes first: once the database exists and the
@@ -417,24 +441,11 @@ async fn test_vacuum_progress_resolves_table_name_in_other_database() -> Result<
     let table_name = "test_vacuum_progress_cross_db";
     let table_label = format!("public.{table_name}");
 
-    sqlx::query(
-        "CREATE TABLE test_vacuum_progress_cross_db (
-            id bigint PRIMARY KEY,
-            data text
-        )",
-    )
-    .execute(test_db.pool())
-    .await?;
-    sqlx::query(
-        "INSERT INTO test_vacuum_progress_cross_db (id, data)
-         SELECT g, repeat('x', 200)
-         FROM generate_series(1, 250000) g",
-    )
-    .execute(test_db.pool())
-    .await?;
-    sqlx::query("DELETE FROM test_vacuum_progress_cross_db WHERE id % 3 = 0")
-        .execute(test_db.pool())
-        .await?;
+    if let Err(error) = prepare_vacuum_table(test_db.pool()).await {
+        pool.close().await;
+        test_db.cleanup().await?;
+        return Err(error);
+    }
 
     // Throttled, this VACUUM would run for minutes, so it is cancelled once the collector
     // has seen it. Everything from here to the cleanup runs whatever the observation

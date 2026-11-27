@@ -55,9 +55,9 @@ async fn start_postgres() -> Result<ContainerAsync<GenericImage>> {
 async fn container_dsn(container: &ContainerAsync<GenericImage>) -> Result<String> {
     let host = container.get_host().await?.to_string();
     let port = container.get_host_port_ipv4(5432.tcp()).await?;
-    Ok(format!(
-        "postgresql://postgres:postgres@{host}:{port}/postgres"
-    ))
+    let dsn = format!("postgresql://postgres:postgres@{host}:{port}/postgres");
+    common::test_dsn::ensure_local(&dsn);
+    Ok(dsn)
 }
 
 async fn connect_with_retry(opts: &PgConnectOptions) -> Result<PgConnection> {
