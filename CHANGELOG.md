@@ -25,8 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `database` collector failed whenever a scrape overlapped a `DROP DATABASE`.
   `pg_database_size` raises `database "..." does not exist` for a database that was
   dropped after the statement had listed it, and that error failed the collector for
-  the scrape. The statement is now read again, up to three more times; the dropped
-  database is simply no longer listed.
+  the scrape. When that happens the databases are now read one by one, so only the one
+  that vanished is left out. The normal case is still a single statement.
 - `pg_stat_user_tables_autovacuum_threshold_ratio` and
   `pg_stat_user_tables_autoanalyze_threshold_ratio` did not follow the server's own
   trigger point, in two ways:

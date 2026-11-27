@@ -1,5 +1,5 @@
 use super::super::common;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use pg_exporter::collectors::{
     Collector,
     database::{DatabaseCollector, catalog::DatabaseSubCollector},
@@ -188,9 +188,13 @@ async fn test_database_catalog_survives_databases_dropped_during_collection() ->
             )))
             .execute(&churn_pool)
             .await?;
-            sqlx::query(sqlx::AssertSqlSafe(&*format!("DROP DATABASE {name}")))
-                .execute(&churn_pool)
-                .await?;
+            // FORCE: other tests in this binary scrape every database, and one of their
+            // connections to this one would otherwise make the drop fail.
+            sqlx::query(sqlx::AssertSqlSafe(&*format!(
+                "DROP DATABASE {name} WITH (FORCE)"
+            )))
+            .execute(&churn_pool)
+            .await?;
         }
         Result::<()>::Ok(())
     });
@@ -209,7 +213,7 @@ async fn test_database_catalog_survives_databases_dropped_during_collection() ->
     }
     let churned = churn.await;
     pool.close().await;
-    churned??;
+    churned?.context("creating and dropping the churn databases failed")?;
 
     assert!(
         first_failure.is_none(),
