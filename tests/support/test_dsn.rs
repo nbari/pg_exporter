@@ -27,10 +27,18 @@ pub const DEFAULT_TEST_DSN: &str = "postgresql://postgres:postgres@localhost:543
 /// out with `PG_EXPORTER_TEST_ALLOW_NONLOCAL=1` (set in `.devcontainer/compose.yaml`).
 #[must_use]
 pub fn test_dsn() -> String {
-    let dsn = env::var("PG_EXPORTER_DSN").unwrap_or_else(|_| DEFAULT_TEST_DSN.to_owned());
-    let allow_nonlocal = env::var("PG_EXPORTER_TEST_ALLOW_NONLOCAL")
-        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE"));
-    let env_hostaddr = env::var("PGHOSTADDR").ok();
+    // Some unit tests set `PG_EXPORTER_DSN` to a made-up value for a moment with
+    // `temp_env`, in this same process. Reading under `temp_env`'s lock sees the real
+    // environment, not that value.
+    let no_changes: [(&str, Option<&str>); 0] = [];
+    let (dsn, allow_nonlocal, env_hostaddr) = temp_env::with_vars(no_changes, || {
+        (
+            env::var("PG_EXPORTER_DSN").unwrap_or_else(|_| DEFAULT_TEST_DSN.to_owned()),
+            env::var("PG_EXPORTER_TEST_ALLOW_NONLOCAL")
+                .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE")),
+            env::var("PGHOSTADDR").ok(),
+        )
+    });
 
     if !allow_nonlocal && !target_is_local(&dsn, env_hostaddr.as_deref()) {
         eprintln!("WARNING: the test database is not on this machine!");
